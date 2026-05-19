@@ -18,8 +18,27 @@ hand-written at `charts/cfzt-operator/` (D17) with NOTES.txt GitOps caveat
 Makefile `test` target runs envtest via `setup-envtest`; `helm-package` +
 `helm-sync-crds` targets added.
 
-Next: Slice 1 subtask 1 — define `CloudflareTunnel` types + CRD validation
-markers per `spec.md ## CRD model` and `## CRD validation`.
+Completed on 2026-05-19:
+- Subtask 2: `internal/cloudflare` interface + fake (client.go, tunnels.go,
+  real.go, fake.go, fake_test.go). cloudflare-go/v4 v4.6.0 added. SDK does
+  not surface tunnel `comment` field — D9 amended (see spec) to track
+  ownership via `status.tunnelId` rather than CF-side tag.
+- Subtask 3: `internal/naming/` names + ownership tag helpers.
+
+In progress:
+- Subtask 1: `CloudflareTunnel` types + CRD validation markers. Source +
+  generated CRD + tests staged in working tree, uncommitted. `make test`
+  (envtest) fails at CRD install: `x-kubernetes-validations estimated rule
+  cost total ... exceeds budget by factor of more than 100x`. Candidate
+  fixes — tighten `MaxLength` on every string field reachable from each
+  XValidation scope; replace image `:latest` regex with CEL
+  `endsWith(':latest')`; move namespace-equality CEL onto inner structs;
+  or drop spec-level CEL and enforce in controller. Also pending: review
+  of `hack/fix-schemaless.sh` ancillary helper.
+
+Next: resolve subtask 1 envtest blocker. Then Slice 1 subtask 4 (workload
+builders) — but note subtask 5 (controller) must adopt the amended D9
+flow (Get-by-ID + List-by-name + refuse-on-collision).
 
 ## 3. Slice plan
 
