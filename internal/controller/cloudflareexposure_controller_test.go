@@ -22,8 +22,10 @@ import (
 	"github.com/andrewreid/cfzt-operator/internal/origin"
 )
 
+const exposureTestNamespace = "media"
+
 var _ = Describe("CloudflareExposure Controller", func() {
-	const namespace = "media"
+	const namespace = exposureTestNamespace
 
 	var (
 		ctx                 context.Context
@@ -61,13 +63,13 @@ var _ = Describe("CloudflareExposure Controller", func() {
 
 	It("TestExposureCreate", func() {
 		tunnel := readyTunnel(ctx, tunnelReconciler, defaultTunnelName, defaultTunnelCFName)
-		exposure := createExposure(ctx, namespace, "jellyfin", tunnel.Name, "jellyfin.example.com", true, true)
+		exposure := createExposure(ctx, "jellyfin", tunnel.Name, "jellyfin.example.com", true)
 
 		reconcileExposure(ctx, exposureReconciler, exposure)
 		reconcileTunnel(ctx, tunnelReconciler, tunnel.Name)
 		reconcileExposure(ctx, exposureReconciler, exposure)
 
-		current := fetchExposure(ctx, namespace, exposure.Name)
+		current := fetchExposure(ctx, exposure.Name)
 		Expect(current.Status.Cloudflare.AccessApplicationId).NotTo(BeEmpty())
 		Expect(current.Status.Cloudflare.DnsRecordId).NotTo(BeEmpty())
 		Expect(current.Status.Cloudflare.PublicHostnameRouteHash).NotTo(BeEmpty())
@@ -78,19 +80,25 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(config.Ingress[0].Hostname).To(Equal("jellyfin.example.com"))
 		Expect(config.Ingress[0].Service).To(Equal("http://jellyfin.media.svc.cluster.local:8096"))
+		records, err := fakeCF.DNSRecords().List(ctx, "zone-example", "jellyfin.example.com", "CNAME")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(records).To(HaveLen(1))
+		Expect(records[0].Type).To(Equal("CNAME"))
+		Expect(records[0].Content).To(Equal(cfTunnel.Status.TunnelId + ".cfargotunnel.com"))
+		Expect(records[0].Proxied).To(BeTrue())
 	})
 
 	It("TestExposureDNSManagedOff", func() {
 		tunnel := readyTunnel(ctx, tunnelReconciler, "dns-off", "dns-off")
 		tunnel.Spec.Dns.Manage = false
 		Expect(k8sClient.Update(ctx, tunnel)).To(Succeed())
-		exposure := createExposure(ctx, namespace, "nodns", tunnel.Name, "nodns.example.com", true, true)
+		exposure := createExposure(ctx, "nodns", tunnel.Name, "nodns.example.com", true)
 
 		reconcileExposure(ctx, exposureReconciler, exposure)
 		reconcileTunnel(ctx, tunnelReconciler, tunnel.Name)
 		reconcileExposure(ctx, exposureReconciler, exposure)
 
-		current := fetchExposure(ctx, namespace, exposure.Name)
+		current := fetchExposure(ctx, exposure.Name)
 		Expect(current.Status.Cloudflare.DnsRecordId).To(BeEmpty())
 		Expect(meta.FindStatusCondition(current.Status.Conditions, ConditionReady).Status).To(Equal(metav1.ConditionTrue))
 		records, err := fakeCF.DNSRecords().List(ctx, "zone-example", "nodns.example.com", "CNAME")
@@ -100,13 +108,13 @@ var _ = Describe("CloudflareExposure Controller", func() {
 
 	It("TestExposureAccessDisabled", func() {
 		tunnel := readyTunnel(ctx, tunnelReconciler, "access-off", "access-off")
-		exposure := createExposure(ctx, namespace, "noauth", tunnel.Name, "noauth.example.com", false, true)
+		exposure := createExposure(ctx, "noauth", tunnel.Name, "noauth.example.com", false)
 
 		reconcileExposure(ctx, exposureReconciler, exposure)
 		reconcileTunnel(ctx, tunnelReconciler, tunnel.Name)
 		reconcileExposure(ctx, exposureReconciler, exposure)
 
-		current := fetchExposure(ctx, namespace, exposure.Name)
+		current := fetchExposure(ctx, exposure.Name)
 		Expect(current.Status.Cloudflare.AccessApplicationId).To(BeEmpty())
 		Expect(current.Status.Cloudflare.DnsRecordId).NotTo(BeEmpty())
 		Expect(meta.FindStatusCondition(current.Status.Conditions, ConditionReady).Status).To(Equal(metav1.ConditionTrue))
@@ -114,18 +122,18 @@ var _ = Describe("CloudflareExposure Controller", func() {
 
 	It("TestExposureAccessToggleOffDeletesOwnedApp", func() {
 		tunnel := readyTunnel(ctx, tunnelReconciler, "access-toggle", "access-toggle")
-		exposure := createExposure(ctx, namespace, "toggleauth", tunnel.Name, "toggleauth.example.com", true, true)
+		exposure := createExposure(ctx, "toggleauth", tunnel.Name, "toggleauth.example.com", true)
 		reconcileExposure(ctx, exposureReconciler, exposure)
 		reconcileTunnel(ctx, tunnelReconciler, tunnel.Name)
 		reconcileExposure(ctx, exposureReconciler, exposure)
 
-		current := fetchExposure(ctx, namespace, exposure.Name)
+		current := fetchExposure(ctx, exposure.Name)
 		Expect(current.Status.Cloudflare.AccessApplicationId).NotTo(BeEmpty())
 		current.Spec.Access.Enabled = false
 		Expect(k8sClient.Update(ctx, current)).To(Succeed())
 		reconcileExposure(ctx, exposureReconciler, current)
 
-		updated := fetchExposure(ctx, namespace, exposure.Name)
+		updated := fetchExposure(ctx, exposure.Name)
 		Expect(updated.Status.Cloudflare.AccessApplicationId).To(BeEmpty())
 		apps, err := fakeCF.AccessApplications().List(ctx, "toggleauth.example.com")
 		Expect(err).NotTo(HaveOccurred())
@@ -134,19 +142,19 @@ var _ = Describe("CloudflareExposure Controller", func() {
 
 	It("TestExposureDNSManageToggleOffDeletesOwnedRecord", func() {
 		tunnel := readyTunnel(ctx, tunnelReconciler, "dns-toggle", "dns-toggle")
-		exposure := createExposure(ctx, namespace, "toggledns", tunnel.Name, "toggledns.example.com", false, true)
+		exposure := createExposure(ctx, "toggledns", tunnel.Name, "toggledns.example.com", false)
 		reconcileExposure(ctx, exposureReconciler, exposure)
 		reconcileTunnel(ctx, tunnelReconciler, tunnel.Name)
 		reconcileExposure(ctx, exposureReconciler, exposure)
 
-		current := fetchExposure(ctx, namespace, exposure.Name)
+		current := fetchExposure(ctx, exposure.Name)
 		Expect(current.Status.Cloudflare.DnsRecordId).NotTo(BeEmpty())
 		latestTunnel := fetchTunnel(ctx, tunnel.Name)
 		latestTunnel.Spec.Dns.Manage = false
 		Expect(k8sClient.Update(ctx, latestTunnel)).To(Succeed())
 		reconcileExposure(ctx, exposureReconciler, current)
 
-		updated := fetchExposure(ctx, namespace, exposure.Name)
+		updated := fetchExposure(ctx, exposure.Name)
 		Expect(updated.Status.Cloudflare.DnsRecordId).To(BeEmpty())
 		records, err := fakeCF.DNSRecords().List(ctx, "zone-example", "toggledns.example.com", "CNAME")
 		Expect(err).NotTo(HaveOccurred())
@@ -155,14 +163,14 @@ var _ = Describe("CloudflareExposure Controller", func() {
 
 	It("TestExposureHostnameConflict", func() {
 		tunnel := readyTunnel(ctx, tunnelReconciler, "conflict-tunnel", "conflict-tunnel")
-		first := createExposure(ctx, namespace, "one", tunnel.Name, "same.example.com", true, true)
-		second := createExposure(ctx, namespace, "two", tunnel.Name, "same.example.com", true, true)
+		first := createExposure(ctx, "one", tunnel.Name, "same.example.com", true)
+		second := createExposure(ctx, "two", tunnel.Name, "same.example.com", true)
 
-		reconcileExposure(ctx, exposureReconciler, first)
-		reconcileExposure(ctx, exposureReconciler, second)
+		reconcileExposureExpectBackoff(ctx, exposureReconciler, first)
+		reconcileExposureExpectBackoff(ctx, exposureReconciler, second)
 
-		Expect(meta.FindStatusCondition(fetchExposure(ctx, namespace, first.Name).Status.Conditions, ConditionReady).Reason).To(Equal(ReasonHostnameConflict))
-		Expect(meta.FindStatusCondition(fetchExposure(ctx, namespace, second.Name).Status.Conditions, ConditionReady).Reason).To(Equal(ReasonHostnameConflict))
+		Expect(meta.FindStatusCondition(fetchExposure(ctx, first.Name).Status.Conditions, ConditionReady).Reason).To(Equal(ReasonHostnameConflict))
+		Expect(meta.FindStatusCondition(fetchExposure(ctx, second.Name).Status.Conditions, ConditionReady).Reason).To(Equal(ReasonHostnameConflict))
 	})
 
 	It("TestExposureForeignResource", func() {
@@ -171,24 +179,43 @@ var _ = Describe("CloudflareExposure Controller", func() {
 			Name:       "manual",
 			Domain:     "foreign.example.com",
 			PolicyUUID: defaultPolicyUUID,
-			Tags:       []string{"managed-by=someone-else"},
+			Tags:       []string{"managed-by=cfzt-operator", "source-uid=other-exposure"},
 		})
 		Expect(err).NotTo(HaveOccurred())
-		exposure := createExposure(ctx, namespace, "foreign", tunnel.Name, "foreign.example.com", true, true)
+		exposure := createExposure(ctx, "foreign", tunnel.Name, "foreign.example.com", true)
 
-		reconcileExposure(ctx, exposureReconciler, exposure)
+		reconcileExposureExpectBackoff(ctx, exposureReconciler, exposure)
 
-		current := fetchExposure(ctx, namespace, exposure.Name)
-		Expect(meta.FindStatusCondition(current.Status.Conditions, ConditionReady).Reason).To(Equal(ReasonHostnameConflict))
+		current := fetchExposure(ctx, exposure.Name)
+		Expect(meta.FindStatusCondition(current.Status.Conditions, ConditionReady).Reason).To(Equal(ReasonForeignResource))
+	})
+
+	It("TestExposureDNSForeignRecordConflict", func() {
+		tunnel := readyTunnel(ctx, tunnelReconciler, "foreign-dns", "foreign-dns")
+		_, err := fakeCF.DNSRecords().Create(ctx, cloudflare.DNSRecordInput{
+			ZoneID:  "zone-example",
+			Name:    "foreign-dns.example.com",
+			Type:    "CNAME",
+			Content: "manual.example.com",
+			Proxied: true,
+			Comment: "managed-by=cfzt-operator source-uid=other-exposure",
+		})
+		Expect(err).NotTo(HaveOccurred())
+		exposure := createExposure(ctx, "foreign-dns", tunnel.Name, "foreign-dns.example.com", false)
+
+		reconcileExposureExpectBackoff(ctx, exposureReconciler, exposure)
+
+		current := fetchExposure(ctx, exposure.Name)
+		Expect(meta.FindStatusCondition(current.Status.Conditions, ConditionReady).Reason).To(Equal(ReasonForeignResource))
 	})
 
 	It("TestExposureFinalizer", func() {
 		tunnel := readyTunnel(ctx, tunnelReconciler, "delete-exposure", "delete-exposure")
-		exposure := createExposure(ctx, namespace, "delete-me", tunnel.Name, "delete-me.example.com", true, true)
+		exposure := createExposure(ctx, "delete-me", tunnel.Name, "delete-me.example.com", true)
 		reconcileExposure(ctx, exposureReconciler, exposure)
 		reconcileTunnel(ctx, tunnelReconciler, tunnel.Name)
 		reconcileExposure(ctx, exposureReconciler, exposure)
-		current := fetchExposure(ctx, namespace, exposure.Name)
+		current := fetchExposure(ctx, exposure.Name)
 		Expect(current.Finalizers).To(ContainElement(naming.Finalizer))
 		appID := current.Status.Cloudflare.AccessApplicationId
 		recordID := current.Status.Cloudflare.DnsRecordId
@@ -217,7 +244,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 
 	It("TestTunnelBlockedByExposures", func() {
 		tunnel := readyTunnel(ctx, tunnelReconciler, "blocked-tunnel", "blocked-tunnel")
-		_ = createExposure(ctx, namespace, "still-here", tunnel.Name, "still-here.example.com", false, true)
+		_ = createExposure(ctx, "still-here", tunnel.Name, "still-here.example.com", false)
 
 		current := fetchTunnel(ctx, tunnel.Name)
 		Expect(k8sClient.Delete(ctx, current)).To(Succeed())
@@ -239,8 +266,8 @@ var _ = Describe("CloudflareExposure Controller", func() {
 
 	It("TestTunnelStatusUpdatePropagatesToExposures", func() {
 		tunnel := readyTunnel(ctx, tunnelReconciler, "watch-tunnel", "watch-tunnel")
-		first := createExposure(ctx, namespace, "watch-one", tunnel.Name, "watch-one.example.com", false, true)
-		second := createExposure(ctx, namespace, "watch-two", tunnel.Name, "watch-two.example.com", false, true)
+		first := createExposure(ctx, "watch-one", tunnel.Name, "watch-one.example.com", false)
+		second := createExposure(ctx, "watch-two", tunnel.Name, "watch-two.example.com", false)
 
 		requests := exposureReconciler.tunnelToExposures(ctx, tunnel)
 
@@ -252,7 +279,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 
 	It("TestExposureExternalOriginHostNetwork", func() {
 		tunnel := readyTunnel(ctx, tunnelReconciler, "external-origin", "external-origin")
-		exposure := createExposure(ctx, namespace, "homeassistant", tunnel.Name, "ha.example.com", false, false)
+		exposure := createExposure(ctx, "homeassistant", tunnel.Name, "ha.example.com", false)
 		exposure.Spec.Origin = &cfztv1alpha1.OriginSpec{Protocol: "http", Host: "192.168.1.50", Port: 8123}
 		Expect(k8sClient.Update(ctx, exposure)).To(Succeed())
 
@@ -264,19 +291,19 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		config, err := fakeCF.Configurations().Get(ctx, cfTunnel.Status.TunnelId)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(config.Ingress[0].Service).To(Equal("http://192.168.1.50:8123"))
-		Expect(meta.FindStatusCondition(fetchExposure(ctx, namespace, exposure.Name).Status.Conditions, ConditionReady).Status).To(Equal(metav1.ConditionTrue))
+		Expect(meta.FindStatusCondition(fetchExposure(ctx, exposure.Name).Status.Conditions, ConditionReady).Status).To(Equal(metav1.ConditionTrue))
 	})
 
 	It("TestSourceRefServiceSinglePort", func() {
 		tunnel := readyTunnel(ctx, tunnelReconciler, "source-service", "source-service")
 		createService(ctx, namespace, "jellyfin", 8096)
-		exposure := createExposure(ctx, namespace, "jellyfin-source", tunnel.Name, "jellyfin-source.example.com", false, true)
+		exposure := createExposure(ctx, "jellyfin-source", tunnel.Name, "jellyfin-source.example.com", false)
 		exposure.Spec.SourceRef = &cfztv1alpha1.SourceRef{ApiVersion: "v1", Kind: origin.ServiceKind, Name: "jellyfin"}
 		exposure.Spec.Origin = nil
 		Expect(k8sClient.Update(ctx, exposure)).To(Succeed())
 
 		reconcileExposure(ctx, exposureReconciler, exposure)
-		current := fetchExposure(ctx, namespace, exposure.Name)
+		current := fetchExposure(ctx, exposure.Name)
 		Expect(current.Spec.Origin).To(Equal(&cfztv1alpha1.OriginSpec{Protocol: "http", Host: "jellyfin.media.svc.cluster.local", Port: 8096}))
 		Expect(current.OwnerReferences).To(HaveLen(1))
 		Expect(current.OwnerReferences[0].Kind).To(Equal(origin.ServiceKind))
@@ -286,41 +313,44 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		config, err := fakeCF.Configurations().Get(ctx, fetchTunnel(ctx, tunnel.Name).Status.TunnelId)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(config.Ingress[0].Service).To(Equal("http://jellyfin.media.svc.cluster.local:8096"))
-		Expect(meta.FindStatusCondition(fetchExposure(ctx, namespace, exposure.Name).Status.Conditions, ConditionReady).Status).To(Equal(metav1.ConditionTrue))
+		Expect(meta.FindStatusCondition(fetchExposure(ctx, exposure.Name).Status.Conditions, ConditionReady).Status).To(Equal(metav1.ConditionTrue))
 	})
 
 	It("TestSourceRefServiceMultiPortRejected", func() {
 		tunnel := readyTunnel(ctx, tunnelReconciler, "source-multiport", "source-multiport")
 		createService(ctx, namespace, "multiport", 8080, 9090)
-		exposure := createExposure(ctx, namespace, "multiport-source", tunnel.Name, "multiport-source.example.com", false, true)
+		exposure := createExposure(ctx, "multiport-source", tunnel.Name, "multiport-source.example.com", false)
 		exposure.Spec.SourceRef = &cfztv1alpha1.SourceRef{ApiVersion: "v1", Kind: origin.ServiceKind, Name: "multiport"}
 		exposure.Spec.Origin = nil
 		Expect(k8sClient.Update(ctx, exposure)).To(Succeed())
 
 		reconcileExposure(ctx, exposureReconciler, exposure)
 
-		ready := meta.FindStatusCondition(fetchExposure(ctx, namespace, exposure.Name).Status.Conditions, ConditionReady)
+		ready := meta.FindStatusCondition(fetchExposure(ctx, exposure.Name).Status.Conditions, ConditionReady)
 		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
 		Expect(ready.Reason).To(Equal(ReasonOriginInvalid))
 		Expect(ready.Message).To(ContainSubstring("has 2 ports"))
 	})
 
-	It("TestSourceRefDeletionCascades", func() {
+	It("TestSourceRefOwnerReferenceAndFinalizerCleanup", func() {
 		tunnel := readyTunnel(ctx, tunnelReconciler, "source-delete", "source-delete")
 		svc := createService(ctx, namespace, "delete-source", 8096)
-		exposure := createExposure(ctx, namespace, "delete-source-exp", tunnel.Name, "delete-source.example.com", true, true)
+		exposure := createExposure(ctx, "delete-source-exp", tunnel.Name, "delete-source.example.com", true)
 		exposure.Spec.SourceRef = &cfztv1alpha1.SourceRef{ApiVersion: "v1", Kind: origin.ServiceKind, Name: svc.Name}
 		exposure.Spec.Origin = nil
 		Expect(k8sClient.Update(ctx, exposure)).To(Succeed())
 		reconcileExposure(ctx, exposureReconciler, exposure)
-		current := fetchExposure(ctx, namespace, exposure.Name)
+		current := fetchExposure(ctx, exposure.Name)
 		Expect(current.OwnerReferences).To(HaveLen(1))
 		reconcileTunnel(ctx, tunnelReconciler, tunnel.Name)
 		reconcileExposure(ctx, exposureReconciler, current)
-		current = fetchExposure(ctx, namespace, exposure.Name)
+		current = fetchExposure(ctx, exposure.Name)
 		Expect(current.Status.Cloudflare.AccessApplicationId).NotTo(BeEmpty())
 
 		Expect(k8sClient.Delete(ctx, svc)).To(Succeed())
+		// Envtest does not run the Kubernetes garbage collector. The source
+		// ownerReference above is the cascade contract; this explicit delete
+		// drives the finalizer cleanup path that GC would trigger in-cluster.
 		Expect(k8sClient.Delete(ctx, current)).To(Succeed())
 		reconcileExposure(ctx, exposureReconciler, current)
 
@@ -370,23 +400,22 @@ var _ = Describe("CloudflareExposure Controller", func() {
 
 func readyTunnel(ctx context.Context, reconciler *CloudflareTunnelReconciler, name, tunnelName string) *cfztv1alpha1.CloudflareTunnel {
 	tunnel := createTunnel(ctx, name, tunnelName)
-	createCredentials(ctx, "cfzt-system", "cloudflare-credentials")
+	createCredentials(ctx)
 	reconcileTunnel(ctx, reconciler, tunnel.Name)
 	markTunnelDaemonSetReady(ctx, tunnel.Name)
 	reconcileTunnel(ctx, reconciler, tunnel.Name)
 	return fetchTunnel(ctx, tunnel.Name)
 }
 
-func createExposure(ctx context.Context, namespace, name, tunnelName, hostname string, accessEnabled, dnsManaged bool) *cfztv1alpha1.CloudflareExposure {
-	_ = dnsManaged
+func createExposure(ctx context.Context, name, tunnelName, hostname string, accessEnabled bool) *cfztv1alpha1.CloudflareExposure {
 	exposure := &cfztv1alpha1.CloudflareExposure{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: exposureTestNamespace},
 		Spec: cfztv1alpha1.CloudflareExposureSpec{
 			Hostname:  hostname,
 			TunnelRef: cfztv1alpha1.TunnelRef{Name: tunnelName},
 			Origin: &cfztv1alpha1.OriginSpec{
 				Protocol: "http",
-				Host:     name + "." + namespace + ".svc.cluster.local",
+				Host:     name + "." + exposureTestNamespace + ".svc.cluster.local",
 				Port:     8096,
 			},
 			Access: cfztv1alpha1.AccessSpec{
@@ -426,15 +455,21 @@ func httpRoute(namespace, name, hostname string) *unstructured.Unstructured {
 	return route
 }
 
-func fetchExposure(ctx context.Context, namespace, name string) *cfztv1alpha1.CloudflareExposure {
+func fetchExposure(ctx context.Context, name string) *cfztv1alpha1.CloudflareExposure {
 	exposure := &cfztv1alpha1.CloudflareExposure{}
-	Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, exposure)).To(Succeed())
+	Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: exposureTestNamespace, Name: name}, exposure)).To(Succeed())
 	return exposure
 }
 
 func reconcileExposure(ctx context.Context, reconciler *CloudflareExposureReconciler, exposure *cfztv1alpha1.CloudflareExposure) {
 	_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: exposure.Namespace, Name: exposure.Name}})
 	Expect(err).NotTo(HaveOccurred())
+}
+
+func reconcileExposureExpectBackoff(ctx context.Context, reconciler *CloudflareExposureReconciler, exposure *cfztv1alpha1.CloudflareExposure) {
+	result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: exposure.Namespace, Name: exposure.Name}})
+	Expect(result).To(Equal(reconcile.Result{}))
+	Expect(err).To(HaveOccurred())
 }
 
 func markTunnelDaemonSetReady(ctx context.Context, tunnelName string) {

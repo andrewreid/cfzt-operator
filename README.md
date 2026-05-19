@@ -1,135 +1,102 @@
 # cfzt-operator
-// TODO(user): Add simple overview of use/purpose
 
-## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+Kubernetes operator for publishing selected workloads through Cloudflare Tunnel,
+DNS, and Access. The MVP exposes two CRDs:
 
-## Getting Started
+- `CloudflareTunnel` creates or tracks a remotely-managed Cloudflare tunnel,
+  stores its token in Kubernetes, and runs a `cloudflared` DaemonSet.
+- `CloudflareExposure` publishes one hostname through that tunnel, optionally
+  creating the proxied DNS CNAME and Cloudflare Access application.
 
-### Prerequisites
-- go version v1.24.6+
-- docker version 17.03+.
-- kubectl version v1.11.3+.
-- Access to a Kubernetes v1.11.3+ cluster.
+The CRD contract and implementation decisions live in [spec.md](spec.md).
 
-### To Deploy on the cluster
-**Build and push your image to the location specified by `IMG`:**
+## Status
 
-```sh
-make docker-build docker-push IMG=<some-registry>/cfzt-operator:tag
-```
+MVP slices are implemented for first GitHub CI validation. Live Cloudflare smoke
+testing still requires a Kubernetes cluster, Cloudflare account credentials, and
+a hostname in a zone the token can manage.
 
-**NOTE:** This image ought to be published in the personal registry you specified.
-And it is required to have access to pull the image from the working environment.
-Make sure you have the proper permission to the registry if the above commands don’t work.
+## Install
 
-**Install the CRDs into the cluster:**
+The Helm chart is hand-written under `charts/cfzt-operator/` and includes CRDs
+in `charts/cfzt-operator/crds/`.
 
 ```sh
-make install
+helm install cfzt-operator charts/cfzt-operator \
+  --namespace cfzt-system \
+  --create-namespace
 ```
 
-**Deploy the Manager to the cluster with the image specified by `IMG`:**
+Create the credentials Secret in the namespace used by
+`CloudflareTunnel.spec.cloudflared.namespace`:
 
 ```sh
-make deploy IMG=<some-registry>/cfzt-operator:tag
+kubectl -n cfzt-system create secret generic cloudflare-credentials \
+  --from-literal=accountId='<cloudflare-account-id>' \
+  --from-literal=apiToken='<cloudflare-api-token>'
 ```
 
-> **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
-privileges or be logged in as admin.
+Minimum token scopes:
 
-**Create instances of your solution**
-You can apply the samples (examples) from the config/sample:
+- Account / Cloudflare Tunnel: Edit
+- Account / Access: Apps and Policies: Edit
+- Zone / DNS: Edit, only when `dns.manage: true`
+
+## Example
+
+```yaml
+apiVersion: cfzt.reid.ee/v1alpha1
+kind: CloudflareTunnel
+metadata:
+  name: homelab
+spec:
+  tunnelName: homelab-rke2
+  credentialsSecretRef:
+    name: cloudflare-credentials
+  cloudflared:
+    namespace: cfzt-system
+---
+apiVersion: cfzt.reid.ee/v1alpha1
+kind: CloudflareExposure
+metadata:
+  name: jellyfin
+  namespace: media
+spec:
+  tunnelRef:
+    name: homelab
+  hostname: jellyfin.example.com
+  origin:
+    protocol: http
+    host: jellyfin.media.svc.cluster.local
+    port: 8096
+  access:
+    enabled: true
+    policyRef:
+      uuid: 00000000-0000-4000-8000-000000000001
+```
+
+## Development
+
+Use `rtk` in this repository:
 
 ```sh
-kubectl apply -k config/samples/
+rtk make lint
+rtk go test ./...
+rtk make test
+rtk helm lint charts/cfzt-operator
+rtk helm template cfzt-operator charts/cfzt-operator --namespace cfzt-system
 ```
 
->**NOTE**: Ensure that the samples has default values to test it out.
+`rtk make test` regenerates manifests/deepcopy, runs `go fmt`, `go vet`, and
+envtest-backed unit tests. Generated drift must be committed with API changes.
 
-### To Uninstall
-**Delete the instances (CRs) from the cluster:**
+## CRD Upgrades
 
-```sh
-kubectl delete -k config/samples/
-```
-
-**Delete the APIs(CRDs) from the cluster:**
-
-```sh
-make uninstall
-```
-
-**UnDeploy the controller from the cluster:**
-
-```sh
-make undeploy
-```
-
-## Project Distribution
-
-Following the options to release and provide this solution to the users.
-
-### By providing a bundle with all YAML files
-
-1. Build the installer for the image built and published in the registry:
-
-```sh
-make build-installer IMG=<some-registry>/cfzt-operator:tag
-```
-
-**NOTE:** The makefile target mentioned above generates an 'install.yaml'
-file in the dist directory. This file contains all the resources built
-with Kustomize, which are necessary to install this project without its
-dependencies.
-
-2. Using the installer
-
-Users can just run 'kubectl apply -f <URL for YAML BUNDLE>' to install
-the project, i.e.:
-
-```sh
-kubectl apply -f https://raw.githubusercontent.com/<org>/cfzt-operator/<tag or branch>/dist/install.yaml
-```
-
-### By providing a Helm Chart
-
-1. Build the chart using the optional helm plugin
-
-```sh
-kubebuilder edit --plugins=helm/v2-alpha
-```
-
-2. See that a chart was generated under 'dist/chart', and users
-can obtain this solution from there.
-
-**NOTE:** If you change the project, you need to update the Helm Chart
-using the same command above to sync the latest changes. Furthermore,
-if you create webhooks, you need to use the above command with
-the '--force' flag and manually ensure that any custom configuration
-previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml'
-is manually re-applied afterwards.
-
-## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
-
-**NOTE:** Run `make help` for more information on all potential `make` targets
-
-More information can be found via the [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
+CRDs are installed from `charts/cfzt-operator/crds/`. Helm 3 does not upgrade
+installed CRDs during `helm upgrade`. While the API is `v1alpha1`, breaking CRD
+changes are allowed without conversion webhooks; export manifests, uninstall,
+install the new chart, then reapply resources.
 
 ## License
 
-Copyright 2026.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-
+Apache-2.0. See [LICENSE](LICENSE) when present, or the source file headers.

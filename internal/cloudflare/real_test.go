@@ -3,10 +3,13 @@ package cloudflare
 import "testing"
 
 func TestLimiterForTokenShared(t *testing.T) {
-	if limiterForToken("token-a") != limiterForToken("token-a") {
+	first := limiterForToken("token-a")
+	second := limiterForToken("token-a")
+	other := limiterForToken("token-b")
+	if first != second {
 		t.Fatalf("same API token did not reuse limiter")
 	}
-	if limiterForToken("token-a") == limiterForToken("token-b") {
+	if first == other {
 		t.Fatalf("different API tokens reused limiter")
 	}
 }

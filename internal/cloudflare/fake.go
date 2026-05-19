@@ -270,7 +270,7 @@ type fakeZones struct {
 func (z *fakeZones) List(_ context.Context) ([]Zone, error) {
 	z.fc.mu.Lock()
 	defer z.fc.mu.Unlock()
-	var out []Zone
+	out := make([]Zone, 0, len(z.fc.zones))
 	for _, zone := range z.fc.zones {
 		out = append(out, *zone)
 	}

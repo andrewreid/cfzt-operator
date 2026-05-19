@@ -30,7 +30,7 @@ func FromService(exposure *cfztv1alpha1.CloudflareExposure, svc *corev1.Service)
 	}
 	if port == 0 {
 		if len(svc.Spec.Ports) != 1 {
-			return nil, fmt.Errorf("Service %s/%s has %d ports; origin.port is required when a Service has zero or multiple ports", svc.Namespace, svc.Name, len(svc.Spec.Ports))
+			return nil, fmt.Errorf("service %s/%s has %d ports; origin.port is required when a Service has zero or multiple ports", svc.Namespace, svc.Name, len(svc.Spec.Ports))
 		}
 		port = svc.Spec.Ports[0].Port
 	}

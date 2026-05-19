@@ -186,7 +186,7 @@ func main() {
 	if err := (&controller.CloudflareTunnelReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("cloudflaretunnel-controller"),
+		Recorder: mgr.GetEventRecorder("cloudflaretunnel-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "cloudflaretunnel")
 		os.Exit(1)
@@ -203,7 +203,7 @@ func main() {
 	if err := (&controller.CloudflareExposureReconciler{
 		Client:                 mgr.GetClient(),
 		Scheme:                 mgr.GetScheme(),
-		Recorder:               mgr.GetEventRecorderFor("cloudflareexposure-controller"),
+		Recorder:               mgr.GetEventRecorder("cloudflareexposure-controller"),
 		HTTPRouteSourceEnabled: httpRouteSourceEnabled,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "cloudflareexposure")

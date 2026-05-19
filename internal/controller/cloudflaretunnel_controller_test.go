@@ -46,7 +46,7 @@ var _ = Describe("CloudflareTunnel Controller", func() {
 
 	It("TestTunnelCreate", func() {
 		tunnel := createTunnel(ctx, "create-tunnel", "homelab-rke2")
-		createCredentials(ctx, namespace, "cloudflare-credentials")
+		createCredentials(ctx)
 
 		reconcileTunnel(ctx, reconciler, tunnel.Name)
 
@@ -77,7 +77,7 @@ var _ = Describe("CloudflareTunnel Controller", func() {
 		cfTunnel, err := fakeCF.Tunnels().Create(ctx, cloudflare.CreateTunnelInput{Name: "adopt-me", ConfigSrc: "cloudflare"})
 		Expect(err).NotTo(HaveOccurred())
 		tunnel := createTunnel(ctx, "adopt-tunnel", "adopt-me")
-		createCredentials(ctx, namespace, "cloudflare-credentials")
+		createCredentials(ctx)
 		tunnel.Status.TunnelId = cfTunnel.ID
 		Expect(k8sClient.Status().Update(ctx, tunnel)).To(Succeed())
 
@@ -91,7 +91,7 @@ var _ = Describe("CloudflareTunnel Controller", func() {
 		_, err := fakeCF.Tunnels().Create(ctx, cloudflare.CreateTunnelInput{Name: "occupied-name", ConfigSrc: "cloudflare"})
 		Expect(err).NotTo(HaveOccurred())
 		tunnel := createTunnel(ctx, "foreign-tunnel", "occupied-name")
-		createCredentials(ctx, namespace, "cloudflare-credentials")
+		createCredentials(ctx)
 
 		reconcileTunnel(ctx, reconciler, tunnel.Name)
 
@@ -102,9 +102,45 @@ var _ = Describe("CloudflareTunnel Controller", func() {
 		Expect(ready.Reason).To(Equal(ReasonForeignTunnel))
 	})
 
+	It("TestTunnelStaleStatusIDRecreates", func() {
+		tunnel := createTunnel(ctx, "stale-id-tunnel", "stale-id")
+		createCredentials(ctx)
+		tunnel.Status.TunnelId = "missing-cloudflare-tunnel"
+		Expect(k8sClient.Status().Update(ctx, tunnel)).To(Succeed())
+
+		reconcileTunnel(ctx, reconciler, tunnel.Name)
+
+		current := fetchTunnel(ctx, tunnel.Name)
+		Expect(current.Status.TunnelId).NotTo(BeEmpty())
+		Expect(current.Status.TunnelId).NotTo(Equal("missing-cloudflare-tunnel"))
+		cfTunnel, err := fakeCF.Tunnels().Get(ctx, current.Status.TunnelId)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfTunnel.Name).To(Equal("stale-id"))
+	})
+
+	It("TestTunnelFinalizerBlocksForeignStatusID", func() {
+		cfTunnel, err := fakeCF.Tunnels().Create(ctx, cloudflare.CreateTunnelInput{Name: "actual-foreign", ConfigSrc: "cloudflare"})
+		Expect(err).NotTo(HaveOccurred())
+		tunnel := createTunnel(ctx, "foreign-delete", "wanted-name")
+		createCredentials(ctx)
+		tunnel.Finalizers = []string{naming.Finalizer}
+		Expect(k8sClient.Update(ctx, tunnel)).To(Succeed())
+		tunnel.Status.TunnelId = cfTunnel.ID
+		Expect(k8sClient.Status().Update(ctx, tunnel)).To(Succeed())
+
+		Expect(k8sClient.Delete(ctx, tunnel)).To(Succeed())
+		reconcileTunnel(ctx, reconciler, tunnel.Name)
+
+		blocked := fetchTunnel(ctx, tunnel.Name)
+		Expect(blocked.Finalizers).To(ContainElement(naming.Finalizer))
+		Expect(meta.FindStatusCondition(blocked.Status.Conditions, ConditionReady).Reason).To(Equal(ReasonForeignTunnel))
+		_, err = fakeCF.Tunnels().Get(ctx, cfTunnel.ID)
+		Expect(err).NotTo(HaveOccurred())
+	})
+
 	It("TestTunnelTokenRotation", func() {
 		tunnel := createTunnel(ctx, "rotate-tunnel", "rotate-me")
-		createCredentials(ctx, namespace, "cloudflare-credentials")
+		createCredentials(ctx)
 		reconcileTunnel(ctx, reconciler, tunnel.Name)
 
 		current := fetchTunnel(ctx, tunnel.Name)
@@ -122,7 +158,7 @@ var _ = Describe("CloudflareTunnel Controller", func() {
 
 	It("TestTunnelFinalizerNoop", func() {
 		tunnel := createTunnel(ctx, "delete-tunnel", "delete-me")
-		createCredentials(ctx, namespace, "cloudflare-credentials")
+		createCredentials(ctx)
 		reconcileTunnel(ctx, reconciler, tunnel.Name)
 		current := fetchTunnel(ctx, tunnel.Name)
 		Expect(current.Finalizers).To(ContainElement(naming.Finalizer))
@@ -153,7 +189,7 @@ var _ = Describe("CloudflareTunnel Controller", func() {
 		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
 		Expect(ready.Reason).To(Equal(ReasonCredentialsMissing))
 
-		createCredentials(ctx, namespace, "cloudflare-credentials")
+		createCredentials(ctx)
 		reconcileTunnel(ctx, reconciler, tunnel.Name)
 		ds := &appsv1.DaemonSet{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: naming.DaemonSetName(tunnel.Name)}, ds)).To(Succeed())
@@ -174,7 +210,9 @@ func ensureNamespace(ctx context.Context, name string) {
 	}
 }
 
-func createCredentials(ctx context.Context, namespace, name string) {
+func createCredentials(ctx context.Context) {
+	const namespace = "cfzt-system"
+	const name = "cloudflare-credentials"
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Data: map[string][]byte{

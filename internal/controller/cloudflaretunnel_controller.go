@@ -28,7 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -52,7 +52,7 @@ type CloudflareTunnelReconciler struct {
 	client.Client
 	Scheme                  *runtime.Scheme
 	CloudflareClientFactory CloudflareClientFactory
-	Recorder                record.EventRecorder
+	Recorder                events.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=cfzt.reid.ee,resources=cloudflaretunnels,verbs=get;list;watch;create;update;patch;delete
@@ -61,6 +61,7 @@ type CloudflareTunnelReconciler struct {
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 func (r *CloudflareTunnelReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
@@ -161,6 +162,15 @@ func (r *CloudflareTunnelReconciler) reconcileDelete(ctx context.Context, tunnel
 			_ = r.Status().Update(ctx, tunnel)
 			return nil
 		}
+		cfTunnel, err := cfClient.Tunnels().Get(ctx, tunnel.Status.TunnelId)
+		if err != nil && !errors.Is(err, cloudflare.ErrNotFound) {
+			return err
+		}
+		if err == nil && cfTunnel.Name != tunnel.Spec.TunnelName {
+			setCondition(&tunnel.Status.Conditions, ConditionReady, metav1.ConditionFalse, ReasonForeignTunnel, "tracked Cloudflare tunnel name does not match spec.tunnelName", tunnel.Generation)
+			setCondition(&tunnel.Status.Conditions, ConditionProgressing, metav1.ConditionTrue, ReasonForeignTunnel, "deletion blocked to avoid deleting a foreign Cloudflare tunnel", tunnel.Generation)
+			return r.Status().Update(ctx, tunnel)
+		}
 		err = cfClient.Tunnels().Delete(ctx, tunnel.Status.TunnelId)
 		if err != nil && !errors.Is(err, cloudflare.ErrNotFound) {
 			return err
@@ -242,13 +252,15 @@ var errForeignTunnel = fmt.Errorf("foreign tunnel")
 func (r *CloudflareTunnelReconciler) reconcileCloudflareTunnel(ctx context.Context, tunnel *cfztv1alpha1.CloudflareTunnel, cfClient cloudflare.Client) (*cloudflare.Tunnel, bool, error) {
 	if tunnel.Status.TunnelId != "" {
 		cfTunnel, err := cfClient.Tunnels().Get(ctx, tunnel.Status.TunnelId)
-		if err != nil {
+		if errors.Is(err, cloudflare.ErrNotFound) {
+			tunnel.Status.TunnelId = ""
+		} else if err != nil {
 			return nil, false, err
-		}
-		if cfTunnel.Name != tunnel.Spec.TunnelName {
+		} else if cfTunnel.Name != tunnel.Spec.TunnelName {
 			return nil, false, fmt.Errorf("tracked Cloudflare tunnel %s has name %q, want %q", cfTunnel.ID, cfTunnel.Name, tunnel.Spec.TunnelName)
+		} else {
+			return cfTunnel, false, nil
 		}
-		return cfTunnel, false, nil
 	}
 
 	existing, err := cfClient.Tunnels().List(ctx, cloudflare.ListTunnelsFilter{Name: tunnel.Spec.TunnelName})
@@ -395,7 +407,7 @@ func (r *CloudflareTunnelReconciler) event(tunnel *cfztv1alpha1.CloudflareTunnel
 	if r.Recorder == nil {
 		return
 	}
-	r.Recorder.Eventf(tunnel, eventType, reason, messageFmt, args...)
+	r.Recorder.Eventf(tunnel, nil, eventType, reason, reason, messageFmt, args...)
 }
 
 // SetupWithManager sets up the controller with the Manager.

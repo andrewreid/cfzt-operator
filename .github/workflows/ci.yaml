@@ -10,7 +10,6 @@ permissions:
 
 env:
   GO_VERSION: "1.26"
-  GOLANGCI_VERSION: "v2.12.2"
   HELM_VERSION: "v3.16.0"
 
 jobs:

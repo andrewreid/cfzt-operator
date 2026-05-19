@@ -33,8 +33,8 @@ func ParseOwnershipTag(s string) (types.UID, bool) {
 			hasManagedBy = true
 			continue
 		}
-		if strings.HasPrefix(f, tagSourceUID) {
-			uid = strings.TrimPrefix(f, tagSourceUID)
+		if value, ok := strings.CutPrefix(f, tagSourceUID); ok {
+			uid = value
 		}
 	}
 

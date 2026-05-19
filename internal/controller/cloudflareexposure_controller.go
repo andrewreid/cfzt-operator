@@ -31,7 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -51,7 +51,7 @@ type CloudflareExposureReconciler struct {
 	client.Client
 	Scheme                  *runtime.Scheme
 	CloudflareClientFactory CloudflareClientFactory
-	Recorder                record.EventRecorder
+	Recorder                events.EventRecorder
 	HTTPRouteSourceEnabled  bool
 }
 
@@ -64,6 +64,7 @@ type CloudflareExposureReconciler struct {
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 func (r *CloudflareExposureReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
@@ -84,7 +85,7 @@ func (r *CloudflareExposureReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	if !exposure.DeletionTimestamp.IsZero() {
-		return ctrl.Result{}, r.reconcileDelete(ctx, &exposure, &tunnel, cfClient)
+		return ctrl.Result{}, r.reconcileDelete(ctx, &exposure, cfClient)
 	}
 
 	if controllerutil.AddFinalizer(&exposure, naming.Finalizer) {
@@ -111,7 +112,7 @@ func (r *CloudflareExposureReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, err
 	} else if conflict {
 		r.event(&exposure, corev1.EventTypeWarning, EventHostnameConflict, "Hostname %s is claimed by more than one CloudflareExposure", exposure.Spec.Hostname)
-		return ctrl.Result{}, r.setExposureStatus(ctx, &exposure, exposure.Status.Cloudflare, false, ReasonHostnameConflict, "hostname is claimed by more than one CloudflareExposure")
+		return r.setExposureStatusAndBackoff(ctx, &exposure, exposure.Status.Cloudflare, ReasonHostnameConflict, "hostname is claimed by more than one CloudflareExposure")
 	}
 
 	status := exposure.Status.Cloudflare
@@ -120,10 +121,10 @@ func (r *CloudflareExposureReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if err != nil {
 			if errors.Is(err, errHostnameConflict) {
 				r.event(&exposure, corev1.EventTypeWarning, EventHostnameConflict, "Access application hostname conflict for %s", exposure.Spec.Hostname)
-				return ctrl.Result{}, r.setExposureStatus(ctx, &exposure, status, false, ReasonHostnameConflict, err.Error())
+				return r.setExposureStatusAndBackoff(ctx, &exposure, status, ReasonHostnameConflict, err.Error())
 			}
 			if errors.Is(err, errForeignResource) {
-				return ctrl.Result{}, r.setExposureStatus(ctx, &exposure, status, false, ReasonForeignResource, err.Error())
+				return r.setExposureStatusAndBackoff(ctx, &exposure, status, ReasonForeignResource, err.Error())
 			}
 			return ctrl.Result{}, err
 		}
@@ -143,10 +144,10 @@ func (r *CloudflareExposureReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if err != nil {
 			if errors.Is(err, errHostnameConflict) {
 				r.event(&exposure, corev1.EventTypeWarning, EventHostnameConflict, "DNS hostname conflict for %s", exposure.Spec.Hostname)
-				return ctrl.Result{}, r.setExposureStatus(ctx, &exposure, status, false, ReasonHostnameConflict, err.Error())
+				return r.setExposureStatusAndBackoff(ctx, &exposure, status, ReasonHostnameConflict, err.Error())
 			}
 			if errors.Is(err, errForeignResource) {
-				return ctrl.Result{}, r.setExposureStatus(ctx, &exposure, status, false, ReasonForeignResource, err.Error())
+				return r.setExposureStatusAndBackoff(ctx, &exposure, status, ReasonForeignResource, err.Error())
 			}
 			return ctrl.Result{}, r.setExposureStatus(ctx, &exposure, status, false, ReasonDNSWriteFailed, err.Error())
 		}
@@ -208,6 +209,9 @@ func (r *CloudflareExposureReconciler) reconcileAccess(ctx context.Context, expo
 	}
 	var owned *cloudflare.AccessApplication
 	for _, app := range apps {
+		if owner, ok := ownershipUIDFromTags(app.Tags); ok && owner != exposure.UID {
+			return nil, false, fmt.Errorf("%w: Access application %s for hostname %s", errForeignResource, app.ID, exposure.Spec.Hostname)
+		}
 		if !ownedByTags(app.Tags, exposure.UID) {
 			return nil, false, fmt.Errorf("%w: Access application %s for hostname %s", errHostnameConflict, app.ID, exposure.Spec.Hostname)
 		}
@@ -331,6 +335,9 @@ func (r *CloudflareExposureReconciler) reconcileDNS(ctx context.Context, exposur
 	}
 	var owned *cloudflare.DNSRecord
 	for _, record := range records {
+		if owner, ok := naming.ParseOwnershipTag(record.Comment); ok && owner != exposure.UID {
+			return nil, fmt.Errorf("%w: DNS record %s for hostname %s", errForeignResource, record.ID, exposure.Spec.Hostname)
+		}
 		if !ownedByComment(record.Comment, exposure.UID) {
 			return nil, fmt.Errorf("%w: DNS record %s for hostname %s", errHostnameConflict, record.ID, exposure.Spec.Hostname)
 		}
@@ -351,7 +358,7 @@ func (r *CloudflareExposureReconciler) reconcileDNS(ctx context.Context, exposur
 	return cfClient.DNSRecords().Create(ctx, want)
 }
 
-func (r *CloudflareExposureReconciler) reconcileDelete(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, tunnel *cfztv1alpha1.CloudflareTunnel, cfClient cloudflare.Client) error {
+func (r *CloudflareExposureReconciler) reconcileDelete(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, cfClient cloudflare.Client) error {
 	if !controllerutil.ContainsFinalizer(exposure, naming.Finalizer) {
 		return nil
 	}
@@ -443,6 +450,13 @@ func (r *CloudflareExposureReconciler) setExposureStatus(ctx context.Context, ex
 	return r.Status().Update(ctx, latest)
 }
 
+func (r *CloudflareExposureReconciler) setExposureStatusAndBackoff(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, cfStatus cfztv1alpha1.ExposureCloudflareStatus, reason, message string) (ctrl.Result, error) {
+	if err := r.setExposureStatus(ctx, exposure, cfStatus, false, reason, message); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, fmt.Errorf("%s: %s", reason, message)
+}
+
 func routeHashForExposure(tunnel *cfztv1alpha1.CloudflareTunnel, exposure *cfztv1alpha1.CloudflareExposure) string {
 	for _, route := range tunnel.Status.Routes {
 		if route.ExposureUid == exposure.UID && route.Namespace == exposure.Namespace && route.Name == exposure.Name && route.Hostname == exposure.Spec.Hostname {
@@ -458,6 +472,10 @@ func ownershipTags(uid types.UID) []string {
 
 func ownedByTags(tags []string, uid types.UID) bool {
 	return ownedByComment(strings.Join(tags, " "), uid)
+}
+
+func ownershipUIDFromTags(tags []string) (types.UID, bool) {
+	return naming.ParseOwnershipTag(strings.Join(tags, " "))
 }
 
 func ownedByComment(comment string, uid types.UID) bool {
@@ -486,7 +504,7 @@ func (r *CloudflareExposureReconciler) event(exposure *cfztv1alpha1.CloudflareEx
 	if r.Recorder == nil {
 		return
 	}
-	r.Recorder.Eventf(exposure, eventType, reason, messageFmt, args...)
+	r.Recorder.Eventf(exposure, nil, eventType, reason, reason, messageFmt, args...)
 }
 
 // SetupWithManager sets up the controller with the Manager.
