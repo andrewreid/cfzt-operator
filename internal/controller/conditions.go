@@ -14,10 +14,21 @@ const (
 	ReasonForeignTunnel      = "ForeignTunnel"
 	ReasonTokenFetchFailed   = "TokenFetchFailed"
 	ReasonWorkloadNotReady   = "WorkloadNotReady"
+	ReasonOriginInvalid      = "OriginInvalid"
+	ReasonHostnameConflict   = "HostnameConflict"
+	ReasonForeignResource    = "ForeignResource"
+	ReasonAccessAppPending   = "AccessAppPending"
+	ReasonDNSWriteFailed     = "DNSWriteFailed"
+	ReasonBlockedByExposures = "BlockedByExposures"
 	ReasonReconciled         = "Reconciled"
 
-	EventCreatedTunnel = "CreatedTunnel"
-	EventTokenRotated  = "TokenRotated"
+	EventCreatedTunnel      = "CreatedTunnel"
+	EventCreatedAccessApp   = "CreatedAccessApp"
+	EventHostnameConflict   = "HostnameConflict"
+	EventForeignTunnel      = "ForeignTunnel"
+	EventReconcileFailed    = "ReconcileFailed"
+	EventTokenRotated       = "TokenRotated"
+	EventBlockedByExposures = "BlockedByExposures"
 )
 
 func setCondition(conditions *[]metav1.Condition, conditionType string, status metav1.ConditionStatus, reason, message string, observedGeneration int64) {

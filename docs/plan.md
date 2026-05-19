@@ -46,10 +46,33 @@ Completed on 2026-05-19:
   credential example now includes both `accountId` and `apiToken`;
   `rtk make test` is green.
 
-Next: Slice 2 subtask 1 (`CloudflareExposure` types + CRD validation), then
-Slice 2 subtask 2 (`internal/tunnelconfig` builder). Live-cluster Slice 1
-smoke (`helm install` + apply real `CloudflareTunnel`) remains manual because
-it requires a Kubernetes cluster and Cloudflare credentials.
+Completed on 2026-05-19:
+- Slice 2 subtasks 1-10: `CloudflareExposure` API + CRD validation, deterministic
+  `internal/tunnelconfig` builder, Cloudflare configurations / Access / DNS /
+  zones interfaces with fake + real SDK wiring, Tunnel-owned tunnel-config doc
+  writes and route hashes, Exposure Access/DNS/status/finalizer paths, D20
+  cross-controller watches, hostname-conflict and foreign-resource guards,
+  tunnel `BlockedByExposures`, external-origin coverage, regenerated CRDs,
+  and Helm CRD sync. Tests added for CRD validation, fake CF resources, builder
+  determinism/collisions/empty doc, Exposure create / DNS off / Access off /
+  hostname conflict / foreign resource / finalizer / Ready gating, D20 maps,
+  Tunnel config writes, and Tunnel blocked deletion.
+
+Completed on 2026-05-19:
+- Slice 3 subtasks 1-6: Service `sourceRef` origin defaulting, same-namespace
+  ownerReference wiring for GC cascade, HTTPRoute hostname derivation via
+  unstructured Gateway API reads, startup-time HTTPRoute CRD discovery with
+  disabled log line, CRD validation relaxation for Service no-origin and
+  HTTPRoute no-hostname cases, and RBAC/Helm updates for Services,
+  HTTPRoutes, and CRD discovery. Tests added for single-port Service defaulting,
+  multi-port rejection, source deletion cleanup path, HTTPRoute hostname
+  derivation, CRD-absent discovery, and Slice 3 CRD validation relaxation.
+
+Next: manual live-cluster smoke. Live-cluster Slice 1, Slice 2, and Slice 3
+smoke (`helm install`, real `CloudflareTunnel`, real `CloudflareExposure`,
+Service `sourceRef`, Access challenge curl, external-origin curl, and source
+deletion cascade) remain manual because they require a Kubernetes cluster and
+Cloudflare credentials.
 
 ## 3. Slice plan
 

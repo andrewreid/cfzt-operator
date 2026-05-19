@@ -7,12 +7,15 @@ import (
 	"fmt"
 	"math/rand"
 	"net/http"
+	"reflect"
 	"sync"
 	"time"
 
 	cf "github.com/cloudflare/cloudflare-go/v4"
+	cfdns "github.com/cloudflare/cloudflare-go/v4/dns"
 	"github.com/cloudflare/cloudflare-go/v4/option"
 	"github.com/cloudflare/cloudflare-go/v4/zero_trust"
+	cfzones "github.com/cloudflare/cloudflare-go/v4/zones"
 	"golang.org/x/time/rate"
 )
 
@@ -57,6 +60,22 @@ func limiterForToken(apiToken string) *rate.Limiter {
 
 func (c *RealClient) Tunnels() Tunnels {
 	return &realTunnels{client: c}
+}
+
+func (c *RealClient) Configurations() Configurations {
+	return &realConfigurations{client: c}
+}
+
+func (c *RealClient) AccessApplications() AccessApplications {
+	return &realAccessApplications{client: c}
+}
+
+func (c *RealClient) DNSRecords() DNSRecords {
+	return &realDNSRecords{client: c}
+}
+
+func (c *RealClient) Zones() Zones {
+	return &realZones{client: c}
 }
 
 // withRetry waits for the rate limiter then calls fn, retrying on 429 / 5xx
@@ -200,4 +219,341 @@ func (t *realTunnels) Token(ctx context.Context, id string) (string, error) {
 		return nil
 	})
 	return tok, err
+}
+
+type realConfigurations struct {
+	client *RealClient
+}
+
+func (c *realConfigurations) Get(ctx context.Context, tunnelID string) (*TunnelConfiguration, error) {
+	var result *TunnelConfiguration
+	err := c.client.withRetry(ctx, func() error {
+		resp, err := c.client.api.ZeroTrust.Tunnels.Cloudflared.Configurations.Get(ctx, tunnelID,
+			zero_trust.TunnelCloudflaredConfigurationGetParams{AccountID: cf.F(c.client.accountID)},
+		)
+		if err != nil {
+			var apiErr *cf.Error
+			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+				return ErrNotFound
+			}
+			return err
+		}
+		config := TunnelConfiguration{}
+		for _, rule := range resp.Config.Ingress {
+			config.Ingress = append(config.Ingress, IngressRule{Hostname: rule.Hostname, Service: rule.Service})
+		}
+		result = &config
+		return nil
+	})
+	return result, err
+}
+
+func (c *realConfigurations) Update(ctx context.Context, tunnelID string, config TunnelConfiguration) error {
+	return c.client.withRetry(ctx, func() error {
+		ingress := make([]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress, 0, len(config.Ingress))
+		for _, rule := range config.Ingress {
+			param := zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress{
+				Service: cf.F(rule.Service),
+			}
+			if rule.Hostname != "" {
+				param.Hostname = cf.F(rule.Hostname)
+			}
+			ingress = append(ingress, param)
+		}
+		_, err := c.client.api.ZeroTrust.Tunnels.Cloudflared.Configurations.Update(ctx, tunnelID,
+			zero_trust.TunnelCloudflaredConfigurationUpdateParams{
+				AccountID: cf.F(c.client.accountID),
+				Config: cf.F(zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfig{
+					Ingress: cf.F(ingress),
+				}),
+			},
+		)
+		if err != nil {
+			var apiErr *cf.Error
+			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+				return ErrNotFound
+			}
+		}
+		return err
+	})
+}
+
+type realAccessApplications struct {
+	client *RealClient
+}
+
+func (a *realAccessApplications) List(ctx context.Context, domain string) ([]AccessApplication, error) {
+	var out []AccessApplication
+	err := a.client.withRetry(ctx, func() error {
+		params := zero_trust.AccessApplicationListParams{
+			AccountID: cf.F(a.client.accountID),
+			Domain:    cf.F(domain),
+			Exact:     cf.F(true),
+		}
+		pager := a.client.api.ZeroTrust.Access.Applications.ListAutoPaging(ctx, params)
+		out = out[:0]
+		for pager.Next() {
+			item := pager.Current()
+			out = append(out, AccessApplication{
+				ID:         item.ID,
+				Name:       item.Name,
+				Domain:     item.Domain,
+				Tags:       stringSlice(item.Tags),
+				PolicyUUID: firstPolicyID(item.Policies),
+			})
+		}
+		return pager.Err()
+	})
+	return out, err
+}
+
+func (a *realAccessApplications) Create(ctx context.Context, in AccessApplicationInput) (*AccessApplication, error) {
+	var result *AccessApplication
+	err := a.client.withRetry(ctx, func() error {
+		resp, err := a.client.api.ZeroTrust.Access.Applications.New(ctx, zero_trust.AccessApplicationNewParams{
+			AccountID: cf.F(a.client.accountID),
+			Body:      accessNewBody(in),
+		})
+		if err != nil {
+			return err
+		}
+		result = accessAppFromResponse(resp.ID, resp.Name, resp.Domain, in.PolicyUUID, stringSlice(resp.Tags))
+		return nil
+	})
+	return result, err
+}
+
+func (a *realAccessApplications) Update(ctx context.Context, id string, in AccessApplicationInput) (*AccessApplication, error) {
+	var result *AccessApplication
+	err := a.client.withRetry(ctx, func() error {
+		resp, err := a.client.api.ZeroTrust.Access.Applications.Update(ctx, id, zero_trust.AccessApplicationUpdateParams{
+			AccountID: cf.F(a.client.accountID),
+			Body:      accessUpdateBody(in),
+		})
+		if err != nil {
+			var apiErr *cf.Error
+			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+				return ErrNotFound
+			}
+			return err
+		}
+		result = accessAppFromResponse(resp.ID, resp.Name, resp.Domain, in.PolicyUUID, stringSlice(resp.Tags))
+		return nil
+	})
+	return result, err
+}
+
+func (a *realAccessApplications) Delete(ctx context.Context, id string) error {
+	return a.client.withRetry(ctx, func() error {
+		_, err := a.client.api.ZeroTrust.Access.Applications.Delete(ctx, id,
+			zero_trust.AccessApplicationDeleteParams{AccountID: cf.F(a.client.accountID)},
+		)
+		if err != nil {
+			var apiErr *cf.Error
+			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+				return ErrNotFound
+			}
+		}
+		return err
+	})
+}
+
+type realDNSRecords struct {
+	client *RealClient
+}
+
+func (d *realDNSRecords) List(ctx context.Context, zoneID, name, recordType string) ([]DNSRecord, error) {
+	var out []DNSRecord
+	err := d.client.withRetry(ctx, func() error {
+		params := cfdns.RecordListParams{
+			ZoneID: cf.F(zoneID),
+			Name:   cf.F(cfdns.RecordListParamsName{Exact: cf.F(name)}),
+			Type:   cf.F(cfdns.RecordListParamsType(recordType)),
+		}
+		pager := d.client.api.DNS.Records.ListAutoPaging(ctx, params)
+		out = out[:0]
+		for pager.Next() {
+			item := pager.Current()
+			out = append(out, DNSRecord{
+				ID:      item.ID,
+				ZoneID:  zoneID,
+				Name:    item.Name,
+				Type:    string(item.Type),
+				Content: item.Content,
+				Proxied: item.Proxied,
+				Comment: item.Comment,
+			})
+		}
+		return pager.Err()
+	})
+	return out, err
+}
+
+func (d *realDNSRecords) Create(ctx context.Context, in DNSRecordInput) (*DNSRecord, error) {
+	var result *DNSRecord
+	err := d.client.withRetry(ctx, func() error {
+		resp, err := d.client.api.DNS.Records.New(ctx, cfdns.RecordNewParams{
+			ZoneID: cf.F(in.ZoneID),
+			Body: cfdns.CNAMERecordParam{
+				Name:    cf.F(in.Name),
+				TTL:     cf.F(cfdns.TTL1),
+				Type:    cf.F(cfdns.CNAMERecordTypeCNAME),
+				Content: cf.F(in.Content),
+				Proxied: cf.F(in.Proxied),
+				Comment: cf.F(in.Comment),
+			},
+		})
+		if err != nil {
+			return err
+		}
+		result = dnsRecordFromResponse(in.ZoneID, resp)
+		return nil
+	})
+	return result, err
+}
+
+func (d *realDNSRecords) Update(ctx context.Context, id string, in DNSRecordInput) (*DNSRecord, error) {
+	var result *DNSRecord
+	err := d.client.withRetry(ctx, func() error {
+		resp, err := d.client.api.DNS.Records.Update(ctx, id, cfdns.RecordUpdateParams{
+			ZoneID: cf.F(in.ZoneID),
+			Body: cfdns.CNAMERecordParam{
+				Name:    cf.F(in.Name),
+				TTL:     cf.F(cfdns.TTL1),
+				Type:    cf.F(cfdns.CNAMERecordTypeCNAME),
+				Content: cf.F(in.Content),
+				Proxied: cf.F(in.Proxied),
+				Comment: cf.F(in.Comment),
+			},
+		})
+		if err != nil {
+			var apiErr *cf.Error
+			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+				return ErrNotFound
+			}
+			return err
+		}
+		result = dnsRecordFromResponse(in.ZoneID, resp)
+		return nil
+	})
+	return result, err
+}
+
+func (d *realDNSRecords) Delete(ctx context.Context, zoneID, id string) error {
+	return d.client.withRetry(ctx, func() error {
+		_, err := d.client.api.DNS.Records.Delete(ctx, id, cfdns.RecordDeleteParams{ZoneID: cf.F(zoneID)})
+		if err != nil {
+			var apiErr *cf.Error
+			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+				return ErrNotFound
+			}
+		}
+		return err
+	})
+}
+
+type realZones struct {
+	client *RealClient
+}
+
+func (z *realZones) List(ctx context.Context) ([]Zone, error) {
+	var out []Zone
+	err := z.client.withRetry(ctx, func() error {
+		pager := z.client.api.Zones.ListAutoPaging(ctx, cfzones.ZoneListParams{})
+		out = out[:0]
+		for pager.Next() {
+			item := pager.Current()
+			out = append(out, Zone{ID: item.ID, Name: item.Name})
+		}
+		return pager.Err()
+	})
+	return out, err
+}
+
+func (z *realZones) Resolve(ctx context.Context, hostname string) (*Zone, error) {
+	zones, err := z.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	zone, ok := LongestMatchingZone(zones, hostname)
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return zone, nil
+}
+
+func accessNewBody(in AccessApplicationInput) zero_trust.AccessApplicationNewParamsBodyUnion {
+	return zero_trust.AccessApplicationNewParamsBodySelfHostedApplication{
+		Domain: cf.F(in.Domain),
+		Type:   cf.F(zero_trust.ApplicationTypeSelfHosted),
+		Name:   cf.F(in.Name),
+		Policies: cf.F([]zero_trust.AccessApplicationNewParamsBodySelfHostedApplicationPolicyUnion{
+			zero_trust.AccessApplicationNewParamsBodySelfHostedApplicationPoliciesAccessAppPolicyLink{
+				ID:         cf.F(in.PolicyUUID),
+				Precedence: cf.F(int64(0)),
+			},
+		}),
+		SelfHostedDomains: cf.F([]zero_trust.SelfHostedDomainsParam{in.Domain}),
+		Tags:              cf.F(in.Tags),
+	}
+}
+
+func accessUpdateBody(in AccessApplicationInput) zero_trust.AccessApplicationUpdateParamsBodyUnion {
+	return zero_trust.AccessApplicationUpdateParamsBodySelfHostedApplication{
+		Domain: cf.F(in.Domain),
+		Type:   cf.F(zero_trust.ApplicationTypeSelfHosted),
+		Name:   cf.F(in.Name),
+		Policies: cf.F([]zero_trust.AccessApplicationUpdateParamsBodySelfHostedApplicationPolicyUnion{
+			zero_trust.AccessApplicationUpdateParamsBodySelfHostedApplicationPoliciesAccessAppPolicyLink{
+				ID:         cf.F(in.PolicyUUID),
+				Precedence: cf.F(int64(0)),
+			},
+		}),
+		SelfHostedDomains: cf.F([]zero_trust.SelfHostedDomainsParam{in.Domain}),
+		Tags:              cf.F(in.Tags),
+	}
+}
+
+func accessAppFromResponse(id, name, domain, policyUUID string, tags []string) *AccessApplication {
+	return &AccessApplication{ID: id, Name: name, Domain: domain, PolicyUUID: policyUUID, Tags: tags}
+}
+
+func dnsRecordFromResponse(zoneID string, resp *cfdns.RecordResponse) *DNSRecord {
+	return &DNSRecord{
+		ID:      resp.ID,
+		ZoneID:  zoneID,
+		Name:    resp.Name,
+		Type:    string(resp.Type),
+		Content: resp.Content,
+		Proxied: resp.Proxied,
+		Comment: resp.Comment,
+	}
+}
+
+func stringSlice(value any) []string {
+	switch v := value.(type) {
+	case []string:
+		return append([]string(nil), v...)
+	default:
+		return nil
+	}
+}
+
+func firstPolicyID(value any) string {
+	rv := reflect.ValueOf(value)
+	if rv.Kind() != reflect.Slice || rv.Len() == 0 {
+		return ""
+	}
+	first := rv.Index(0)
+	if first.Kind() == reflect.Pointer {
+		first = first.Elem()
+	}
+	if first.Kind() != reflect.Struct {
+		return ""
+	}
+	field := first.FieldByName("ID")
+	if !field.IsValid() || field.Kind() != reflect.String {
+		return ""
+	}
+	return field.String()
 }

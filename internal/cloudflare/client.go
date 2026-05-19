@@ -15,4 +15,8 @@ var ErrNotImplemented = errors.New("cloudflare: not implemented")
 // Configurations, Access, DNS, and Zones onto this interface (Slice 2).
 type Client interface {
 	Tunnels() Tunnels
+	Configurations() Configurations
+	AccessApplications() AccessApplications
+	DNSRecords() DNSRecords
+	Zones() Zones
 }

@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"os"
@@ -43,10 +44,6 @@ import (
 var (
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
-
-	// httpRouteDiscoveryEnabled gates the Slice 3 HTTPRoute controller wiring.
-	// Compile-time false until Slice 3 implements discovery + reconciler.
-	httpRouteDiscoveryEnabled = false
 )
 
 func init() {
@@ -194,22 +191,25 @@ func main() {
 		setupLog.Error(err, "Failed to create controller", "controller", "cloudflaretunnel")
 		os.Exit(1)
 	}
+	httpRouteSourceEnabled, err := controller.HTTPRouteCRDPresent(context.Background(), mgr.GetAPIReader())
+	if err != nil {
+		setupLog.Error(err, "Failed to discover HTTPRoute CRD")
+		os.Exit(1)
+	}
+	if !httpRouteSourceEnabled {
+		setupLog.Info("HTTPRoute CRD not found, controller disabled")
+	}
+
 	if err := (&controller.CloudflareExposureReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:                 mgr.GetClient(),
+		Scheme:                 mgr.GetScheme(),
+		Recorder:               mgr.GetEventRecorderFor("cloudflareexposure-controller"),
+		HTTPRouteSourceEnabled: httpRouteSourceEnabled,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "cloudflareexposure")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder
-
-	// Slice 3: HTTPRoute discovery + conditional controller registration.
-	// Gateway API CRD presence is checked at startup via discovery; controller
-	// only registers when `gateway.networking.k8s.io/HTTPRoute` is installed.
-	// See plan.md Slice 3 subtask 5. Placeholder gated until that slice lands.
-	if httpRouteDiscoveryEnabled {
-		setupLog.Info("HTTPRoute discovery not yet implemented (Slice 3)")
-	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "Failed to set up health check")

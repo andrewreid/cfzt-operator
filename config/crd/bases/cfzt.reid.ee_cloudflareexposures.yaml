@@ -11,14 +11,32 @@ spec:
     kind: CloudflareExposure
     listKind: CloudflareExposureList
     plural: cloudflareexposures
+    shortNames:
+    - cfe
     singular: cloudflareexposure
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .spec.hostname
+      name: Hostname
+      type: string
+    - jsonPath: .spec.tunnelRef.name
+      name: Tunnel
+      type: string
+    - jsonPath: .spec.access.enabled
+      name: Access
+      type: boolean
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: CloudflareExposure is the Schema for the cloudflareexposures
-          API
+          API.
         properties:
           apiVersion:
             description: |-
@@ -38,27 +56,107 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec defines the desired state of CloudflareExposure
+            description: CloudflareExposureSpec defines the desired state of CloudflareExposure.
             properties:
-              foo:
-                description: foo is an example field of CloudflareExposure. Edit cloudflareexposure_types.go
-                  to remove/update
+              access:
+                default: {}
+                description: AccessSpec controls Cloudflare Access protection.
+                properties:
+                  enabled:
+                    default: false
+                    type: boolean
+                  policyRef:
+                    description: AccessPolicyRef points at an existing Cloudflare
+                      Access policy.
+                    properties:
+                      uuid:
+                        pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$
+                        type: string
+                    type: object
+                type: object
+              displayName:
+                maxLength: 120
                 type: string
+              hostname:
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)+$
+                type: string
+              origin:
+                description: OriginSpec describes the origin cloudflared should proxy
+                  to.
+                properties:
+                  host:
+                    minLength: 1
+                    type: string
+                  port:
+                    format: int32
+                    maximum: 65535
+                    minimum: 1
+                    type: integer
+                  protocol:
+                    enum:
+                    - http
+                    - https
+                    type: string
+                type: object
+              sourceRef:
+                description: SourceRef identifies a same-namespace source object used
+                  for defaulting.
+                properties:
+                  apiVersion:
+                    type: string
+                  kind:
+                    enum:
+                    - Service
+                    - HTTPRoute
+                    minLength: 1
+                    type: string
+                  name:
+                    minLength: 1
+                    type: string
+                required:
+                - kind
+                - name
+                type: object
+              tunnelRef:
+                description: TunnelRef identifies the CloudflareTunnel that publishes
+                  this exposure.
+                properties:
+                  name:
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+            required:
+            - tunnelRef
             type: object
+            x-kubernetes-validations:
+            - message: origin protocol, host, and port are required unless sourceRef.kind
+                is Service
+              rule: (has(self.sourceRef) && self.sourceRef.kind == 'Service') || (has(self.origin)
+                && has(self.origin.protocol) && has(self.origin.host) && has(self.origin.port))
+            - message: hostname is required unless sourceRef.kind is HTTPRoute
+              rule: has(self.hostname) || (has(self.sourceRef) && self.sourceRef.kind
+                == 'HTTPRoute')
+            - message: access.policyRef.uuid is required when access.enabled is true
+              rule: '!has(self.access) || !self.access.enabled || (has(self.access.policyRef)
+                && has(self.access.policyRef.uuid) && size(self.access.policyRef.uuid)
+                > 0)'
           status:
-            description: status defines the observed state of CloudflareExposure
+            description: CloudflareExposureStatus defines the observed state of CloudflareExposure.
             properties:
+              cloudflare:
+                description: ExposureCloudflareStatus records Cloudflare-side resources
+                  for one exposure.
+                properties:
+                  accessApplicationId:
+                    type: string
+                  dnsRecordId:
+                    type: string
+                  publicHostnameRouteHash:
+                    type: string
+                type: object
               conditions:
-                description: |-
-                  conditions represent the current state of the CloudflareExposure resource.
-                  Each condition has a unique type and reflects the status of a specific aspect of the resource.
-
-                  Standard condition types include:
-                  - "Available": the resource is fully functional
-                  - "Progressing": the resource is being created or updated
-                  - "Degraded": the resource failed to reach or maintain its desired state
-
-                  The status of each condition is one of True, False, or Unknown.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -117,6 +215,12 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              observedTunnelUid:
+                description: |-
+                  UID is a type that holds unique ID values, including UUIDs.  Because we
+                  don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                  intent and helps make sure that UIDs and names do not get conflated.
+                type: string
             type: object
         required:
         - spec

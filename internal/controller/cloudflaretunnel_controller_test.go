@@ -199,6 +199,7 @@ func createTunnel(ctx context.Context, name, tunnelName string) *cfztv1alpha1.Cl
 		Spec: cfztv1alpha1.CloudflareTunnelSpec{
 			CredentialsSecretRef: cfztv1alpha1.CredentialsSecretRef{Name: "cloudflare-credentials"},
 			TunnelName:           tunnelName,
+			Dns:                  cfztv1alpha1.DnsSpec{Manage: true},
 			Cloudflared: cfztv1alpha1.CloudflaredSpec{
 				Namespace: "cfzt-system",
 			},

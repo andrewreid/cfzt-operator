@@ -18,40 +18,104 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+// TunnelRef identifies the CloudflareTunnel that publishes this exposure.
+type TunnelRef struct {
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+}
 
-// CloudflareExposureSpec defines the desired state of CloudflareExposure
+// SourceRef identifies a same-namespace source object used for defaulting.
+type SourceRef struct {
+	// +kubebuilder:validation:Optional
+	ApiVersion string `json:"apiVersion,omitempty"`
+
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum=Service;HTTPRoute
+	// +kubebuilder:validation:MinLength=1
+	Kind string `json:"kind"`
+
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+}
+
+// OriginSpec describes the origin cloudflared should proxy to.
+type OriginSpec struct {
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:Enum=http;https
+	Protocol string `json:"protocol,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:MinLength=1
+	Host string `json:"host,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	Port int32 `json:"port,omitempty"`
+}
+
+// AccessPolicyRef points at an existing Cloudflare Access policy.
+type AccessPolicyRef struct {
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:Pattern=`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`
+	UUID string `json:"uuid,omitempty"`
+}
+
+// AccessSpec controls Cloudflare Access protection.
+type AccessSpec struct {
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled"`
+
+	// +kubebuilder:validation:Optional
+	PolicyRef AccessPolicyRef `json:"policyRef,omitempty"`
+}
+
+// CloudflareExposureSpec defines the desired state of CloudflareExposure.
+//
+// +kubebuilder:validation:XValidation:rule="(has(self.sourceRef) && self.sourceRef.kind == 'Service') || (has(self.origin) && has(self.origin.protocol) && has(self.origin.host) && has(self.origin.port))",message="origin protocol, host, and port are required unless sourceRef.kind is Service"
+// +kubebuilder:validation:XValidation:rule="has(self.hostname) || (has(self.sourceRef) && self.sourceRef.kind == 'HTTPRoute')",message="hostname is required unless sourceRef.kind is HTTPRoute"
+// +kubebuilder:validation:XValidation:rule="!has(self.access) || !self.access.enabled || (has(self.access.policyRef) && has(self.access.policyRef.uuid) && size(self.access.policyRef.uuid) > 0)",message="access.policyRef.uuid is required when access.enabled is true"
 type CloudflareExposureSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:MaxLength=120
+	DisplayName string `json:"displayName,omitempty"`
 
-	// foo is an example field of CloudflareExposure. Edit cloudflareexposure_types.go to remove/update
-	// +optional
-	Foo *string `json:"foo,omitempty"`
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)+$`
+	Hostname string `json:"hostname,omitempty"`
+
+	// +kubebuilder:validation:Required
+	TunnelRef TunnelRef `json:"tunnelRef"`
+
+	// +kubebuilder:validation:Optional
+	SourceRef *SourceRef `json:"sourceRef,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	Origin *OriginSpec `json:"origin,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default={}
+	Access AccessSpec `json:"access,omitempty"`
+}
+
+// ExposureCloudflareStatus records Cloudflare-side resources for one exposure.
+type ExposureCloudflareStatus struct {
+	AccessApplicationId     string `json:"accessApplicationId,omitempty"`
+	PublicHostnameRouteHash string `json:"publicHostnameRouteHash,omitempty"`
+	DnsRecordId             string `json:"dnsRecordId,omitempty"`
 }
 
 // CloudflareExposureStatus defines the observed state of CloudflareExposure.
 type CloudflareExposureStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	Cloudflare        ExposureCloudflareStatus `json:"cloudflare,omitempty"`
+	ObservedTunnelUid types.UID                `json:"observedTunnelUid,omitempty"`
 
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
-
-	// conditions represent the current state of the CloudflareExposure resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
-	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
 	// +listType=map
 	// +listMapKey=type
 	// +optional
@@ -60,27 +124,30 @@ type CloudflareExposureStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:resource:scope=Namespaced,shortName=cfe
+// +kubebuilder:printcolumn:name=Hostname,type=string,JSONPath=`.spec.hostname`
+// +kubebuilder:printcolumn:name=Tunnel,type=string,JSONPath=`.spec.tunnelRef.name`
+// +kubebuilder:printcolumn:name=Access,type=boolean,JSONPath=`.spec.access.enabled`
+// +kubebuilder:printcolumn:name=Ready,type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
+// +kubebuilder:printcolumn:name=Age,type=date,JSONPath=`.metadata.creationTimestamp`
 
-// CloudflareExposure is the Schema for the cloudflareexposures API
+// CloudflareExposure is the Schema for the cloudflareexposures API.
 type CloudflareExposure struct {
 	metav1.TypeMeta `json:",inline"`
 
-	// metadata is a standard object metadata
 	// +optional
 	metav1.ObjectMeta `json:"metadata,omitzero"`
 
-	// spec defines the desired state of CloudflareExposure
 	// +required
 	Spec CloudflareExposureSpec `json:"spec"`
 
-	// status defines the observed state of CloudflareExposure
 	// +optional
 	Status CloudflareExposureStatus `json:"status,omitzero"`
 }
 
 // +kubebuilder:object:root=true
 
-// CloudflareExposureList contains a list of CloudflareExposure
+// CloudflareExposureList contains a list of CloudflareExposure.
 type CloudflareExposureList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitzero"`
