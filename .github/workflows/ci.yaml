@@ -1,0 +1,48 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.26"
+  GOLANGCI_VERSION: "v2.12.2"
+  HELM_VERSION: "v3.16.0"
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: ${{ env.GOLANGCI_VERSION }}
+
+      - name: generated drift check
+        run: |
+          make manifests generate
+          git diff --exit-code
+
+      - name: unit + envtest
+        run: make test
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: helm lint
+        run: helm lint charts/cfzt-operator
