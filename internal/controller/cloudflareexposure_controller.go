@@ -22,6 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	cfztv1alpha1 "github.com/andrewreid/cfzt-operator/api/v1alpha1"
@@ -56,8 +57,10 @@ func (r *CloudflareExposureReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *CloudflareExposureReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// D19: MaxConcurrentReconciles=1 in MVP. Raise post-MVP if needed.
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&cfztv1alpha1.CloudflareExposure{}).
 		Named("cloudflareexposure").
+		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 		Complete(r)
 }

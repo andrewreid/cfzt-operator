@@ -43,6 +43,10 @@ import (
 var (
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
+
+	// httpRouteDiscoveryEnabled gates the Slice 3 HTTPRoute controller wiring.
+	// Compile-time false until Slice 3 implements discovery + reconciler.
+	httpRouteDiscoveryEnabled = false
 )
 
 func init() {
@@ -65,7 +69,10 @@ func main() {
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
-	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
+	// D12: leader election required ON. Together with D11 single-writer doc
+	// invariant + D19 MaxConcurrentReconciles=1 this guarantees one writer per
+	// tunnel-config doc per cluster.
+	flag.BoolVar(&enableLeaderElection, "leader-elect", true,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
 	flag.BoolVar(&secureMetrics, "metrics-secure", true,
@@ -79,8 +86,9 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	// Default to production-grade logging. Override via --zap-log-level=debug.
 	opts := zap.Options{
-		Development: true,
+		Development: false,
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -193,6 +201,14 @@ func main() {
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder
+
+	// Slice 3: HTTPRoute discovery + conditional controller registration.
+	// Gateway API CRD presence is checked at startup via discovery; controller
+	// only registers when `gateway.networking.k8s.io/HTTPRoute` is installed.
+	// See plan.md Slice 3 subtask 5. Placeholder gated until that slice lands.
+	if httpRouteDiscoveryEnabled {
+		setupLog.Info("HTTPRoute discovery not yet implemented (Slice 3)")
+	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "Failed to set up health check")

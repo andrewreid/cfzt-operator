@@ -22,6 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	cfztv1alpha1 "github.com/andrewreid/cfzt-operator/api/v1alpha1"
@@ -56,8 +57,12 @@ func (r *CloudflareTunnelReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *CloudflareTunnelReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// D19: MaxConcurrentReconciles=1 — Tunnel controller is the single writer of
+	// the tunnel-config doc per D11. Combined with leader election (D12) this
+	// guarantees one writer per tunnel-config doc per cluster.
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&cfztv1alpha1.CloudflareTunnel{}).
 		Named("cloudflaretunnel").
+		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 		Complete(r)
 }
