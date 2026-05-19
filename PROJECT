@@ -8,4 +8,13 @@ layout:
 - go.kubebuilder.io/v4
 projectName: cfzt-operator
 repo: github.com/andrewreid/cfzt-operator
+resources:
+- api:
+    crdVersion: v1
+  controller: true
+  domain: reid.ee
+  group: cfzt
+  kind: CloudflareTunnel
+  path: github.com/andrewreid/cfzt-operator/api/v1alpha1
+  version: v1alpha1
 version: "3"
