@@ -19,26 +19,21 @@ Makefile `test` target runs envtest via `setup-envtest`; `helm-package` +
 `helm-sync-crds` targets added.
 
 Completed on 2026-05-19:
+- Subtask 1: `CloudflareTunnel` types + CRD validation markers. API amended
+  so credentials Secret namespace is derived from `spec.cloudflared.namespace`
+  instead of duplicated under `credentialsSecretRef`; image `:latest`
+  validation uses bounded `endsWith` CEL. The CRD post-processing helper was
+  removed. `rtk make test` is green.
 - Subtask 2: `internal/cloudflare` interface + fake (client.go, tunnels.go,
   real.go, fake.go, fake_test.go). cloudflare-go/v4 v4.6.0 added. SDK does
   not surface tunnel `comment` field — D9 amended (see spec) to track
   ownership via `status.tunnelId` rather than CF-side tag.
 - Subtask 3: `internal/naming/` names + ownership tag helpers.
 
-In progress:
-- Subtask 1: `CloudflareTunnel` types + CRD validation markers. Source +
-  generated CRD + tests staged in working tree, uncommitted. `make test`
-  (envtest) fails at CRD install: `x-kubernetes-validations estimated rule
-  cost total ... exceeds budget by factor of more than 100x`. Candidate
-  fixes — tighten `MaxLength` on every string field reachable from each
-  XValidation scope; replace image `:latest` regex with CEL
-  `endsWith(':latest')`; move namespace-equality CEL onto inner structs;
-  or drop spec-level CEL and enforce in controller. Also pending: review
-  of `hack/fix-schemaless.sh` ancillary helper.
-
-Next: resolve subtask 1 envtest blocker. Then Slice 1 subtask 4 (workload
-builders) — but note subtask 5 (controller) must adopt the amended D9
-flow (Get-by-ID + List-by-name + refuse-on-collision).
+Next: Slice 1 subtask 4 (workload builders) — but note subtask 5 (controller)
+must adopt the amended D9 flow (Get-by-ID + List-by-name +
+refuse-on-collision). Controller Secret reads should use
+`spec.cloudflared.namespace` for the credentials Secret namespace.
 
 ## 3. Slice plan
 
@@ -50,8 +45,8 @@ Per `spec.md ## Implementation slices` → Slice 1. Outcome: `CloudflareTunnel` 
 
 1. **Define `CloudflareTunnel` types + validation markers.**
    - Files: `api/v1alpha1/cloudflaretunnel_types.go`, `api/v1alpha1/groupversion_info.go`.
-   - Implements: `spec.md ## CRD model` (CloudflareTunnel), `## CRD validation` (CloudflareTunnel rules including CEL `credentialsSecretRef.namespace == cloudflared.namespace`, image `:latest` reject), kubebuilder markers from spec.
-   - Tests: `api/v1alpha1` round-trip deepcopy test; `TestCloudflareTunnelCRDValidation` (envtest applies bad manifests, expects rejection — covers namespace-mismatch and `:latest` image cases).
+   - Implements: `spec.md ## CRD model` (CloudflareTunnel), `## CRD validation` (CloudflareTunnel rules including single namespace source via `spec.cloudflared.namespace`, image `:latest` reject), kubebuilder markers from spec.
+   - Tests: `api/v1alpha1` round-trip deepcopy test; `TestCloudflareTunnelCRDValidation` (envtest applies bad manifests, expects rejection — covers `:latest` image case and defaulting).
    - Run `rtk make manifests generate`; commit generated CRD + deepcopy.
 
 2. **Scaffold `internal/cloudflare` interface + fake.**

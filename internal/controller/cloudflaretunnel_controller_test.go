@@ -36,9 +36,9 @@ var _ = Describe("CloudflareTunnel Controller", func() {
 
 		ctx := context.Background()
 
+		// CloudflareTunnel is cluster-scoped; no namespace.
 		typeNamespacedName := types.NamespacedName{
-			Name:      resourceName,
-			Namespace: "default", // TODO(user):Modify as needed
+			Name: resourceName,
 		}
 		cloudflaretunnel := &cfztv1alpha1.CloudflareTunnel{}
 
@@ -48,10 +48,18 @@ var _ = Describe("CloudflareTunnel Controller", func() {
 			if err != nil && errors.IsNotFound(err) {
 				resource := &cfztv1alpha1.CloudflareTunnel{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      resourceName,
-						Namespace: "default",
+						Name: resourceName,
 					},
-					// TODO(user): Specify other spec details if needed.
+					Spec: cfztv1alpha1.CloudflareTunnelSpec{
+						CredentialsSecretRef: cfztv1alpha1.CredentialsSecretRef{
+							Name: "cloudflare-credentials",
+						},
+						TunnelName: "test-tunnel",
+						Cloudflared: cfztv1alpha1.CloudflaredSpec{
+							Namespace: "cfzt-system",
+							Image:     "ghcr.io/cloudflare/cloudflared:2025.1.0",
+						},
+					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}

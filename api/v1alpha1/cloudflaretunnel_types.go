@@ -17,41 +17,114 @@ limitations under the License.
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+// CredentialsSecretKeys configures which keys within the referenced Secret hold credentials.
+type CredentialsSecretKeys struct {
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default="accountId"
+	// +kubebuilder:validation:MaxLength=253
+	AccountId string `json:"accountId,omitempty"`
 
-// CloudflareTunnelSpec defines the desired state of CloudflareTunnel
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default="apiToken"
+	// +kubebuilder:validation:MaxLength=253
+	ApiToken string `json:"apiToken,omitempty"`
+}
+
+// CredentialsSecretRef identifies the Secret holding Cloudflare credentials in
+// the cloudflared namespace.
+type CredentialsSecretRef struct {
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxLength=253
+	Name string `json:"name"`
+
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default={}
+	Keys CredentialsSecretKeys `json:"keys,omitempty"`
+}
+
+// DnsSpec controls DNS management behaviour.
+type DnsSpec struct {
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default=true
+	Manage bool `json:"manage"`
+}
+
+// CloudflaredSpec controls the cloudflared DaemonSet deployed by the operator.
+//
+// +kubebuilder:validation:XValidation:rule="!has(self.image) || !self.image.endsWith(':latest')",message="cloudflared.image must not use the :latest tag"
+type CloudflaredSpec struct {
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default="cfzt-system"
+	// +kubebuilder:validation:MaxLength=253
+	Namespace string `json:"namespace,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9./-]+(:[a-zA-Z0-9._-]+)?$`
+	Image string `json:"image,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	HostNetwork bool `json:"hostNetwork,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	Affinity *corev1.Affinity `json:"affinity,omitempty"`
+}
+
+// CloudflareTunnelSpec defines the desired state of CloudflareTunnel.
 type CloudflareTunnelSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
+	// +kubebuilder:validation:Required
+	CredentialsSecretRef CredentialsSecretRef `json:"credentialsSecretRef"`
 
-	// foo is an example field of CloudflareTunnel. Edit cloudflaretunnel_types.go to remove/update
-	// +optional
-	Foo *string `json:"foo,omitempty"`
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=120
+	TunnelName string `json:"tunnelName"`
+
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default={}
+	Dns DnsSpec `json:"dns,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default={}
+	Cloudflared CloudflaredSpec `json:"cloudflared,omitempty"`
+}
+
+// TokenSecretRef holds the name of the Secret that stores the tunnel token.
+type TokenSecretRef struct {
+	Name string `json:"name"`
+}
+
+// RouteStatus records the last-written ingress rule for one CloudflareExposure.
+type RouteStatus struct {
+	ExposureUid   types.UID   `json:"exposureUid"`
+	Namespace     string      `json:"namespace"`
+	Name          string      `json:"name"`
+	Hostname      string      `json:"hostname"`
+	Hash          string      `json:"hash"`
+	LastWrittenAt metav1.Time `json:"lastWrittenAt"`
 }
 
 // CloudflareTunnelStatus defines the observed state of CloudflareTunnel.
 type CloudflareTunnelStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	TunnelId       string         `json:"tunnelId,omitempty"`
+	TokenSecretRef TokenSecretRef `json:"tokenSecretRef,omitempty"`
+	DnsMode        string         `json:"dnsMode,omitempty"`
+	Routes         []RouteStatus  `json:"routes,omitempty"`
 
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
-
-	// conditions represent the current state of the CloudflareTunnel resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
-	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
 	// +listType=map
 	// +listMapKey=type
 	// +optional
@@ -60,28 +133,29 @@ type CloudflareTunnelStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:scope=Cluster
+// +kubebuilder:resource:scope=Cluster,shortName=cft
+// +kubebuilder:printcolumn:name=Tunnel,type=string,JSONPath=`.spec.tunnelName`
+// +kubebuilder:printcolumn:name=TunnelID,type=string,JSONPath=`.status.tunnelId`
+// +kubebuilder:printcolumn:name=Ready,type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
+// +kubebuilder:printcolumn:name=Age,type=date,JSONPath=`.metadata.creationTimestamp`
 
-// CloudflareTunnel is the Schema for the cloudflaretunnels API
+// CloudflareTunnel is the Schema for the cloudflaretunnels API.
 type CloudflareTunnel struct {
 	metav1.TypeMeta `json:",inline"`
 
-	// metadata is a standard object metadata
 	// +optional
 	metav1.ObjectMeta `json:"metadata,omitzero"`
 
-	// spec defines the desired state of CloudflareTunnel
 	// +required
 	Spec CloudflareTunnelSpec `json:"spec"`
 
-	// status defines the observed state of CloudflareTunnel
 	// +optional
 	Status CloudflareTunnelStatus `json:"status,omitzero"`
 }
 
 // +kubebuilder:object:root=true
 
-// CloudflareTunnelList contains a list of CloudflareTunnel
+// CloudflareTunnelList contains a list of CloudflareTunnel.
 type CloudflareTunnelList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitzero"`

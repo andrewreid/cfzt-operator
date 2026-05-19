@@ -232,7 +232,6 @@ metadata:
 spec:
   credentialsSecretRef:
     name: cloudflare-credentials
-    namespace: cfzt-system           # MUST match cloudflared namespace
     keys:
       accountId: accountId           # default "accountId"
       apiToken: apiToken             # default "apiToken"
@@ -357,8 +356,9 @@ CRD fields are validated by `+kubebuilder:validation:*` markers and `x-kubernete
 
 - `spec.tunnelName`: required, minLength 1, maxLength 120.
 - `spec.credentialsSecretRef.name`: required.
-- `spec.credentialsSecretRef.namespace`: required.
-- CEL rule: `credentialsSecretRef.namespace == cloudflared.namespace` (or both default `cfzt-system`).
+- `spec.credentialsSecretRef.keys.accountId`: optional, default `accountId`, maxLength 253.
+- `spec.credentialsSecretRef.keys.apiToken`: optional, default `apiToken`, maxLength 253.
+- Credentials Secret namespace is always `spec.cloudflared.namespace` (default `cfzt-system`); the API intentionally stores that namespace once.
 - `spec.dns.manage`: bool, default `true`.
 - `spec.cloudflared.image`: pattern `^[a-z0-9./-]+(:[a-zA-Z0-9._-]+)?$`, not allowed to end `:latest`.
 
@@ -430,7 +430,7 @@ Every CRD exposes exactly two conditions:
 
 Cloudflare credentials live in a single Kubernetes Secret per `CloudflareTunnel`, referenced by `spec.credentialsSecretRef`. Two keys (defaults `accountId` and `apiToken`, override via `keys`).
 
-Secret MUST live in the same namespace as the cloudflared workload (default `cfzt-system`). Enforced by CEL validation (`## CRD validation`).
+Secret MUST live in the same namespace as the cloudflared workload (default `cfzt-system`). Enforced by API shape: `credentialsSecretRef` names only the Secret, and the namespace is always `spec.cloudflared.namespace`.
 
 API token MVP scopes:
 
