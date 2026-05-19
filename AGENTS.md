@@ -161,6 +161,7 @@ Makefile target `make test` handles this automatically. If it doesn't, add it.
 - Use `caveman-commit` skill / `/caveman-commit` for messages. Conventional Commits. Subject ≤50 chars. Body only when "why" isn't obvious.
 - One logical change per commit. Prefer one commit per slice subtask.
 - Generated files (`zz_generated_*.go`, CRD YAML, deepcopy) committed in the same commit as the `api/` change that produced them.
+- Do not add "Codex" or "Claude" co-author notes or other additional data to the commit messages, branch names etc.
 
 ### Branching (pre-MVP)
 
