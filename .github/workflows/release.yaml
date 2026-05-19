@@ -13,6 +13,8 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: andrewreid/cfzt-operator
   CHART_REPO: oci://ghcr.io/andrewreid/charts
+  SMOKE_IMAGE: cfzt-operator:release-smoke
+  KIND_CLUSTER: cfzt-release-smoke
 
 jobs:
   release:
@@ -52,6 +54,36 @@ jobs:
           fi
           echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
 
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.16.0
+
+      - name: build smoke image
+        run: docker build --platform linux/amd64 -t "${SMOKE_IMAGE}" .
+
+      - name: create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: ${{ env.KIND_CLUSTER }}
+          wait: 120s
+
+      - name: load smoke image
+        run: kind load docker-image "${SMOKE_IMAGE}" --name "${KIND_CLUSTER}"
+
+      - name: smoke test chart on kind
+        run: |
+          helm install cfzt-operator charts/cfzt-operator \
+            --namespace cfzt-system \
+            --create-namespace \
+            --set image.repository=cfzt-operator \
+            --set image.tag=release-smoke \
+            --set image.pullPolicy=Never \
+            --set replicaCount=1
+          kubectl -n cfzt-system rollout status deploy/cfzt-operator --timeout=180s
+          kubectl get crd cloudflaretunnels.cfzt.reid.ee
+          kubectl get crd cloudflareexposures.cfzt.reid.ee
+          kubectl -n cfzt-system get pods -l app.kubernetes.io/name=cfzt-operator
+
       - name: build + push image
         uses: docker/build-push-action@v7
         with:
@@ -59,10 +91,6 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.tags.outputs.tags }}
-
-      - uses: azure/setup-helm@v5
-        with:
-          version: v3.16.0
 
       - name: package + push chart
         run: |
