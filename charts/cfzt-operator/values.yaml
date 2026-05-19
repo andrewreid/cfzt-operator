@@ -1,0 +1,48 @@
+image:
+  repository: ghcr.io/andrewreid/cfzt-operator
+  tag: ""                          # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+replicaCount: 2
+
+leaderElection:
+  enabled: true                    # D12, never disable in production
+
+resources: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+logLevel: info
+
+namespace: cfzt-system             # operator namespace
+
+serviceAccount:
+  create: true
+  name: ""                         # defaults to release name
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+
+# Security context defaults align with restricted Pod Security Standard.
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+
+# Metrics endpoint. controller-runtime serves on :8443 with authn/authz filter.
+metrics:
+  enabled: false
+  bindAddress: ":8443"
+  secure: true
+
+healthProbe:
+  bindAddress: ":8081"

@@ -1,0 +1,36 @@
+cfzt-operator installed in namespace {{ include "cfzt-operator.namespace" . }}.
+
+Next steps:
+
+  1. Create the Cloudflare API token Secret in the operator namespace:
+
+       kubectl -n {{ include "cfzt-operator.namespace" . }} create secret generic cloudflare-credentials \
+         --from-literal=apiToken='<your-cloudflare-api-token>'
+
+     Token scopes (per spec ## Credentials):
+       - Account / Cloudflare Tunnel: Edit
+       - Account / Access: Apps and Policies: Edit
+       - Zone / DNS: Edit (only when dns.manage: true)
+
+  2. Apply a CloudflareTunnel CR. See spec ## Primary user experience for examples.
+
+  3. Apply a CloudflareExposure CR per workload to publish.
+
+CRD upgrade caveat (D23):
+
+  CRDs ship in `charts/cfzt-operator/crds/` per Helm 3 native install-only
+  behaviour. `helm upgrade` does NOT modify installed CRDs.
+
+  - ArgoCD users rendering the chart and applying via Application sync: CRDs
+    are not upgraded on chart bump. Matches D15 delete-and-recreate policy.
+  - Flux users: set `install.crds: Create` and `upgrade.crds: CreateReplace`
+    with care; again matches D15.
+
+  For breaking CRD changes (D15: v1alpha1 permits them without conversion
+  webhook): export Exposure manifests, uninstall, install new version,
+  reapply.
+
+Verify:
+
+  kubectl -n {{ include "cfzt-operator.namespace" . }} get deploy {{ include "cfzt-operator.fullname" . }}
+  kubectl get crd | grep cfzt.reid.ee
