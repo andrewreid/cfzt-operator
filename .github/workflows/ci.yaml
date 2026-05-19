@@ -27,10 +27,11 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # Use `make lint` to build the custom golangci-lint binary that includes
+      # the logcheck module plugin (see .custom-gcl.yml). The plain
+      # golangci-lint-action cannot install module plugins.
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
-        with:
-          version: ${{ env.GOLANGCI_VERSION }}
+        run: make lint
 
       - name: generated drift check
         run: |

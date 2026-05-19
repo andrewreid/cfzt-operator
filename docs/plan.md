@@ -8,7 +8,18 @@ Not covered: post-MVP work (annotation UX, AccessPolicy CRD, Ingress source, WAR
 
 ## 2. Current state
 
-No kubebuilder scaffold present. Only `spec.md`, `AGENTS.md`, `CLAUDE.md`, `.rtk/`. Git log: single commit `b0b25ce Add initial architecture specification`. Bootstrap subtasks (section 4) must run before Slice 1.
+Bootstrap (section 4) complete on 2026-05-19. Kubebuilder scaffold present:
+`api/v1alpha1` types for `CloudflareTunnel` (cluster-scoped per D6) and
+`CloudflareExposure` (namespaced); controllers wired in `cmd/main.go` with
+leader-election ON (D12), `MaxConcurrentReconciles=1` on both (D19), and a
+compile-time-disabled HTTPRoute discovery placeholder for Slice 3. Helm chart
+hand-written at `charts/cfzt-operator/` (D17) with NOTES.txt GitOps caveat
+(D23). CI workflows in `.github/workflows/ci.yaml` + `release.yaml` (D18).
+Makefile `test` target runs envtest via `setup-envtest`; `helm-package` +
+`helm-sync-crds` targets added.
+
+Next: Slice 1 subtask 1 — define `CloudflareTunnel` types + CRD validation
+markers per `spec.md ## CRD model` and `## CRD validation`.
 
 ## 3. Slice plan
 
