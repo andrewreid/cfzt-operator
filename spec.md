@@ -667,6 +667,7 @@ Reference shape (verify against the Cloudflare Kubernetes exemplar at implementa
 ```yaml
 spec:
   hostNetwork: <from CloudflareTunnel.spec.cloudflared.hostNetwork>
+  dnsPolicy: ClusterFirstWithHostNet   # when hostNetwork: true; otherwise ClusterFirst
   containers:
     - name: cloudflared
       image: <pinned default or spec override>
@@ -696,6 +697,8 @@ spec:
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
+        runAsGroup: 65532
+        readOnlyRootFilesystem: true
         allowPrivilegeEscalation: false
         capabilities: { drop: ["ALL"] }
   template:
@@ -730,7 +733,7 @@ The implementer ships in slices. Each slice has a measurable definition of done.
 - `Ready=True` once DaemonSet has ≥1 ready pod.
 - Reapply is a no-op.
 - A pre-existing tunnel in the account with the same `spec.tunnelName` and no local `status.tunnelId` record causes the CR to go `Ready=False, Reason=ForeignTunnel` with no mutation of the foreign tunnel.
-- envtest tests pass: `TestTunnelCreate`, `TestTunnelForeignTunnel`, `TestTunnelTokenRotation`, `TestTunnelFinalizerNoop`.
+- envtest tests pass: `TestTunnelCreate`, `TestTunnelAdopt`, `TestTunnelForeignTunnelRefuses`, `TestTunnelTokenRotation`, `TestTunnelFinalizerNoop`, `TestTunnelConditionsTransition`.
 - `ci.yaml` green.
 - `helm install` against a fresh cluster works.
 

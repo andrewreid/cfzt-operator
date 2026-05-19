@@ -5,6 +5,7 @@ Next steps:
   1. Create the Cloudflare API token Secret in the operator namespace:
 
        kubectl -n {{ include "cfzt-operator.namespace" . }} create secret generic cloudflare-credentials \
+         --from-literal=accountId='<your-cloudflare-account-id>' \
          --from-literal=apiToken='<your-cloudflare-api-token>'
 
      Token scopes (per spec ## Credentials):

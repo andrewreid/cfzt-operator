@@ -1,92 +1,232 @@
-/*
-Copyright 2026.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package controller
 
 import (
 	"context"
+	"fmt"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"k8s.io/apimachinery/pkg/api/errors"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 	cfztv1alpha1 "github.com/andrewreid/cfzt-operator/api/v1alpha1"
+	"github.com/andrewreid/cfzt-operator/internal/cloudflare"
+	"github.com/andrewreid/cfzt-operator/internal/naming"
+	"github.com/andrewreid/cfzt-operator/internal/workload"
 )
 
 var _ = Describe("CloudflareTunnel Controller", func() {
-	Context("When reconciling a resource", func() {
-		const resourceName = "test-resource"
+	const namespace = "cfzt-system"
 
-		ctx := context.Background()
+	var (
+		ctx        context.Context
+		fakeCF     *cloudflare.FakeClient
+		reconciler *CloudflareTunnelReconciler
+	)
 
-		// CloudflareTunnel is cluster-scoped; no namespace.
-		typeNamespacedName := types.NamespacedName{
-			Name: resourceName,
+	BeforeEach(func() {
+		ctx = context.Background()
+		ensureNamespace(ctx, namespace)
+		fakeCF = cloudflare.NewFake()
+		reconciler = &CloudflareTunnelReconciler{
+			Client: k8sClient,
+			Scheme: k8sClient.Scheme(),
+			CloudflareClientFactory: func(accountID, apiToken string) (cloudflare.Client, error) {
+				Expect(accountID).To(Equal("account-1"))
+				Expect(apiToken).To(Equal("token-1"))
+				return fakeCF, nil
+			},
 		}
-		cloudflaretunnel := &cfztv1alpha1.CloudflareTunnel{}
+	})
 
-		BeforeEach(func() {
-			By("creating the custom resource for the Kind CloudflareTunnel")
-			err := k8sClient.Get(ctx, typeNamespacedName, cloudflaretunnel)
-			if err != nil && errors.IsNotFound(err) {
-				resource := &cfztv1alpha1.CloudflareTunnel{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: resourceName,
-					},
-					Spec: cfztv1alpha1.CloudflareTunnelSpec{
-						CredentialsSecretRef: cfztv1alpha1.CredentialsSecretRef{
-							Name: "cloudflare-credentials",
-						},
-						TunnelName: "test-tunnel",
-						Cloudflared: cfztv1alpha1.CloudflaredSpec{
-							Namespace: "cfzt-system",
-							Image:     "ghcr.io/cloudflare/cloudflared:2025.1.0",
-						},
-					},
-				}
-				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
-			}
-		})
+	It("TestTunnelCreate", func() {
+		tunnel := createTunnel(ctx, "create-tunnel", "homelab-rke2")
+		createCredentials(ctx, namespace, "cloudflare-credentials")
 
-		AfterEach(func() {
-			// TODO(user): Cleanup logic after each test, like removing the resource instance.
-			resource := &cfztv1alpha1.CloudflareTunnel{}
-			err := k8sClient.Get(ctx, typeNamespacedName, resource)
-			Expect(err).NotTo(HaveOccurred())
+		reconcileTunnel(ctx, reconciler, tunnel.Name)
 
-			By("Cleanup the specific resource instance CloudflareTunnel")
-			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
-		})
-		It("should successfully reconcile the resource", func() {
-			By("Reconciling the created resource")
-			controllerReconciler := &CloudflareTunnelReconciler{
-				Client: k8sClient,
-				Scheme: k8sClient.Scheme(),
-			}
+		created := fetchTunnel(ctx, tunnel.Name)
+		Expect(created.Status.TunnelId).NotTo(BeEmpty())
+		Expect(created.Status.TokenSecretRef.Name).To(Equal(naming.TokenSecretName(tunnel.Name)))
+		Expect(meta.FindStatusCondition(created.Status.Conditions, ConditionReady).Status).To(Equal(metav1.ConditionFalse))
+		Expect(meta.FindStatusCondition(created.Status.Conditions, ConditionReady).Reason).To(Equal(ReasonWorkloadNotReady))
 
-			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: typeNamespacedName,
-			})
-			Expect(err).NotTo(HaveOccurred())
-			// TODO(user): Add more specific assertions depending on your controller's reconciliation logic.
-			// Example: If you expect a certain status condition after reconciliation, verify it here.
-		})
+		secret := &corev1.Secret{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: naming.TokenSecretName(tunnel.Name)}, secret)).To(Succeed())
+		Expect(secret.Data).To(HaveKey(naming.TokenSecretKey))
+
+		ds := &appsv1.DaemonSet{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: naming.DaemonSetName(tunnel.Name)}, ds)).To(Succeed())
+		Expect(ds.Spec.Template.Spec.Containers[0].Image).To(Equal(workload.DefaultCloudflaredImage))
+		Expect(ds.Spec.Template.Annotations).To(HaveKey(workload.TokenChecksumAnnotation))
+
+		markDaemonSetReady(ctx, ds)
+		reconcileTunnel(ctx, reconciler, tunnel.Name)
+
+		ready := fetchTunnel(ctx, tunnel.Name)
+		Expect(meta.FindStatusCondition(ready.Status.Conditions, ConditionReady).Status).To(Equal(metav1.ConditionTrue))
+		Expect(meta.FindStatusCondition(ready.Status.Conditions, ConditionReady).Reason).To(Equal(ReasonReconciled))
+	})
+
+	It("TestTunnelAdopt", func() {
+		cfTunnel, err := fakeCF.Tunnels().Create(ctx, cloudflare.CreateTunnelInput{Name: "adopt-me", ConfigSrc: "cloudflare"})
+		Expect(err).NotTo(HaveOccurred())
+		tunnel := createTunnel(ctx, "adopt-tunnel", "adopt-me")
+		createCredentials(ctx, namespace, "cloudflare-credentials")
+		tunnel.Status.TunnelId = cfTunnel.ID
+		Expect(k8sClient.Status().Update(ctx, tunnel)).To(Succeed())
+
+		reconcileTunnel(ctx, reconciler, tunnel.Name)
+
+		adopted := fetchTunnel(ctx, tunnel.Name)
+		Expect(adopted.Status.TunnelId).To(Equal(cfTunnel.ID))
+	})
+
+	It("TestTunnelForeignTunnelRefuses", func() {
+		_, err := fakeCF.Tunnels().Create(ctx, cloudflare.CreateTunnelInput{Name: "occupied-name", ConfigSrc: "cloudflare"})
+		Expect(err).NotTo(HaveOccurred())
+		tunnel := createTunnel(ctx, "foreign-tunnel", "occupied-name")
+		createCredentials(ctx, namespace, "cloudflare-credentials")
+
+		reconcileTunnel(ctx, reconciler, tunnel.Name)
+
+		foreign := fetchTunnel(ctx, tunnel.Name)
+		Expect(foreign.Status.TunnelId).To(BeEmpty())
+		ready := meta.FindStatusCondition(foreign.Status.Conditions, ConditionReady)
+		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+		Expect(ready.Reason).To(Equal(ReasonForeignTunnel))
+	})
+
+	It("TestTunnelTokenRotation", func() {
+		tunnel := createTunnel(ctx, "rotate-tunnel", "rotate-me")
+		createCredentials(ctx, namespace, "cloudflare-credentials")
+		reconcileTunnel(ctx, reconciler, tunnel.Name)
+
+		current := fetchTunnel(ctx, tunnel.Name)
+		ds := &appsv1.DaemonSet{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: naming.DaemonSetName(tunnel.Name)}, ds)).To(Succeed())
+		oldChecksum := ds.Spec.Template.Annotations[workload.TokenChecksumAnnotation]
+		fakeCF.SetTunnelToken(current.Status.TunnelId, "rotated-token")
+
+		reconcileTunnel(ctx, reconciler, tunnel.Name)
+
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: naming.DaemonSetName(tunnel.Name)}, ds)).To(Succeed())
+		Expect(ds.Spec.Template.Annotations[workload.TokenChecksumAnnotation]).NotTo(Equal(oldChecksum))
+		Expect(ds.Spec.Template.Annotations[workload.TokenChecksumAnnotation]).To(Equal(workload.TokenChecksum("rotated-token")))
+	})
+
+	It("TestTunnelFinalizerNoop", func() {
+		tunnel := createTunnel(ctx, "delete-tunnel", "delete-me")
+		createCredentials(ctx, namespace, "cloudflare-credentials")
+		reconcileTunnel(ctx, reconciler, tunnel.Name)
+		current := fetchTunnel(ctx, tunnel.Name)
+		Expect(current.Finalizers).To(ContainElement(naming.Finalizer))
+		Expect(current.Status.TunnelId).NotTo(BeEmpty())
+		tunnelID := current.Status.TunnelId
+
+		Expect(k8sClient.Delete(ctx, current)).To(Succeed())
+		reconcileTunnel(ctx, reconciler, tunnel.Name)
+
+		Eventually(func(g Gomega) {
+			err := k8sClient.Get(ctx, types.NamespacedName{Name: tunnel.Name}, &cfztv1alpha1.CloudflareTunnel{})
+			g.Expect(apierrors.IsNotFound(err)).To(BeTrue())
+		}).Should(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: naming.TokenSecretName(tunnel.Name)}, &corev1.Secret{})).To(MatchError(ContainSubstring("not found")))
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: naming.DaemonSetName(tunnel.Name)}, &appsv1.DaemonSet{})).To(MatchError(ContainSubstring("not found")))
+		_, err := fakeCF.Tunnels().Get(ctx, tunnelID)
+		Expect(err).To(MatchError(cloudflare.ErrNotFound))
+	})
+
+	It("TestTunnelConditionsTransition", func() {
+		tunnel := createTunnel(ctx, "condition-tunnel", "condition-me")
+		_ = k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "cloudflare-credentials", Namespace: namespace}})
+
+		reconcileTunnel(ctx, reconciler, tunnel.Name)
+
+		missing := fetchTunnel(ctx, tunnel.Name)
+		ready := meta.FindStatusCondition(missing.Status.Conditions, ConditionReady)
+		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+		Expect(ready.Reason).To(Equal(ReasonCredentialsMissing))
+
+		createCredentials(ctx, namespace, "cloudflare-credentials")
+		reconcileTunnel(ctx, reconciler, tunnel.Name)
+		ds := &appsv1.DaemonSet{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: naming.DaemonSetName(tunnel.Name)}, ds)).To(Succeed())
+		markDaemonSetReady(ctx, ds)
+		reconcileTunnel(ctx, reconciler, tunnel.Name)
+
+		reconciled := fetchTunnel(ctx, tunnel.Name)
+		Expect(meta.FindStatusCondition(reconciled.Status.Conditions, ConditionReady).Status).To(Equal(metav1.ConditionTrue))
+		Expect(meta.FindStatusCondition(reconciled.Status.Conditions, ConditionProgressing).Status).To(Equal(metav1.ConditionFalse))
 	})
 })
+
+func ensureNamespace(ctx context.Context, name string) {
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
+	err := k8sClient.Create(ctx, ns)
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		Expect(err).NotTo(HaveOccurred())
+	}
+}
+
+func createCredentials(ctx context.Context, namespace, name string) {
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Data: map[string][]byte{
+			"accountId": []byte("account-1"),
+			"apiToken":  []byte("token-1"),
+		},
+	}
+	err := k8sClient.Create(ctx, secret)
+	if apierrors.IsAlreadyExists(err) {
+		current := &corev1.Secret{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, current)).To(Succeed())
+		current.Data = secret.Data
+		Expect(k8sClient.Update(ctx, current)).To(Succeed())
+		return
+	}
+	Expect(err).NotTo(HaveOccurred())
+}
+
+func createTunnel(ctx context.Context, name, tunnelName string) *cfztv1alpha1.CloudflareTunnel {
+	tunnel := &cfztv1alpha1.CloudflareTunnel{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec: cfztv1alpha1.CloudflareTunnelSpec{
+			CredentialsSecretRef: cfztv1alpha1.CredentialsSecretRef{Name: "cloudflare-credentials"},
+			TunnelName:           tunnelName,
+			Cloudflared: cfztv1alpha1.CloudflaredSpec{
+				Namespace: "cfzt-system",
+			},
+		},
+	}
+	Expect(k8sClient.Create(ctx, tunnel)).To(Succeed())
+	return tunnel
+}
+
+func fetchTunnel(ctx context.Context, name string) *cfztv1alpha1.CloudflareTunnel {
+	tunnel := &cfztv1alpha1.CloudflareTunnel{}
+	Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name}, tunnel)).To(Succeed())
+	return tunnel
+}
+
+func reconcileTunnel(ctx context.Context, reconciler *CloudflareTunnelReconciler, name string) {
+	_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name}})
+	Expect(err).NotTo(HaveOccurred())
+}
+
+func markDaemonSetReady(ctx context.Context, ds *appsv1.DaemonSet) {
+	latest := &appsv1.DaemonSet{}
+	Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ds.Namespace, Name: ds.Name}, latest)).To(Succeed())
+	latest.Status.NumberReady = 1
+	latest.Status.DesiredNumberScheduled = 1
+	err := k8sClient.Status().Update(ctx, latest)
+	if apierrors.IsNotFound(err) {
+		Fail(fmt.Sprintf("DaemonSet %s/%s not found", ds.Namespace, ds.Name))
+	}
+	Expect(err).NotTo(HaveOccurred())
+}

@@ -27,13 +27,29 @@ Completed on 2026-05-19:
 - Subtask 2: `internal/cloudflare` interface + fake (client.go, tunnels.go,
   real.go, fake.go, fake_test.go). cloudflare-go/v4 v4.6.0 added. SDK does
   not surface tunnel `comment` field — D9 amended (see spec) to track
-  ownership via `status.tunnelId` rather than CF-side tag.
+  ownership via `status.tunnelId` rather than CF-side tag. Real client uses a
+  shared per-token rate limiter keyed by API token hash.
 - Subtask 3: `internal/naming/` names + ownership tag helpers.
+- Subtasks 4–8: `internal/workload` token Secret + DaemonSet builders,
+  pinned cloudflared image const, token checksum rollout annotation, tunnel
+  reconciler for credential resolution / ID-based D9 tunnel create-adopt /
+  token Secret upsert / DaemonSet upsert, token rotation, finalizer cleanup,
+  `Ready` + `Progressing` conditions, and events (`CreatedTunnel`,
+  `TokenRotated`). RBAC markers regenerated for Secrets, DaemonSets, Events.
+  Tunnel-owned Secrets and DaemonSets have ownerReferences and are watched by
+  the Tunnel controller. DaemonSet builder sets `ClusterFirstWithHostNet` when
+  `hostNetwork: true`.
+  Tests added for workload builders and tunnel create/adopt/foreign
+  refusal/token rotation/finalizer/condition transitions.
+- Subtask 9: Helm CRDs synced from `config/crd/bases` into
+  `charts/cfzt-operator/crds/`; chart lint and template render pass; NOTES
+  credential example now includes both `accountId` and `apiToken`;
+  `rtk make test` is green.
 
-Next: Slice 1 subtask 4 (workload builders) — but note subtask 5 (controller)
-must adopt the amended D9 flow (Get-by-ID + List-by-name +
-refuse-on-collision). Controller Secret reads should use
-`spec.cloudflared.namespace` for the credentials Secret namespace.
+Next: Slice 2 subtask 1 (`CloudflareExposure` types + CRD validation), then
+Slice 2 subtask 2 (`internal/tunnelconfig` builder). Live-cluster Slice 1
+smoke (`helm install` + apply real `CloudflareTunnel`) remains manual because
+it requires a Kubernetes cluster and Cloudflare credentials.
 
 ## 3. Slice plan
 
@@ -66,8 +82,8 @@ Per `spec.md ## Implementation slices` → Slice 1. Outcome: `CloudflareTunnel` 
 
 5. **Tunnel controller reconcile loop (no Exposure dependency yet).**
    - Files: `internal/controller/cloudflaretunnel_controller.go`, wiring in `cmd/main.go`.
-   - Implements: `spec.md ## CRD model` (CloudflareTunnel responsibilities 1–5, 8), `## Ownership and deletion semantics` (tunnel comment tag + foreign-tunnel guard → `Reason=ForeignTunnel`), `AGENTS.md ## Reconciliation Rules`. D19 `MaxConcurrentReconciles=1`.
-   - Tests: `TestTunnelCreate`, `TestTunnelAdopt`, `TestTunnelForeignTunnelRefuses` (extra coverage for adoption-with-foreign-tag path).
+   - Implements: `spec.md ## CRD model` (CloudflareTunnel responsibilities 1–5, 8), `## Ownership and deletion semantics` (D9 status-ID ownership + name collision guard → `Reason=ForeignTunnel`), `AGENTS.md ## Reconciliation Rules`. D19 `MaxConcurrentReconciles=1`.
+   - Tests: `TestTunnelCreate`, `TestTunnelAdopt`, `TestTunnelForeignTunnelRefuses`.
 
 6. **Token rotation + checksum-driven rollout.**
    - Files: extend `internal/controller/cloudflaretunnel_controller.go`, `internal/workload/daemonset.go`.
@@ -81,13 +97,13 @@ Per `spec.md ## Implementation slices` → Slice 1. Outcome: `CloudflareTunnel` 
 
 8. **Status conditions + events.**
    - Files: extend tunnel controller; small helper in `internal/controller/conditions.go`.
-   - Implements: `spec.md ## Status and conditions` (D8 — `Ready` + `Progressing` only; reasons `CredentialsMissing`, `TunnelCreating`, `TunnelAdopted`, `TokenFetchFailed`, `WorkloadNotReady`, `Reconciled`), `## Observability` (events `AdoptedTunnel`, `TokenRotated`).
+   - Implements: `spec.md ## Status and conditions` (D8 — `Ready` + `Progressing` only; reasons `CredentialsMissing`, `TunnelCreating`, `TokenFetchFailed`, `WorkloadNotReady`, `Reconciled`), `## Observability` (events `CreatedTunnel`, `TokenRotated`).
    - Tests: assertions woven into existing tunnel envtests; one focused `TestTunnelConditionsTransition`.
 
-9. **Helm chart skeleton + CI green.**
-   - Files: `charts/cfzt-operator/Chart.yaml`, `values.yaml`, `crds/cloudflaretunnel.yaml` (script-copied from `config/crd`), `templates/{deployment,serviceaccount,clusterrole,clusterrolebinding,role-leader-election,rolebinding-leader-election,NOTES.txt}`. `.github/workflows/ci.yaml` exercise.
+9. **Helm chart sync + CI green.**
+   - Files: existing `charts/cfzt-operator/Chart.yaml`, `values.yaml`, `crds/{cloudflaretunnel,cloudflareexposure}.yaml` (copied from `config/crd` by `rtk make helm-sync-crds`), `templates/{deployment,serviceaccount,clusterrole,clusterrolebinding,role-leader-election,rolebinding-leader-election,NOTES.txt}`. `.github/workflows/ci.yaml` exercise.
    - Implements: D17 chart layout, `spec.md ## Helm chart layout`, `## RBAC` table (minus Service / HTTPRoute rows — those land in Slice 2/3), D23 NOTES.txt GitOps caveat.
-   - Tests: `helm lint charts/cfzt-operator`; `make manifests generate && git diff --exit-code` clean in CI; `rtk make test` green.
+   - Tests: `rtk helm lint charts/cfzt-operator`; `rtk make manifests generate && rtk git diff --exit-code` clean in CI; `rtk make test` green.
 
 **Definition of done** (from `spec.md ## Implementation slices ### Slice 1`):
 
@@ -98,13 +114,13 @@ Per `spec.md ## Implementation slices` → Slice 1. Outcome: `CloudflareTunnel` 
 - `ci.yaml` green.
 - `helm install` against a fresh cluster works.
 
-Subtask-derived additions: `TestCloudflareTunnelCRDValidation`, `TestTunnelForeignTunnelRefuses`, `TestTunnelConditionsTransition` also pass; `helm lint` clean.
+Subtask-derived additions: `TestCloudflareTunnelCRDValidation`, `TestTunnelForeignTunnelRefuses`, `TestTunnelConditionsTransition`, `TestDaemonSetSpecMatchesSpec`, `TestTokenChecksumAnnotation`, and `TestHostNetworkPropagates` also pass; `helm lint` clean.
 
 **Risks**
 
 - SDK-shape uncertainty (G1 / D13). `cloudflare-go/v4` Tunnels.Token surface may differ from `spec.md ## Cloudflare SDK method mapping`. Use Cloudflare MCP server before writing real client; isolate inside `internal/cloudflare`.
-- DaemonSet readiness racing initial token write — if DS rolls out before Secret exists, pods crash-loop. Order writes: Secret first, DS second; treat DS ready-replica count as the gate for `Ready=True` per spec Tunnel responsibility 8.
-- Foreign-tunnel detection ambiguity: account already has a tunnel of the same name. Spec mandates `Reason=ForeignTunnel`, no mutation (`## Ownership and deletion semantics`). Test must cover the bare untagged-and-named-collision case.
+- DaemonSet readiness racing initial token write — implemented order is Secret first, DS second; DS ready-replica count gates `Ready=True` per spec Tunnel responsibility 8.
+- Foreign-tunnel detection ambiguity: account already has a tunnel of the same name. Spec mandates `Reason=ForeignTunnel`, no mutation (`## Ownership and deletion semantics`). `TestTunnelForeignTunnelRefuses` covers the name-collision/no-local-ID case.
 
 ### Slice 2 — Exposure: routes, DNS, Access
 

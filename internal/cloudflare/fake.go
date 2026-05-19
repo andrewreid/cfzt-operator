@@ -15,11 +15,22 @@ import (
 type FakeClient struct {
 	mu      sync.Mutex
 	tunnels map[string]*Tunnel
+	tokens  map[string]string
 }
 
 // NewFake returns a ready-to-use FakeClient.
 func NewFake() *FakeClient {
-	return &FakeClient{tunnels: make(map[string]*Tunnel)}
+	return &FakeClient{
+		tunnels: make(map[string]*Tunnel),
+		tokens:  make(map[string]string),
+	}
+}
+
+// SetTunnelToken overrides the deterministic token for id.
+func (f *FakeClient) SetTunnelToken(id, token string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.tokens[id] = token
 }
 
 func (f *FakeClient) Tunnels() Tunnels {
@@ -82,6 +93,9 @@ func (t *fakeTunnels) Token(_ context.Context, id string) (string, error) {
 	defer t.fc.mu.Unlock()
 	if _, ok := t.fc.tunnels[id]; !ok {
 		return "", ErrNotFound
+	}
+	if token, ok := t.fc.tokens[id]; ok {
+		return token, nil
 	}
 	sum := sha256.Sum256([]byte("fake-token:" + id))
 	return fmt.Sprintf("%x", sum), nil

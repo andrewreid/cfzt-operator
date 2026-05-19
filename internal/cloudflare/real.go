@@ -2,9 +2,12 @@ package cloudflare
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"math/rand"
 	"net/http"
+	"sync"
 	"time"
 
 	cf "github.com/cloudflare/cloudflare-go/v4"
@@ -18,6 +21,8 @@ const (
 	defaultBurst     = 8
 	maxRetries       = 5
 )
+
+var limiterByToken sync.Map
 
 // RealClient wraps the cloudflare-go/v4 SDK behind the Client interface.
 // All SDK imports are confined to this file; controllers never see cloudflare-go.
@@ -39,8 +44,15 @@ func New(accountID, apiToken string) (*RealClient, error) {
 	return &RealClient{
 		api:       api,
 		accountID: accountID,
-		limiter:   rate.NewLimiter(defaultRateLimit, defaultBurst),
+		limiter:   limiterForToken(apiToken),
 	}, nil
+}
+
+func limiterForToken(apiToken string) *rate.Limiter {
+	sum := sha256.Sum256([]byte(apiToken))
+	key := fmt.Sprintf("%x", sum)
+	actual, _ := limiterByToken.LoadOrStore(key, rate.NewLimiter(defaultRateLimit, defaultBurst))
+	return actual.(*rate.Limiter)
 }
 
 func (c *RealClient) Tunnels() Tunnels {
@@ -161,6 +173,12 @@ func (t *realTunnels) Delete(ctx context.Context, id string) error {
 				AccountID: cf.F(t.client.accountID),
 			},
 		)
+		if err != nil {
+			var apiErr *cf.Error
+			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+				return ErrNotFound
+			}
+		}
 		return err
 	})
 }
