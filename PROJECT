@@ -17,4 +17,13 @@ resources:
   kind: CloudflareTunnel
   path: github.com/andrewreid/cfzt-operator/api/v1alpha1
   version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: reid.ee
+  group: cfzt
+  kind: CloudflareExposure
+  path: github.com/andrewreid/cfzt-operator/api/v1alpha1
+  version: v1alpha1
 version: "3"

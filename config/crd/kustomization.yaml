@@ -3,6 +3,7 @@
 # It should be run by config/default
 resources:
 - bases/cfzt.reid.ee_cloudflaretunnels.yaml
+- bases/cfzt.reid.ee_cloudflareexposures.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:
