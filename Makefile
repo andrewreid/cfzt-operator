@@ -127,6 +127,25 @@ docker-build: ## Build docker image with the manager.
 docker-push: ## Push docker image with the manager.
 	$(CONTAINER_TOOL) push ${IMG}
 
+CHART_DIR ?= charts/cfzt-operator
+CHART_OUT ?= dist
+HELM_VERSION ?= 0.0.0-dev
+
+.PHONY: helm-sync-crds
+helm-sync-crds: manifests ## Copy generated CRDs into the Helm chart.
+	@mkdir -p $(CHART_DIR)/crds
+	cp config/crd/bases/cfzt.reid.ee_cloudflaretunnels.yaml $(CHART_DIR)/crds/cloudflaretunnel.yaml
+	cp config/crd/bases/cfzt.reid.ee_cloudflareexposures.yaml $(CHART_DIR)/crds/cloudflareexposure.yaml
+
+.PHONY: helm-lint
+helm-lint: ## Lint the Helm chart.
+	helm lint $(CHART_DIR)
+
+.PHONY: helm-package
+helm-package: helm-sync-crds ## Package the Helm chart as an OCI artifact (D14, D17).
+	@mkdir -p $(CHART_OUT)
+	helm package $(CHART_DIR) --version $(HELM_VERSION) --app-version $(HELM_VERSION) --destination $(CHART_OUT)
+
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:
 # - be able to use docker buildx. More info: https://docs.docker.com/build/buildx/
