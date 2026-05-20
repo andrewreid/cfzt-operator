@@ -20,15 +20,17 @@ const (
 	ReasonAccessAppPending   = "AccessAppPending"
 	ReasonDNSWriteFailed     = "DNSWriteFailed"
 	ReasonBlockedByExposures = "BlockedByExposures"
+	ReasonForeignPolicy      = "ForeignPolicy"
 	ReasonReconciled         = "Reconciled"
 
-	EventCreatedTunnel      = "CreatedTunnel"
-	EventCreatedAccessApp   = "CreatedAccessApp"
-	EventHostnameConflict   = "HostnameConflict"
-	EventForeignTunnel      = "ForeignTunnel"
-	EventReconcileFailed    = "ReconcileFailed"
-	EventTokenRotated       = "TokenRotated"
-	EventBlockedByExposures = "BlockedByExposures"
+	EventCreatedTunnel       = "CreatedTunnel"
+	EventCreatedAccessApp    = "CreatedAccessApp"
+	EventCreatedAccessPolicy = "CreatedAccessPolicy"
+	EventHostnameConflict    = "HostnameConflict"
+	EventForeignTunnel       = "ForeignTunnel"
+	EventReconcileFailed     = "ReconcileFailed"
+	EventTokenRotated        = "TokenRotated"
+	EventBlockedByExposures  = "BlockedByExposures"
 )
 
 func setCondition(conditions *[]metav1.Condition, conditionType string, status metav1.ConditionStatus, reason, message string, observedGeneration int64) {

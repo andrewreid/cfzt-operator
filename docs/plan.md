@@ -112,12 +112,28 @@ Completed on 2026-05-20:
   reject, empty-rules reject, bad `sessionDuration`, missing
   `credentialsSecretRef.namespace`, missing `decision`. `rtk make test`
   green.
+- Slice 4 subtask 4: `CloudflareAccessPolicy` controller core added
+  (`internal/controller/cloudflareaccesspolicy_controller.go`) and wired in
+  `cmd/main.go` with `MaxConcurrentReconciles=1`. Reconcile resolves
+  cluster-scoped credentials, creates a CF Access policy when no local
+  `status.policyId` exists, refuses name-colliding policies with
+  `Reason=ForeignPolicy`, verifies status-ID name matches before reporting
+  ready, and guards finalizer delete against stale/foreign status IDs by
+  reading the policy first. RBAC markers were regenerated and deploy surfaces
+  were kept coherent now that the manager watches the new kind:
+  `config/crd/kustomization.yaml` includes the CFAP CRD,
+  `charts/cfzt-operator/crds/cloudflareaccesspolicy.yaml` is synced, Helm
+  ClusterRole includes CFAP verbs, and stale chart `CloudflareExposure` CRD
+  policyRef.name drift was synced. Tests added/expanded:
+  `TestAccessPolicyCreate`, `TestAccessPolicyCreateUsesSpecPolicyName`,
+  `TestAccessPolicyForeignRefuses`, `TestAccessPolicyStaleStatusIDRecreates`,
+  `TestAccessPolicyForeignStatusIDRefuses`,
+  `TestAccessPolicyFinalizerBlocksForeignStatusID`. `rtk make test`,
+  `rtk go test ./...`, and `rtk helm lint charts/cfzt-operator` are green.
 
-Next: manual live-cluster smoke. Live-cluster Slice 1, Slice 2, and Slice 3
-smoke (`helm install`, real `CloudflareTunnel`, real `CloudflareExposure`,
-Service `sourceRef`, Access challenge curl, external-origin curl, and source
-deletion cascade) remain manual because they require a Kubernetes cluster and
-Cloudflare credentials.
+Next: Slice 4 subtask 5 (rule-hash drift detection + update path). Manual
+live-cluster smoke for Slices 1-4 remains pending because it requires a
+Kubernetes cluster and Cloudflare credentials.
 
 ## 3. Slice plan
 

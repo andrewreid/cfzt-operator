@@ -55,6 +55,7 @@ rules:
 - apiGroups:
   - cfzt.reid.ee
   resources:
+  - cloudflareaccesspolicies
   - cloudflareexposures
   - cloudflaretunnels
   verbs:
@@ -68,6 +69,7 @@ rules:
 - apiGroups:
   - cfzt.reid.ee
   resources:
+  - cloudflareaccesspolicies/finalizers
   - cloudflareexposures/finalizers
   - cloudflaretunnels/finalizers
   verbs:
@@ -75,6 +77,7 @@ rules:
 - apiGroups:
   - cfzt.reid.ee
   resources:
+  - cloudflareaccesspolicies/status
   - cloudflareexposures/status
   - cloudflaretunnels/status
   verbs:

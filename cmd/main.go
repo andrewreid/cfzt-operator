@@ -209,6 +209,15 @@ func main() {
 		setupLog.Error(err, "Failed to create controller", "controller", "cloudflareexposure")
 		os.Exit(1)
 	}
+
+	if err := (&controller.CloudflareAccessPolicyReconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorder("cloudflareaccesspolicy-controller"),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "cloudflareaccesspolicy")
+		os.Exit(1)
+	}
 	// +kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

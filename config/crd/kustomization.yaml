@@ -4,6 +4,7 @@
 resources:
 - bases/cfzt.reid.ee_cloudflaretunnels.yaml
 - bases/cfzt.reid.ee_cloudflareexposures.yaml
+- bases/cfzt.reid.ee_cloudflareaccesspolicies.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:
