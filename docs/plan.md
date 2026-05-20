@@ -70,6 +70,23 @@ Completed on 2026-05-19:
   multi-port rejection, source deletion cleanup path, HTTPRoute hostname
   derivation, CRD-absent discovery, and Slice 3 CRD validation relaxation.
 
+Completed on 2026-05-20:
+- Slice 4 subtask 1: `CloudflareAccessPolicy` cluster-scoped types +
+  CRD validation markers (`api/v1alpha1/cloudflareaccesspolicy_types.go`).
+  CRD generated at `config/crd/bases/cfzt.reid.ee_cloudflareaccesspolicies.yaml`.
+  Two spec deviations vs. plan, both forced by CRD machinery:
+  (a) `spec.rules.{include,exclude,require}` lists are not `omitempty` and
+  carry `+kubebuilder:default={}` — required for the CEL `size(self.rules.*)`
+  rule to evaluate when callers omit the field; (b) `MaxItems=64` on each
+  rule list plus `MaxLength` bounds on `AccessRule` string fields
+  (Email 320, EmailDomain 253, IP 43, ServiceToken 36, GeoCountryCode 2)
+  added to keep the per-rule discriminated-union CEL inside the cost
+  estimator budget. `TestCloudflareAccessPolicyCRDValidation` covers valid
+  manifest, decision-enum reject, two-field-rule reject, zero-field-rule
+  reject, empty-rules reject, bad `sessionDuration`, missing
+  `credentialsSecretRef.namespace`, missing `decision`. `rtk make test`
+  green.
+
 Next: manual live-cluster smoke. Live-cluster Slice 1, Slice 2, and Slice 3
 smoke (`helm install`, real `CloudflareTunnel`, real `CloudflareExposure`,
 Service `sourceRef`, Access challenge curl, external-origin curl, and source
