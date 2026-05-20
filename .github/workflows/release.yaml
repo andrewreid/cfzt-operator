@@ -116,8 +116,8 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    environment: cloudflare-live-smoke
-    concurrency: cloudflare-live-smoke
+    environment: live-cloudflare-smoke
+    concurrency: live-cloudflare-smoke
     permissions:
       contents: read
       packages: read
