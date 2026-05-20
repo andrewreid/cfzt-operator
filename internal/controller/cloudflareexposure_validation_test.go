@@ -57,7 +57,44 @@ var _ = Describe("CloudflareExposure CRD validation", func() {
 		obj.Spec.Access.PolicyRef.UUID = ""
 		err := k8sClient.Create(ctx, obj)
 		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("access.policyRef.uuid is required"))
+		Expect(err.Error()).To(ContainSubstring("access.policyRef requires exactly one of uuid or name"))
+	})
+
+	It("TestExposurePolicyRefOneOfValidation accepts uuid alone", func() {
+		ensureNamespace(ctx, "default")
+		obj := validExposure("policyref-uuid-alone")
+		obj.Spec.Access.PolicyRef = cfztv1alpha1.AccessPolicyRef{UUID: "00000000-0000-4000-8000-000000000002"}
+		Expect(k8sClient.Create(ctx, obj)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, obj)).To(Succeed())
+	})
+
+	It("TestExposurePolicyRefOneOfValidation accepts name alone", func() {
+		ensureNamespace(ctx, "default")
+		obj := validExposure("policyref-name-alone")
+		obj.Spec.Access.PolicyRef = cfztv1alpha1.AccessPolicyRef{Name: "family-only"}
+		Expect(k8sClient.Create(ctx, obj)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, obj)).To(Succeed())
+	})
+
+	It("TestExposurePolicyRefOneOfValidation rejects both uuid and name", func() {
+		ensureNamespace(ctx, "default")
+		obj := validExposure("policyref-both")
+		obj.Spec.Access.PolicyRef = cfztv1alpha1.AccessPolicyRef{
+			UUID: "00000000-0000-4000-8000-000000000003",
+			Name: "family-only",
+		}
+		err := k8sClient.Create(ctx, obj)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("access.policyRef requires exactly one of uuid or name"))
+	})
+
+	It("TestExposurePolicyRefOneOfValidation rejects neither uuid nor name when enabled", func() {
+		ensureNamespace(ctx, "default")
+		obj := validExposure("policyref-neither")
+		obj.Spec.Access.PolicyRef = cfztv1alpha1.AccessPolicyRef{}
+		err := k8sClient.Create(ctx, obj)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("access.policyRef requires exactly one of uuid or name"))
 	})
 
 	It("TestExposureCRDValidationSliceThreeRelaxed accepts Service sourceRef without origin", func() {

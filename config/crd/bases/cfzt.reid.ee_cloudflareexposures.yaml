@@ -69,6 +69,10 @@ spec:
                     description: AccessPolicyRef points at an existing Cloudflare
                       Access policy.
                     properties:
+                      name:
+                        maxLength: 253
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                        type: string
                       uuid:
                         pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$
                         type: string
@@ -138,10 +142,12 @@ spec:
             - message: hostname is required unless sourceRef.kind is HTTPRoute
               rule: has(self.hostname) || (has(self.sourceRef) && self.sourceRef.kind
                 == 'HTTPRoute')
-            - message: access.policyRef.uuid is required when access.enabled is true
+            - message: access.policyRef requires exactly one of uuid or name when
+                access.enabled is true
               rule: '!has(self.access) || !self.access.enabled || (has(self.access.policyRef)
-                && has(self.access.policyRef.uuid) && size(self.access.policyRef.uuid)
-                > 0)'
+                && ((has(self.access.policyRef.uuid) && size(self.access.policyRef.uuid)
+                > 0) != (has(self.access.policyRef.name) && size(self.access.policyRef.name)
+                > 0)))'
           status:
             description: CloudflareExposureStatus defines the observed state of CloudflareExposure.
             properties:

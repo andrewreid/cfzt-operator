@@ -71,6 +71,13 @@ Completed on 2026-05-19:
   derivation, CRD-absent discovery, and Slice 3 CRD validation relaxation.
 
 Completed on 2026-05-20:
+- Slice 4 subtask 2: `CloudflareExposure.spec.access.policyRef.name` added
+  (RFC 1123 subdomain pattern, maxLength 253) and the access CEL rule
+  rewritten to require exactly one of `policyRef.uuid` or `policyRef.name`
+  when `access.enabled: true`. `TestExposurePolicyRefOneOfValidation`
+  covers uuid-alone, name-alone, both-set reject, neither-set-when-enabled
+  reject. Existing "requires policy UUID" test message string updated to
+  match the new CEL message. `rtk make test` green.
 - Slice 4 subtask 1: `CloudflareAccessPolicy` cluster-scoped types +
   CRD validation markers (`api/v1alpha1/cloudflareaccesspolicy_types.go`).
   CRD generated at `config/crd/bases/cfzt.reid.ee_cloudflareaccesspolicies.yaml`.

@@ -64,6 +64,11 @@ type AccessPolicyRef struct {
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:Pattern=`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`
 	UUID string `json:"uuid,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	Name string `json:"name,omitempty"`
 }
 
 // AccessSpec controls Cloudflare Access protection.
@@ -80,7 +85,7 @@ type AccessSpec struct {
 //
 // +kubebuilder:validation:XValidation:rule="(has(self.sourceRef) && self.sourceRef.kind == 'Service') || (has(self.origin) && has(self.origin.protocol) && has(self.origin.host) && has(self.origin.port))",message="origin protocol, host, and port are required unless sourceRef.kind is Service"
 // +kubebuilder:validation:XValidation:rule="has(self.hostname) || (has(self.sourceRef) && self.sourceRef.kind == 'HTTPRoute')",message="hostname is required unless sourceRef.kind is HTTPRoute"
-// +kubebuilder:validation:XValidation:rule="!has(self.access) || !self.access.enabled || (has(self.access.policyRef) && has(self.access.policyRef.uuid) && size(self.access.policyRef.uuid) > 0)",message="access.policyRef.uuid is required when access.enabled is true"
+// +kubebuilder:validation:XValidation:rule="!has(self.access) || !self.access.enabled || (has(self.access.policyRef) && ((has(self.access.policyRef.uuid) && size(self.access.policyRef.uuid) > 0) != (has(self.access.policyRef.name) && size(self.access.policyRef.name) > 0)))",message="access.policyRef requires exactly one of uuid or name when access.enabled is true"
 type CloudflareExposureSpec struct {
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:MaxLength=120
