@@ -13,7 +13,7 @@ The operator manages the Cloudflare-side lifecycle needed to make exposure work:
 - Tunnel public hostname / published application route configuration via the remotely-managed tunnel-config endpoint.
 - Public DNS CNAME records pointing the hostname at the tunnel.
 - Cloudflare Access application creation and update.
-- Cloudflare Access policy binding (existing policies only in MVP).
+- Cloudflare Access policy binding (existing policies by UUID in MVP Slices 1–2; managed `CloudflareAccessPolicy` CRs in Slice 4).
 - Status reporting back into Kubernetes.
 - Safe cleanup of Cloudflare resources owned by the operator.
 
@@ -43,7 +43,7 @@ These are resolved. Treat them as binding constraints, not options.
 |---|----------|
 | D1 | Tunnel configuration is **remotely-managed only**. Operator writes ingress rules via the `cfd_tunnel/{id}/configurations` endpoint. Cloudflared pods are never given a `config.yml`. |
 | D2 | Operator **manages public DNS CNAMEs** by default. `CloudflareTunnel.spec.dns.manage: false` opts out completely — when off the operator creates **no** external DNS records and emits **no** external-dns annotations. |
-| D3 | `CloudflareAccessPolicy` CRD is **out of MVP**. `CloudflareExposure.spec.access.policyRef.uuid` references an existing Cloudflare Access policy by UUID. Name lookup is not supported in MVP. |
+| D3 | **Superseded by D24.** Previously: `CloudflareAccessPolicy` CRD out of MVP; `CloudflareExposure.spec.access.policyRef.uuid` references existing Cloudflare Access policy by UUID. UUID-only binding remains supported alongside managed policies post-Slice 4. |
 | D4 | Cloudflared uses a **per-tunnel token**, retrieved by the operator and stored in an operator-managed Kubernetes Secret. No `cert.pem`. |
 | D5 | The user interface is **CR-only**. `CloudflareExposure` is the workload-facing CR. There is no annotation controller in MVP. An annotation→Exposure convenience layer may be added post-MVP without changing the core. |
 | D6 | `CloudflareTunnel` is **cluster-scoped**. The cloudflared workload it manages is namespaced (default namespace `cfzt-system`, override via `spec.cloudflared.namespace`). |
@@ -64,6 +64,7 @@ These are resolved. Treat them as binding constraints, not options.
 | D21 | **Finalizer string**: `cfzt.reid.ee/finalizer` on both CRDs. |
 | D22 | **Minimum Kubernetes version: 1.27.** Required for stable CEL validation (`x-kubernetes-validations`) used by CRD schema (see `## CRD validation`). |
 | D23 | **GitOps caveat for Helm CRDs**: D17 places CRDs in `charts/cfzt-operator/crds/` (Helm 3 native install-only behaviour). ArgoCD users who render the chart and apply manifests via Application sync will see CRDs *not* upgraded on chart upgrade — matches D15 delete-and-recreate policy. Flux users should set `install.crds: Create` and `upgrade.crds: CreateReplace` with care, again matching D15. Document this in chart `NOTES.txt`. |
+| D24 | **`CloudflareAccessPolicy` CRD is in scope, ships in Slice 4.** Cluster-scoped CRD modelling reusable account-level Cloudflare Access policies with a structured rule subset (decisions: allow/deny/bypass/non_identity; rule types: email, email_domain, ip, everyone, service_token, geo; rule groups: include/exclude/require). `CloudflareExposure.spec.access.policyRef` gains a `name` field that references a managed Policy CR; exactly one of `{uuid, name}` is required when `access.enabled: true`. Name-colliding pre-existing CF policies are NOT auto-adopted (mirrors D9): `Reason=ForeignPolicy`. Deletion of a Policy CR is blocked while ≥1 `CloudflareExposure` references it (`Reason=BlockedByExposures`). Policy ownership is recorded via `status.policyId`; the CF-side policy carries `managed-by=cfzt-operator` and `source-uid=<CloudflareAccessPolicy.uid>` in its tags/decoration field (verify via Cloudflare MCP at implementation time — fall back to ID-only tracking like tunnels if no taggable field exists). |
 
 ## Design philosophy
 
@@ -98,16 +99,16 @@ Supported:
 - Creation and update of Cloudflare published hostname routes via tunnel-config (D1, D11).
 - Creation and update of Cloudflare DNS CNAMEs (D2, when enabled).
 - Creation and update of Cloudflare Access applications.
-- Binding of pre-existing Access policies to Access applications by UUID (D3).
+- Binding of pre-existing Access policies to Access applications by UUID (D3 / D24 — MVP Slices 1–2).
+- Managed `CloudflareAccessPolicy` CRD with structured rule subset (D24 — Slice 4).
 - External (non-K8s) origins (D16).
-- `Ready` and `Progressing` conditions on both CRDs (D8).
+- `Ready` and `Progressing` conditions on all CRDs (D8).
 - Finalizers for owned Cloudflare resources.
 - Helm OCI chart (D17) + CI/release pipeline (D18).
 
 Deferred:
 
 - Annotation-driven UX (D5, post-MVP convenience layer).
-- `CloudflareAccessPolicy` CRD (D3).
 - HTTPRoute and Service `sourceRef` derivation (Slice 3).
 - Ingress source support.
 - Private network CIDR routes.
@@ -305,7 +306,9 @@ spec:
   access:
     enabled: true
     policyRef:
-      uuid: 0123abcd-4567-89ef-0123-456789abcdef
+      # exactly one of {uuid, name} when access.enabled: true
+      uuid: 0123abcd-4567-89ef-0123-456789abcdef    # bind a Cloudflare-managed policy by UUID
+      # name: family-only                            # OR reference a CloudflareAccessPolicy CR (Slice 4, D24)
 status:
   cloudflare:
     accessApplicationId: ""
@@ -328,7 +331,10 @@ Kubebuilder markers:
 
 1. Resolve the referenced `CloudflareTunnel` and read its credentials.
 2. Validate origin and hostname.
-3. Ensure the Access application exists for `spec.hostname` when `access.enabled: true`; bind the policy UUID (D3).
+3. Ensure the Access application exists for `spec.hostname` when `access.enabled: true`. Resolve the bound policy UUID:
+   - `policyRef.uuid` set → use verbatim (D3).
+   - `policyRef.name` set → `Get` the named `CloudflareAccessPolicy`; if its `status.policyId` is empty or `Ready=False`, surface `Ready=False, Reason=PolicyNotReady` on this Exposure and requeue. Otherwise use `status.policyId`.
+   - Bind the resolved UUID via `Applications.Policies.Update` (D24, Slice 4).
 4. Ensure the proxied DNS CNAME exists for `spec.hostname` → `<tunnelId>.cfargotunnel.com` when the tunnel has `dns.manage: true`.
 5. Enqueue the referenced `CloudflareTunnel` so the tunnel reconciler updates the ingress doc (D11).
 6. Read back the route placement from the tunnel's `status.routes[]` and record `publicHostnameRouteHash` in this Exposure's status.
@@ -336,6 +342,79 @@ Kubebuilder markers:
 8. On deletion, run a finalizer (`cfzt.reid.ee/finalizer`) that removes DNS record + Access app, then enqueues the tunnel for ingress-doc update.
 
 `access.enabled: false` skips Access application creation; the hostname is reachable without auth.
+
+### CloudflareAccessPolicy (cluster-scoped)
+
+Ships in Slice 4 (D24). Models a reusable account-level Cloudflare Access policy. One CR → one CF policy, referenced by N `CloudflareExposure` CRs via `spec.access.policyRef.name`.
+
+```yaml
+apiVersion: cfzt.reid.ee/v1alpha1
+kind: CloudflareAccessPolicy
+metadata:
+  name: family-only
+spec:
+  credentialsSecretRef:
+    name: cloudflare-credentials
+    namespace: cfzt-system          # required; cluster-scoped CR has no implicit namespace
+    keys:
+      accountId: accountId          # default "accountId"
+      apiToken: apiToken            # default "apiToken"
+  policyName: family-only-cfzt      # name in Cloudflare; defaults to "<metadata.name>-cfzt"
+  decision: allow                   # allow | deny | bypass | non_identity
+  rules:
+    include:                        # any-of match
+      - emailDomain: reid.ee
+      - email: alice@example.com
+    exclude: []                     # none-of match
+    require: []                     # all-of match
+  sessionDuration: 24h              # optional
+  purposeJustification:
+    required: false
+    prompt: ""                      # optional
+status:
+  policyId: ""                      # CF policy UUID once created
+  observedRulesHash: ""             # sha256 of canonical rules JSON, for drift detection
+  referencedBy:                     # populated from cross-watch on Exposures
+    - namespace: media
+      name: jellyfin
+      uid: 4f8b1c2e-...
+  referencedByCount: 0              # convenience int for kubectl printcolumn
+  conditions: []
+```
+
+Rule item shape — discriminated union, exactly one field set per item:
+
+```go
+type AccessRule struct {
+    Email          string `json:"email,omitempty"`           // exact email
+    EmailDomain    string `json:"emailDomain,omitempty"`     // domain (no @)
+    IP             string `json:"ip,omitempty"`              // IP or CIDR
+    Everyone       bool   `json:"everyone,omitempty"`        // true => match all
+    ServiceToken   string `json:"serviceToken,omitempty"`    // service token id (UUID)
+    GeoCountryCode string `json:"geoCountryCode,omitempty"`  // ISO 3166-1 alpha-2
+}
+```
+
+Kubebuilder markers:
+
+- `+kubebuilder:resource:scope=Cluster,shortName=cfap`
+- `+kubebuilder:subresource:status`
+- `+kubebuilder:printcolumn:name=Decision,type=string,JSONPath=.spec.decision`
+- `+kubebuilder:printcolumn:name=PolicyID,type=string,JSONPath=.status.policyId`
+- `+kubebuilder:printcolumn:name=RefBy,type=integer,JSONPath=.status.referencedByCount`
+- `+kubebuilder:printcolumn:name=Ready,type=string,JSONPath=.status.conditions[?(@.type=="Ready")].status`
+- `+kubebuilder:printcolumn:name=Age,type=date,JSONPath=.metadata.creationTimestamp`
+
+`CloudflareAccessPolicy` controller responsibilities:
+
+1. Resolve Cloudflare credentials from the referenced Secret (same shape as Tunnel; namespace stored on the field).
+2. Reconcile policy identity by ID-record (mirrors D9 tunnel pattern): if `status.policyId` is set, `Get(id)` and verify name matches `spec.policyName`; if unset, `List(name=spec.policyName)` — zero hits → create; one or more hits → `Ready=False, Reason=ForeignPolicy`, no mutation.
+3. Write `source-uid` tag on the CF policy at create/update time (verify field via Cloudflare MCP at implementation; fall back to ID-only tracking like tunnels if SDK has no comment/tag surface on policies).
+4. Compare desired rules JSON against `status.observedRulesHash`; on mismatch, `Update` the CF policy and rewrite the hash.
+5. List `CloudflareExposure` CRs referencing this Policy CR by `spec.access.policyRef.name`; populate `status.referencedBy[]` and `status.referencedByCount`.
+6. Enqueue each referencing Exposure when `status.policyId` first becomes set or `observedRulesHash` changes (cross-watch — see additions to `## Tunnel configuration concurrency`).
+7. Finalizer `cfzt.reid.ee/finalizer`: blocks deletion while `len(status.referencedBy) > 0` → `Ready=False, Reason=BlockedByExposures`. Once unblocked: delete CF policy if `source-uid` matches (or `status.policyId` matches when no tag field); remove finalizer.
+8. Set `Ready=True` once `status.policyId` is set and `observedRulesHash` matches desired rules.
 
 ## CRD validation
 
@@ -350,7 +429,13 @@ CRD fields are validated by `+kubebuilder:validation:*` markers and `x-kubernete
 - `spec.origin.host`: required when `spec.origin` present, minLength 1.
 - `spec.origin.port`: int, 1–65535.
 - `spec.access.enabled`: bool, default `false`.
-- `spec.access.policyRef.uuid`: required when `access.enabled: true`, pattern UUID v4.
+- `spec.access.policyRef.uuid`: optional, pattern UUID v4.
+- `spec.access.policyRef.name`: optional, RFC 1123 subdomain pattern, maxLength 253 (refers to a `CloudflareAccessPolicy` `metadata.name`).
+- CEL on `spec.access`: when `enabled: true`, exactly one of `policyRef.uuid` or `policyRef.name` must be set:
+
+  ```
+  +kubebuilder:validation:XValidation:rule="!has(self.access) || !self.access.enabled || (has(self.access.policyRef) && ((has(self.access.policyRef.uuid) && size(self.access.policyRef.uuid) > 0) != (has(self.access.policyRef.name) && size(self.access.policyRef.name) > 0)))",message="access.policyRef requires exactly one of uuid or name when access.enabled is true"
+  ```
 
 `CloudflareTunnel`:
 
@@ -361,6 +446,21 @@ CRD fields are validated by `+kubebuilder:validation:*` markers and `x-kubernete
 - Credentials Secret namespace is always `spec.cloudflared.namespace` (default `cfzt-system`); the API intentionally stores that namespace once.
 - `spec.dns.manage`: bool, default `true`.
 - `spec.cloudflared.image`: pattern `^[a-z0-9./-]+(:[a-zA-Z0-9._-]+)?$`, not allowed to end `:latest`.
+
+`CloudflareAccessPolicy` (Slice 4, D24):
+
+- `spec.credentialsSecretRef.name`: required.
+- `spec.credentialsSecretRef.namespace`: required, RFC 1123 subdomain (cluster-scoped CR — namespace is stored on the field, not inherited).
+- `spec.credentialsSecretRef.keys.accountId`: optional, default `accountId`, maxLength 253.
+- `spec.credentialsSecretRef.keys.apiToken`: optional, default `apiToken`, maxLength 253.
+- `spec.policyName`: optional, defaults to `<metadata.name>-cfzt`; allowed charset matches CF Access policy name rules; maxLength 120.
+- `spec.decision`: required, enum `allow|deny|bypass|non_identity`.
+- `spec.rules.include`, `spec.rules.exclude`, `spec.rules.require`: optional lists of rule items (default `[]`).
+- Each rule item is a discriminated union with **exactly one** of `email`, `emailDomain`, `ip`, `everyone`, `serviceToken`, `geoCountryCode` set. CEL: `[has(self.email), has(self.emailDomain), has(self.ip), has(self.everyone), has(self.serviceToken), has(self.geoCountryCode)].filter(b, b).size() == 1`.
+- Spec-level CEL: `size(self.rules.include) + size(self.rules.exclude) + size(self.rules.require) >= 1` — empty policies forbidden.
+- `spec.sessionDuration`: optional, pattern `^[0-9]+(s|m|h|d|w|mo|y)$`.
+- `spec.purposeJustification.required`: bool, default `false`.
+- `spec.purposeJustification.prompt`: optional, maxLength 1000.
 
 ## Tunnel configuration concurrency
 
@@ -387,6 +487,12 @@ Cross-controller watches (D20):
 - Tunnel controller `.Watches(&CloudflareExposure{}, EnqueueRequestsFromMapFunc(exposureToTunnel))`.
 - Exposure controller `.Watches(&CloudflareTunnel{}, EnqueueRequestsFromMapFunc(tunnelToExposures))`.
 
+**Slice 4 additions (D24)**:
+
+- Policy controller `.Watches(&CloudflareExposure{}, EnqueueRequestsFromMapFunc(exposureToPolicy))` — refresh `status.referencedBy[]` when Exposures change `policyRef.name`.
+- Exposure controller `.Watches(&CloudflareAccessPolicy{}, EnqueueRequestsFromMapFunc(policyToExposures))` — propagate `status.policyId` becoming set into binding.
+- Policy controller `MaxConcurrentReconciles=1` (single writer per CF policy; raise post-Slice 4 if needed). Extends D19.
+
 ## Ownership and deletion semantics
 
 The operator is conservative. It only mutates Cloudflare resources whose ownership it can prove — **except for ingress rules inside the tunnel-config doc**, which are computed-from-K8s every reconcile and never adopted (D11).
@@ -397,12 +503,15 @@ The operator is conservative. It only mutates Cloudflare resources whose ownersh
 - **Access applications**: `tags` field (or `aud` claim) carries `managed-by=cfzt-operator` and `source-uid=<CloudflareExposure.uid>`. Name = `<displayName-or-metadata.name>-cfzt`.
 - **DNS records**: `comment` field carries `managed-by=cfzt-operator source-uid=<CloudflareExposure.uid>`.
 - **Ingress rules: not tagged.** The entire doc is overwritten each reconcile from K8s desired state.
+- **Access policies** (Slice 4, D24): `CloudflareAccessPolicy.status.policyId` is the authoritative ownership record (mirrors tunnels per D9). SDK tags/decoration carry `managed-by=cfzt-operator source-uid=<CloudflareAccessPolicy.uid>` if the policy resource supports a tag/comment field; verify at implementation via the Cloudflare MCP and fall back to ID-only if not. Name = `spec.policyName` (default `<metadata.name>-cfzt`).
 
 **Mutation rule.** Before update or delete of an Access app or DNS record, the operator MUST verify the resource's `source-uid` matches a current local CR of the expected kind. Mismatch or missing tag → `Ready=False, Reason=ForeignResource`, no destructive action. Tunnels follow the ID-based rule above instead.
 
 **Hostname conflict rule.** If an Access app or DNS record already exists for a hostname and its `source-uid` does not match the reconciling Exposure → `Ready=False, Reason=HostnameConflict`. Do not touch the conflicting resource. Requeue with backoff. (Ingress-rule conflicts inside the doc are resolved at build time: builder errors if two Exposures claim the same hostname, surfacing on both as `HostnameConflict`.)
 
 **Tunnel deletion rule.** A `CloudflareTunnel` with ≥1 referencing `CloudflareExposure` cannot complete deletion. The tunnel finalizer holds, sets `Ready=False, Reason=BlockedByExposures`.
+
+**Policy deletion rule** (Slice 4, D24). A `CloudflareAccessPolicy` with ≥1 referencing `CloudflareExposure` (via `spec.access.policyRef.name`) cannot complete deletion. The policy finalizer holds, sets `Ready=False, Reason=BlockedByExposures`. Mirrors the tunnel-deletion rule.
 
 **Exposure source GC.** When `spec.sourceRef` is set and resolves in the same namespace, the Exposure controller adds an `ownerReference` from itself to the source resource. K8s GC cascades source deletion into Exposure deletion → finalizer fires.
 
@@ -421,8 +530,8 @@ Every CRD exposes exactly two conditions:
 
 - `CredentialsMissing`, `CredentialsInvalid`
 - `TunnelCreating`, `TokenFetchFailed`, `WorkloadNotReady`
-- `OriginInvalid`, `HostnameConflict`, `ForeignResource`, `ForeignTunnel`
-- `AccessAppPending`, `PolicyNotFound`, `DNSWriteFailed`
+- `OriginInvalid`, `HostnameConflict`, `ForeignResource`, `ForeignTunnel`, `ForeignPolicy`
+- `AccessAppPending`, `PolicyNotFound`, `PolicyNotReady`, `DNSWriteFailed`
 - `BlockedByExposures`
 - `Reconciled`
 
@@ -445,6 +554,9 @@ API token MVP scopes:
 | `cfzt.reid.ee` | `cloudflaretunnels`, `cloudflareexposures` | `get,list,watch,create,update,patch,delete` | cluster |
 | `cfzt.reid.ee` | `cloudflaretunnels/status`, `cloudflareexposures/status` | `get,update,patch` | cluster |
 | `cfzt.reid.ee` | `cloudflaretunnels/finalizers`, `cloudflareexposures/finalizers` | `update` | cluster |
+| `cfzt.reid.ee` | `cloudflareaccesspolicies` | `get,list,watch,create,update,patch,delete` | cluster (Slice 4) |
+| `cfzt.reid.ee` | `cloudflareaccesspolicies/status` | `get,update,patch` | cluster (Slice 4) |
+| `cfzt.reid.ee` | `cloudflareaccesspolicies/finalizers` | `update` | cluster (Slice 4) |
 | `""` | `secrets` | `get,list,watch` | cluster (read credentials Secrets + own token Secrets) |
 | `""` | `secrets` | `create,update,patch,delete` | cluster — **operator contract**: only writes Secrets whose name matches `<CloudflareTunnel.metadata.name>-token` in `cloudflared.namespace`. Audit trail via Events. (K8s RBAC cannot pattern-match `resourceNames` so contract is enforced in code, not RBAC.) |
 | `apps` | `daemonsets` | `get,list,watch,create,update,patch,delete` | cluster — operator contract: only writes DaemonSets named `cloudflared-<CloudflareTunnel.metadata.name>` in `cloudflared.namespace`. |
@@ -513,6 +625,11 @@ Reference `cloudflare-go/v4` types and methods, not raw URLs. Use the [Cloudflar
 | List Access apps | `client.ZeroTrust.Access.Applications.List(ctx, ...)` |
 | Create Access app | `client.ZeroTrust.Access.Applications.New(ctx, ...)` |
 | Bind policy to app | `client.ZeroTrust.Access.Applications.Policies.Update(ctx, app, policy, ...)` |
+| List Access policies (account-level) | `client.ZeroTrust.Access.Policies.List(ctx, ...)` (Slice 4) |
+| Get Access policy | `client.ZeroTrust.Access.Policies.Get(ctx, id, ...)` (Slice 4) |
+| Create Access policy | `client.ZeroTrust.Access.Policies.New(ctx, ...)` (Slice 4) |
+| Update Access policy | `client.ZeroTrust.Access.Policies.Update(ctx, id, ...)` (Slice 4) |
+| Delete Access policy | `client.ZeroTrust.Access.Policies.Delete(ctx, id, ...)` (Slice 4) |
 
 Exact field names and pagination shape: confirm via MCP at implementation time. Wrap all calls behind the `internal/cloudflare` interface so the fake implementation in tests does not depend on the SDK shape.
 
@@ -595,12 +712,14 @@ Both workflows use `GITHUB_TOKEN` with `packages: write`.
 api/v1alpha1/
   cloudflaretunnel_types.go
   cloudflareexposure_types.go
+  cloudflareaccesspolicy_types.go  # Slice 4 (D24)
   groupversion_info.go
   zz_generated_deepcopy.go         # generated
 
 internal/controller/
   cloudflaretunnel_controller.go
   cloudflareexposure_controller.go
+  cloudflareaccesspolicy_controller.go  # Slice 4 (D24)
 
 internal/tunnelconfig/
   builder.go            # builds desired ingress[] from list of Exposures
@@ -613,6 +732,8 @@ internal/cloudflare/
   tunnels.go
   configurations.go
   access_applications.go
+  access_policies.go    # Slice 4 (D24) — reusable account-level policies
+                        # (distinct from access_applications.go which binds existing policy UUIDs to apps)
   dns.go
   zones.go              # zone cache + longest-suffix resolution
 
@@ -657,7 +778,9 @@ docs/
 - DNS record `comment`: `managed-by=cfzt-operator source-uid=<exposure-uid>`.
 - Access app `tags`: `managed-by=cfzt-operator`, `source-uid=<exposure-uid>`.
 - Tunnel ownership: tracked via `CloudflareTunnel.status.tunnelId` (no CF-side comment/tag — see D9).
-- Finalizer string: `cfzt.reid.ee/finalizer` on both CRDs (D21).
+- Access policy name in Cloudflare (Slice 4, D24): `<spec.policyName | metadata.name+"-cfzt">`.
+- Access policy ownership (Slice 4): tracked via `CloudflareAccessPolicy.status.policyId`; tags `managed-by=cfzt-operator` and `source-uid=<policy-cr-uid>` written if the SDK exposes a tag/comment field for policies (verify at implementation).
+- Finalizer string: `cfzt.reid.ee/finalizer` on all CRDs (D21, plus `CloudflareAccessPolicy` in Slice 4).
 - Tunnel ingress rule ordering: sorted by hostname (lexicographic). Catch-all `service: http_status:404` always last.
 
 ## Cloudflared pod spec
@@ -781,9 +904,33 @@ The implementer ships in slices. Each slice has a measurable definition of done.
 - HTTPRoute controller absent → operator boots clean with a log line "HTTPRoute CRD not found, controller disabled".
 - envtest tests pass: `TestSourceRefServiceSinglePort`, `TestSourceRefServiceMultiPortRejected`, `TestSourceRefDeletionCascades`, `TestHTTPRouteHostnameDerivation`, `TestHTTPRouteCRDAbsentBootsClean`.
 
+### Slice 4 — Managed Access policies
+
+**Outcome**: `CloudflareAccessPolicy` CR creates and maintains a reusable account-level Cloudflare Access policy. `CloudflareExposure.spec.access.policyRef.name` binds an Exposure to a managed policy as an alternative to `uuid`.
+
+**Steps**:
+
+1. `CloudflareAccessPolicy` types + CRD generation + CEL validation (structured rule subset, discriminated-union rule items).
+2. `internal/cloudflare/access_policies.go` interface + real + fake implementations (List, Get, Create, Update, Delete). Verify exact SDK paths via Cloudflare MCP.
+3. Policy controller: credential resolution, ID-based ownership reconciliation (mirrors D9 tunnel pattern; `Reason=ForeignPolicy` on collision), rule-hash drift detection, finalizer with `BlockedByExposures`.
+4. Cross-watch wiring: Policy ↔ Exposure (see additions to `## Tunnel configuration concurrency`).
+5. Exposure controller: resolve `policyRef.name` → `status.policyId`, bind via `Applications.Policies.Update`. `Reason=PolicyNotReady` when target Policy CR is not yet `Ready=True`.
+6. CRD validation update on Exposure: exactly-one-of {uuid, name} when access enabled.
+7. envtest coverage.
+
+**Definition of done**:
+
+- `kubectl apply` of a `CloudflareAccessPolicy` creates a CF Access policy, populates `status.policyId`, sets `Ready=True`.
+- A pre-existing CF policy with name collision and no local ID record → `Ready=False, Reason=ForeignPolicy`, no mutation of the foreign policy.
+- An Exposure with `policyRef.name` binds the policy ID once the Policy CR becomes ready.
+- `kubectl delete` of a Policy CR with referencing Exposures is blocked (`Reason=BlockedByExposures`); succeeds once references are removed.
+- Editing `spec.rules` on a Policy CR rewrites the CF policy and propagates a reconcile to all referencing Exposures.
+- envtest tests pass: `TestAccessPolicyCreate`, `TestAccessPolicyForeignRefuses`, `TestAccessPolicyRulesDrift`, `TestAccessPolicyFinalizerBlockedByExposures`, `TestAccessPolicyFinalizerUnblocks`, `TestExposurePolicyRefName`, `TestExposurePolicyRefNamePolicyNotReady`, `TestExposurePolicyRefOneOfValidation`.
+- Manual: dashboard shows the policy was created; `kubectl edit cfap` rolls the rules in CF within one reconcile.
+
 ### Post-MVP
 
-Annotation→Exposure convenience controller, `CloudflareAccessPolicy` CRD, parentRefs-based Gateway origin auto-resolution, Ingress source, private network routes.
+Annotation→Exposure convenience controller, parentRefs-based Gateway origin auto-resolution, Ingress source, private network routes, additional Access rule types (groups, IdP claims, certificate, mTLS, posture).
 
 ## Non-goals for early implementation
 
@@ -793,7 +940,7 @@ The early implementation does not:
 - Replace `external-dns` broadly.
 - Manage arbitrary Cloudflare DNS records (only proxied CNAMEs for managed hostnames).
 - Manage arbitrary Zero Trust settings.
-- Support every Access policy rule type (binds existing policies by UUID only).
+- Support every Access policy rule type. Slice 4 covers a structured subset (email, email_domain, ip, everyone, service_token, geo) across include/exclude/require groups. Other rule types (groups, IdP claims, certificate, mTLS, posture, country lists with negation, etc.) remain deferred.
 - Implement multi-tenant or multi-cluster semantics.
 - Depend on Helm operators, Ansible operators, or Crossplane.
 - Ship a validating or conversion webhook in MVP.

@@ -4,7 +4,9 @@
 
 Operational plan for shipping the cfzt-operator MVP in three slices (Tunnel/connector → Exposure → sourceRef derivation). Source of truth for architecture, decisions D1–D23, CRD shapes, RBAC, and DoD lists is `spec.md`. Operating handbook (bootstrap, commands, RTK, delegation, code rules) is `AGENTS.md`. This plan turns those into ordered, single-session subtasks with cited spec sections and test names.
 
-Not covered: post-MVP work (annotation UX, AccessPolicy CRD, Ingress source, WARP, Gateway, OLM, multi-cluster). Decisions are not re-derived here — see `spec.md ## Decisions`.
+Slice 4 (`CloudflareAccessPolicy` CRD, D24) added under `## 3. Slice plan` after Slice 3 ships — managed Access policies are now in scope per `spec.md ## Decisions` D24.
+
+Not covered: post-MVP work (annotation UX, Ingress source, WARP, Gateway, OLM, multi-cluster, additional Access rule types beyond Slice 4 subset). Decisions are not re-derived here — see `spec.md ## Decisions`.
 
 ## 2. Current state
 
@@ -271,6 +273,84 @@ Subtask-derived additions: `TestExposureCRDValidationSliceThreeRelaxed` also pas
 - Multi-port Service ambiguity — rejecting is correct per spec but produces confusing UX; ensure `Reason=OriginInvalid` carries port-count hint in `Message`.
 - Conditional HTTPRoute controller wiring must not panic when CRD appears after operator start. Spec only requires startup-time discovery; document in NOTES.txt that adding HTTPRoute CRD post-install needs operator restart.
 
+### Slice 4 — Managed Access policies
+
+Per `spec.md ## Implementation slices ### Slice 4` (D24). Outcome: `CloudflareAccessPolicy` CR creates and maintains a reusable account-level Cloudflare Access policy. `CloudflareExposure.spec.access.policyRef.name` binds an Exposure to a managed policy as an alternative to `uuid`.
+
+**Subtasks**
+
+1. **Define `CloudflareAccessPolicy` types + CRD validation.**
+   - Files: `api/v1alpha1/cloudflareaccesspolicy_types.go`, `api/v1alpha1/groupversion_info.go` (register).
+   - Implements: `spec.md ## CRD model` (CloudflareAccessPolicy), `## CRD validation` (CloudflareAccessPolicy block — credentialsSecretRef + namespace required, policyName default, decision enum, discriminated-union rule items with CEL exactly-one-of, non-empty rules CEL, sessionDuration pattern, purposeJustification shape), kubebuilder markers from spec (cluster-scoped, shortName `cfap`).
+   - Tests: `TestCloudflareAccessPolicyCRDValidation` (decision enum, rule discriminated-union, empty-rules rejection, sessionDuration pattern); `api/v1alpha1` deepcopy round-trip.
+   - Run `rtk make manifests generate`; commit generated CRD + deepcopy.
+
+2. **Extend Exposure CRD: `policyRef.name` + relaxed CEL.**
+   - Files: `api/v1alpha1/cloudflareexposure_types.go`.
+   - Implements: `spec.md ## CRD model` Exposure schema update (`policyRef.name`) + `## CRD validation` rewrite of the access CEL rule to exactly-one-of {uuid, name} when `access.enabled: true`.
+   - Tests: `TestExposurePolicyRefOneOfValidation` (uuid alone OK; name alone OK; both → reject; neither → reject when enabled; neither → OK when disabled).
+   - Regenerate manifests + commit.
+
+3. **`internal/cloudflare/access_policies.go` interface + fake + real.**
+   - Files: `internal/cloudflare/access_policies.go`, extend `internal/cloudflare/client.go`, `fake.go`, `real.go`.
+   - Implements: SDK mapping rows for `ZeroTrust.Access.Policies.{List,Get,New,Update,Delete}` per `spec.md ## Cloudflare SDK method mapping`. Verify exact paths via Cloudflare MCP first (G1 risk). Reuse per-token rate-limit bucket from Slice 1 client.
+   - Tests: `TestFakeAccessPolicyCreateGetDelete`, `TestFakeAccessPolicyListByName`, `TestFakeAccessPolicyUpdateRulesIdempotent`.
+
+4. **Policy controller core: credentials, ID-record reconcile, ForeignPolicy guard.**
+   - Files: `internal/controller/cloudflareaccesspolicy_controller.go`, wiring in `cmd/main.go` (`MaxConcurrentReconciles=1`).
+   - Implements: `spec.md ## CRD model` (CloudflareAccessPolicy responsibilities 1–3, 8), `## Ownership and deletion semantics` policy ownership rule (mirrors D9 tunnel pattern), `Reason=ForeignPolicy` on name-collision without local ID.
+   - Tests: `TestAccessPolicyCreate`, `TestAccessPolicyForeignRefuses`.
+
+5. **Rule-hash drift detection + update path.**
+   - Files: extend policy controller; helper `internal/controller/accesspolicy_hash.go` for canonical rules JSON → sha256.
+   - Implements: `spec.md ## CRD model` CloudflareAccessPolicy responsibility 4. Canonical JSON: rule fields sorted, groups in fixed order (include, exclude, require), empty groups omitted.
+   - Tests: `TestAccessPolicyRulesHashCanonical`, `TestAccessPolicyRulesDrift`.
+
+6. **`referencedBy[]` + `referencedByCount` from Exposure cross-watch.**
+   - Files: extend policy controller `SetupWithManager` with `.Watches(&CloudflareExposure{}, exposureToPolicy)`; reuse helpers in `internal/controller/conditions.go`.
+   - Implements: `spec.md ## CRD model` responsibility 5 + `## Tunnel configuration concurrency` Slice 4 additions (Policy↔Exposure watches).
+   - Tests: `TestAccessPolicyReferencedByPopulated`, `TestAccessPolicyReferencedByDecrements`.
+
+7. **Policy finalizer + `BlockedByExposures`.**
+   - Files: extend policy controller.
+   - Implements: D21 finalizer on `CloudflareAccessPolicy`; `spec.md ## Ownership and deletion semantics` policy deletion rule. Mutation guard: only delete CF policy when `source-uid` tag matches (fall back to ID equality if SDK has no tag field).
+   - Tests: `TestAccessPolicyFinalizerBlockedByExposures`, `TestAccessPolicyFinalizerUnblocks`.
+
+8. **Exposure controller: resolve `policyRef.name` → bind via `Applications.Policies.Update`.**
+   - Files: extend `internal/controller/cloudflareexposure_controller.go`; add `policyToExposures` watch map.
+   - Implements: `spec.md ## CRD model` Exposure responsibility 3 rewrite (uuid OR name resolution), `Reason=PolicyNotReady` when target Policy CR exists but is not yet `Ready=True` or `status.policyId` empty. D20 Slice 4 addition: Exposure `.Watches(&CloudflareAccessPolicy{}, policyToExposures)`.
+   - Tests: `TestExposurePolicyRefName` (happy path), `TestExposurePolicyRefNamePolicyNotReady`, `TestExposurePolicyRefNameMissingPolicyCR` (→ `Reason=PolicyNotFound`).
+
+9. **Status conditions + events.**
+   - Files: extend policy controller.
+   - Implements: D8 conditions on `CloudflareAccessPolicy`; reasons `ForeignPolicy`, `PolicyNotReady`, `BlockedByExposures`, `Reconciled`. Events: `CreatedAccessPolicy`, `UpdatedAccessPolicy`, `BlockedByExposures`.
+   - Tests: `TestAccessPolicyConditionsTransition`.
+
+10. **RBAC + Helm chart sync.**
+    - Files: kubebuilder RBAC markers for `cloudflareaccesspolicies{,/status,/finalizers}`; regenerate `charts/cfzt-operator/templates/clusterrole.yaml`; `rtk make helm-sync-crds` copies new CRD to `charts/cfzt-operator/crds/`.
+    - Implements: `spec.md ## RBAC` Slice 4 rows.
+    - Tests: `rtk make manifests generate && rtk git diff --exit-code` clean; `rtk helm lint charts/cfzt-operator` clean.
+
+**Definition of done** (from `spec.md ## Implementation slices ### Slice 4`):
+
+- `kubectl apply` of a `CloudflareAccessPolicy` creates a CF Access policy, populates `status.policyId`, sets `Ready=True`.
+- A pre-existing CF policy with name collision and no local ID record → `Ready=False, Reason=ForeignPolicy`, no mutation of the foreign policy.
+- An Exposure with `policyRef.name` binds the policy ID once the Policy CR becomes ready.
+- `kubectl delete` of a Policy CR with referencing Exposures is blocked (`Reason=BlockedByExposures`); succeeds once references are removed.
+- Editing `spec.rules` on a Policy CR rewrites the CF policy and propagates a reconcile to all referencing Exposures.
+- envtest tests pass: `TestAccessPolicyCreate`, `TestAccessPolicyForeignRefuses`, `TestAccessPolicyRulesDrift`, `TestAccessPolicyFinalizerBlockedByExposures`, `TestAccessPolicyFinalizerUnblocks`, `TestExposurePolicyRefName`, `TestExposurePolicyRefNamePolicyNotReady`, `TestExposurePolicyRefOneOfValidation`.
+- Manual: dashboard shows policy created; `kubectl edit cfap` rolls rules in CF within one reconcile.
+
+Subtask-derived additions: `TestCloudflareAccessPolicyCRDValidation`, `TestFakeAccessPolicyCreateGetDelete`, `TestFakeAccessPolicyListByName`, `TestFakeAccessPolicyUpdateRulesIdempotent`, `TestAccessPolicyRulesHashCanonical`, `TestAccessPolicyReferencedByPopulated`, `TestAccessPolicyReferencedByDecrements`, `TestExposurePolicyRefNameMissingPolicyCR`, `TestAccessPolicyConditionsTransition` also pass.
+
+**Risks**
+
+- SDK uncertainty (G1 / D13). `ZeroTrust.Access.Policies` surface in cloudflare-go/v4 may differ from the spec mapping; reusable account-level policies are a distinct surface from `Applications.Policies.*`. Probe via Cloudflare MCP before writing real client. Isolate inside `internal/cloudflare`.
+- Tag/comment field on Access policies may not be surfaced by the SDK (mirrors D9 tunnel-comment gap). If absent, fall back to `status.policyId`-only ownership tracking; document the fallback in the implementing PR and tighten the mutation guard to ID-equality. Safe under D12 leader-election.
+- Rule canonicalisation must be deterministic across Go map iteration and JSON marshalling — flaky hash → spurious reconciles → CF rate-limit pressure. `TestAccessPolicyRulesHashCanonical` covers this with explicit field-order assertions.
+- Cross-watch fan-out: a single Policy CR rule edit enqueues every referencing Exposure. With `MaxConcurrentReconciles=1` on Exposure, large fan-out throttles. Acceptable in MVP; revisit if Slice 4 ships into a large fleet.
+- D24 policy deletion: tagged-but-foreign policies must never be deleted, even inside the finalizer. Mirror Slice 2 D9 finalizer test discipline — `TestAccessPolicyFinalizerUnblocks` must include a foreign-tag negative case.
+
 ## 4. Bootstrap subtasks (scaffold absent)
 
 Run before Slice 1 subtask 1. Per `AGENTS.md ## Bootstrap`.
@@ -319,6 +399,15 @@ Slice 3 end-to-end:
 - Apply Service + Exposure with `sourceRef` and no `origin`. Confirm reconcile uses derived `<svc>.<ns>.svc.cluster.local:<port>`.
 - `rtk kubectl delete service <name>` — confirm cascading Exposure deletion and CF cleanup.
 - Restart operator on a cluster without `gateway.networking.k8s.io` CRD — confirm log line `HTTPRoute CRD not found, controller disabled` and no crash.
+
+Slice 4 end-to-end:
+
+- Slice 1–3 smoke remain green.
+- Apply a `CloudflareAccessPolicy` per `spec.md ## CRD model ### CloudflareAccessPolicy` (decision `allow`, include rule `emailDomain: <your-domain>`). Wait for `Ready=True`; confirm `status.policyId` set and the policy appears in the Cloudflare dashboard with `managed-by=cfzt-operator` tag (or, if the SDK has no tag field, confirm the ID matches `status.policyId`).
+- Apply a `CloudflareExposure` with `spec.access.policyRef.name: <policy-cr-name>`. Confirm `Ready=True` and the Access app binds the resolved UUID. `rtk curl -v https://<hostname>` → Access challenge; authenticate, confirm origin response.
+- `rtk kubectl edit cloudflareaccesspolicy <name>` — change an include rule. Within one reconcile, dashboard shows updated rule; all referencing Exposures re-bind cleanly.
+- `rtk kubectl delete cloudflareaccesspolicy <name>` while an Exposure references it — confirm `Ready=False, Reason=BlockedByExposures`, policy CR not deleted, CF policy still present. Remove the referencing Exposure; confirm policy CR + CF policy are then deleted.
+- Negative: create a CF Access policy by hand in the dashboard named `<policy-cr-name>-cfzt`, then apply the matching `CloudflareAccessPolicy` CR — confirm `Ready=False, Reason=ForeignPolicy`, dashboard policy untouched.
 
 CI gate (D18, `.github/workflows/ci.yaml`):
 
