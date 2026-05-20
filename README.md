@@ -1,25 +1,27 @@
 # cfzt-operator
 
-Kubernetes operator for publishing selected workloads through Cloudflare Tunnel,
-DNS, and Access. The MVP exposes two CRDs:
+Kubernetes operator for publishing workloads through Cloudflare Tunnel, Cloudflare Access, and managed DNS — all from a single custom resource alongside your workload.
 
-- `CloudflareTunnel` creates or tracks a remotely-managed Cloudflare tunnel,
-  stores its token in Kubernetes, and runs a `cloudflared` DaemonSet.
-- `CloudflareExposure` publishes one hostname through that tunnel, optionally
-  creating the proxied DNS CNAME and Cloudflare Access application.
+Create one `CloudflareTunnel` per tunnel. Create one `CloudflareExposure` per hostname you want to publish. The operator handles tunnel lifecycle, cloudflared DaemonSet deployment, ingress-rule configuration, DNS CNAMEs, and Access application creation and policy binding.
 
-The CRD contract and implementation decisions live in [spec.md](spec.md).
+Non-Kubernetes origins (a LAN device, home server, or any host reachable from cloudflared pods) work the same way — just set an explicit `origin` with no `sourceRef`. This keeps your entire tunnel topology in GitOps.
 
-## Status
+## Requirements
 
-MVP slices are implemented for first GitHub CI validation. Live Cloudflare smoke
-testing still requires a Kubernetes cluster, Cloudflare account credentials, and
-a hostname in a zone the token can manage.
+- Kubernetes 1.27+ (stable CEL CRD validation)
+- Cloudflare account with an API token (scopes below)
+- Helm 3
 
 ## Install
 
-The Helm chart is hand-written under `charts/cfzt-operator/` and includes CRDs
-in `charts/cfzt-operator/crds/`.
+```sh
+helm install cfzt-operator oci://ghcr.io/andrewreid/charts/cfzt-operator \
+  --namespace cfzt-system \
+  --create-namespace \
+  --version 0.1.0
+```
+
+Or from the chart source:
 
 ```sh
 helm install cfzt-operator charts/cfzt-operator \
@@ -27,8 +29,7 @@ helm install cfzt-operator charts/cfzt-operator \
   --create-namespace
 ```
 
-Create the credentials Secret in the namespace used by
-`CloudflareTunnel.spec.cloudflared.namespace`:
+Create the credentials Secret in the cloudflared namespace (default `cfzt-system`):
 
 ```sh
 kubectl -n cfzt-system create secret generic cloudflare-credentials \
@@ -36,13 +37,15 @@ kubectl -n cfzt-system create secret generic cloudflare-credentials \
   --from-literal=apiToken='<cloudflare-api-token>'
 ```
 
-Minimum token scopes:
+Minimum API token scopes:
 
-- Account / Cloudflare Tunnel: Edit
-- Account / Access: Apps and Policies: Edit
-- Zone / DNS: Edit, only when `dns.manage: true`
+| Scope | When |
+|---|---|
+| Account / Cloudflare Tunnel: Edit | Always |
+| Account / Access: Apps and Policies: Edit | Always |
+| Zone / DNS: Edit | Only when `dns.manage: true` (default) |
 
-## Example
+## Quick start
 
 ```yaml
 apiVersion: cfzt.reid.ee/v1alpha1
@@ -62,9 +65,9 @@ metadata:
   name: jellyfin
   namespace: media
 spec:
+  hostname: jellyfin.example.com
   tunnelRef:
     name: homelab
-  hostname: jellyfin.example.com
   origin:
     protocol: http
     host: jellyfin.media.svc.cluster.local
@@ -75,28 +78,228 @@ spec:
       uuid: 00000000-0000-4000-8000-000000000001
 ```
 
-## Development
+Apply this and the operator:
 
-Use `rtk` in this repository:
+1. Creates (or adopts) the Cloudflare tunnel
+2. Fetches the tunnel token and stores it in Secret `homelab-token` in `cfzt-system`
+3. Deploys a `cloudflared` DaemonSet named `cloudflared-homelab` in `cfzt-system`
+4. Writes a published hostname route for `jellyfin.example.com` to the tunnel-config doc
+5. Creates a proxied DNS CNAME `jellyfin.example.com` → `<tunnelId>.cfargotunnel.com`
+6. Creates a Cloudflare Access application for `jellyfin.example.com` bound to the policy UUID
+
+`kubectl get cft` and `kubectl get cfe -A` show `Ready` status columns.
+
+## CloudflareTunnel reference
+
+```yaml
+apiVersion: cfzt.reid.ee/v1alpha1
+kind: CloudflareTunnel    # cluster-scoped, shortName: cft
+metadata:
+  name: homelab
+spec:
+  tunnelName: homelab-rke2          # name of the tunnel in Cloudflare
+  credentialsSecretRef:
+    name: cloudflare-credentials    # Secret in spec.cloudflared.namespace
+    keys:
+      accountId: accountId          # Secret key, default "accountId"
+      apiToken: apiToken            # Secret key, default "apiToken"
+  dns:
+    manage: true                    # create proxied CNAMEs (default true)
+  cloudflared:
+    namespace: cfzt-system          # where cloudflared DaemonSet runs
+    image: ""                       # pin a specific cloudflared image; operator uses a default
+    hostNetwork: false              # set true to reach LAN origins
+    resources: {}
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+```
+
+Status fields:
+
+| Field | Description |
+|---|---|
+| `status.tunnelId` | Cloudflare tunnel UUID — authoritative ownership record |
+| `status.tokenSecretRef.name` | Name of the operator-managed token Secret |
+| `status.dnsMode` | `managed` or `external` |
+| `status.routes[]` | Per-Exposure ingress-rule hashes written after each tunnel-config PUT |
+| `status.conditions` | `Ready` and `Progressing` conditions |
+
+**Tunnel adoption:** if `status.tunnelId` is already set, the operator verifies the existing tunnel. If `status.tunnelId` is unset and a tunnel with the same name exists in the account, the operator refuses and sets `Ready=False, Reason=ForeignTunnel` — it will not mutate a tunnel it does not own. To adopt a pre-existing tunnel, patch `status.tunnelId` out-of-band:
 
 ```sh
-rtk make lint
-rtk go test ./...
-rtk make test
+kubectl patch cloudflaretunnel homelab \
+  --subresource=status --type=merge \
+  --patch '{"status":{"tunnelId":"<tunnel-uuid>"}}'
+```
+
+## CloudflareExposure reference
+
+```yaml
+apiVersion: cfzt.reid.ee/v1alpha1
+kind: CloudflareExposure    # namespaced, shortName: cfe
+metadata:
+  name: jellyfin
+  namespace: media
+spec:
+  displayName: Jellyfin               # optional, defaults to metadata.name; used in Access app name
+  hostname: jellyfin.example.com      # RFC 1123 subdomain required
+  tunnelRef:
+    name: homelab
+  sourceRef:                          # optional — see sourceRef section below
+    apiVersion: v1
+    kind: Service                     # Service or HTTPRoute
+    name: jellyfin
+  origin:
+    protocol: http                    # http or https
+    host: jellyfin.media.svc.cluster.local
+    port: 8096
+  access:
+    enabled: true
+    policyRef:
+      uuid: 00000000-0000-4000-8000-000000000001   # UUID v4 of an existing policy
+```
+
+`access.enabled: false` exposes the hostname without Access protection.
+
+`dns.manage: false` on the `CloudflareTunnel` skips DNS record creation for all its exposures.
+
+Status fields:
+
+| Field | Description |
+|---|---|
+| `status.cloudflare.accessApplicationId` | Cloudflare Access app UUID |
+| `status.cloudflare.dnsRecordId` | DNS record ID when managed |
+| `status.cloudflare.publicHostnameRouteHash` | SHA of the ingress rule placed in tunnel config |
+| `status.conditions` | `Ready` and `Progressing` conditions |
+
+## External (non-Kubernetes) origins
+
+Any host reachable from cloudflared pods works as an origin — a LAN device, home server, or public IP. With `hostNetwork: true` on the tunnel, cloudflared shares the node network and can reach LAN hosts directly:
+
+```yaml
+apiVersion: cfzt.reid.ee/v1alpha1
+kind: CloudflareTunnel
+metadata:
+  name: homelab
+spec:
+  tunnelName: homelab-rke2
+  credentialsSecretRef:
+    name: cloudflare-credentials
+  cloudflared:
+    namespace: cfzt-system
+    hostNetwork: true
+---
+apiVersion: cfzt.reid.ee/v1alpha1
+kind: CloudflareExposure
+metadata:
+  name: home-assistant
+  namespace: home
+spec:
+  hostname: ha.example.com
+  tunnelRef:
+    name: homelab
+  origin:
+    protocol: http
+    host: homeassistant.lan
+    port: 8123
+  access:
+    enabled: true
+    policyRef:
+      uuid: 00000000-0000-4000-8000-000000000001
+```
+
+## sourceRef: Service and HTTPRoute
+
+Setting `sourceRef` lets the operator derive missing fields from an existing Kubernetes resource and wire a garbage-collection cascade.
+
+**Service source** — `origin.host` and `origin.port` are optional when `sourceRef.kind: Service`. The operator reads the Service and fills:
+- `origin.host` → `<service>.<namespace>.svc.cluster.local`
+- `origin.port` → the Service's single port (error if zero or multiple ports)
+
+```yaml
+spec:
+  tunnelRef:
+    name: homelab
+  sourceRef:
+    apiVersion: v1
+    kind: Service
+    name: jellyfin
+  origin:
+    protocol: http
+    # host and port derived from the Service
+```
+
+**HTTPRoute source** — `spec.hostname` is optional when `sourceRef.kind: HTTPRoute`. The operator reads the HTTPRoute's single `spec.hostnames` entry (error if zero or multiple). `origin` remains explicit.
+
+**Owner reference and GC cascade** — when `sourceRef` resolves in the same namespace, the operator adds an `ownerReference` from the `CloudflareExposure` to the source resource. Deleting the source garbage-collects the Exposure, which fires the Exposure finalizer and cleans Cloudflare resources.
+
+**HTTPRoute controller** is enabled only when the `gateway.networking.k8s.io` CRD is present at operator startup. If absent, the operator logs `HTTPRoute CRD not found, controller disabled` and continues normally. Adding the CRD after the operator is running requires an operator restart.
+
+## Ownership and safety
+
+The operator refuses to mutate Cloudflare resources it does not own.
+
+- **Tunnels** are tracked by ID in `status.tunnelId`. A name collision with no local ID record → `Reason=ForeignTunnel`, no mutation.
+- **Access applications and DNS records** carry `managed-by=cfzt-operator source-uid=<exposure-uid>` tags. A resource with a different UID → `Reason=ForeignResource` or `Reason=HostnameConflict`, no mutation.
+- **Ingress rules** inside the tunnel-config doc are always fully rewritten from Kubernetes state — they are not tagged individually.
+
+Repeated reconciles are idempotent. Drift in the Cloudflare dashboard is corrected on the next reconcile.
+
+## Deletion
+
+Deleting a `CloudflareExposure` removes:
+- The Cloudflare Access application (when enabled)
+- The DNS CNAME record (when managed)
+- The ingress rule from the tunnel-config doc
+
+Deleting a `CloudflareTunnel` while Exposures still reference it is blocked. The tunnel stays, conditions show `Ready=False, Reason=BlockedByExposures`. Delete all Exposures first, then delete the tunnel.
+
+## CRD upgrades
+
+CRDs live in `charts/cfzt-operator/crds/`. Helm 3 installs them but does not upgrade them on `helm upgrade`. The API is `v1alpha1` — breaking changes are allowed without a conversion webhook. To upgrade after a breaking CRD change: export manifests, uninstall, install the new chart version, reapply.
+
+## Observability
+
+Prometheus metrics on the controller-runtime metrics endpoint:
+
+| Metric | Labels |
+|---|---|
+| `cfzt_reconcile_total` | `controller`, `result` |
+| `cfzt_reconcile_duration_seconds` | `controller` |
+| `cfzt_cloudflare_api_total` | `endpoint`, `status` |
+| `cfzt_cloudflare_api_duration_seconds` | `endpoint` |
+| `cfzt_resource_ready` | `kind`, `namespace` |
+
+Kubernetes Events: `CreatedTunnel`, `CreatedAccessApp`, `TokenRotated`, `HostnameConflict`, `ForeignTunnel`, `BlockedByExposures`, `ReconcileFailed`.
+
+## What is not supported
+
+These are deliberate scope decisions, not gaps:
+
+- **Annotation-driven UX** — the operator has no annotation controller. `CloudflareExposure` is the only user-facing surface.
+- **`CloudflareAccessPolicy` CRD** — policies are referenced by UUID only. No embedded policy JSON, no policy management.
+- **Ingress source** — `sourceRef.kind: Ingress` is not supported.
+- **Private network / WARP routing** — not in scope.
+- **Cloudflare Gateway management** — not in scope.
+- **Multi-cluster / multi-account** — single cluster, single account per operator instance.
+- **Conversion webhooks** — `v1alpha1` is delete-and-recreate only.
+- **Multiple Cloudflare accounts per operator** — not supported; use one operator per account.
+
+## Development
+
+```sh
+rtk make manifests generate    # regenerate CRDs + deepcopy after api/ changes
+rtk make test                  # unit + envtest (installs setup-envtest automatically)
+rtk go test ./...              # raw test pass
 rtk helm lint charts/cfzt-operator
 rtk helm template cfzt-operator charts/cfzt-operator --namespace cfzt-system
 ```
 
-`rtk make test` regenerates manifests/deepcopy, runs `go fmt`, `go vet`, and
-envtest-backed unit tests. Generated drift must be committed with API changes.
+Regenerate manifests and deepcopy after any `api/v1alpha1` change, and commit the generated output alongside the API change. CI fails on uncommitted generated drift.
 
-## CRD Upgrades
-
-CRDs are installed from `charts/cfzt-operator/crds/`. Helm 3 does not upgrade
-installed CRDs during `helm upgrade`. While the API is `v1alpha1`, breaking CRD
-changes are allowed without conversion webhooks; export manifests, uninstall,
-install the new chart, then reapply resources.
+See [docs/architecture.md](docs/architecture.md) for reconciliation semantics, package layout, and design decisions.
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE) when present, or the source file headers.
+Apache-2.0.
