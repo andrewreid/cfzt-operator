@@ -50,7 +50,7 @@ func TestCloudflareTunnelDeepCopy(t *testing.T) {
 			},
 			Cloudflared: cfztv1alpha1.CloudflaredSpec{
 				Namespace:   "cfzt-system",
-				Image:       "ghcr.io/cloudflare/cloudflared:2025.1.0",
+				Image:       "cloudflare/cloudflared:2025.1.0",
 				HostNetwork: false,
 				Resources: corev1.ResourceRequirements{
 					Requests: corev1.ResourceList{

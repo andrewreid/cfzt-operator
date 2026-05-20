@@ -329,11 +329,23 @@ These are deliberate scope decisions, not gaps:
 rtk make manifests generate    # regenerate CRDs + deepcopy after api/ changes
 rtk make test                  # unit + envtest (installs setup-envtest automatically)
 rtk go test ./...              # raw test pass
+rtk go test -tags=live ./test/live -run TestCloudflarePreflight -count=1
 rtk helm lint charts/cfzt-operator
 rtk helm template cfzt-operator charts/cfzt-operator --namespace cfzt-system
 ```
 
 Regenerate manifests and deepcopy after any `api/v1alpha1` change, and commit the generated output alongside the API change. CI fails on uncommitted generated drift.
+
+The live Cloudflare smoke harness is opt-in via the `live` build tag and uses the repo Cloudflare client plus a disposable kind cluster. It requires `CF_ACCOUNT_ID`, `CF_API_TOKEN`, and `CF_TEST_ZONE`; set `CF_ZONE_ID` when the token can manage DNS records but cannot list zones. For local runs on macOS:
+
+```sh
+cp .env.live.example .env.live
+$EDITOR .env.live
+
+hack/live-cloudflare-local.sh preflight   # no kind cluster needed
+hack/live-cloudflare-local.sh lifecycle   # starts Colima if needed, creates/reuses kind, runs full test
+hack/live-cloudflare-local.sh down        # deletes kind cluster and stops Colima when using it
+```
 
 See [docs/architecture.md](docs/architecture.md) for reconciliation semantics, package layout, and design decisions.
 

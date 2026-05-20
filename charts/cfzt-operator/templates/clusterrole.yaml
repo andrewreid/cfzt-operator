@@ -30,6 +30,10 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # cloudflared Pod termination checks during tunnel finalization.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
   # cloudflared DaemonSet per tunnel.
   - apiGroups: ["apps"]
     resources: ["daemonsets"]

@@ -14,7 +14,7 @@ import (
 
 func TestDaemonSetSpecMatchesSpec(t *testing.T) {
 	tunnel := testTunnel()
-	tunnel.Spec.Cloudflared.Image = "ghcr.io/cloudflare/cloudflared:2025.2.0"
+	tunnel.Spec.Cloudflared.Image = "cloudflare/cloudflared:2025.2.0"
 	tunnel.Spec.Cloudflared.Resources = corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{"cpu": resource.MustParse("10m")},
 	}

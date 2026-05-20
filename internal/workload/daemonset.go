@@ -12,7 +12,7 @@ import (
 
 const (
 	// DefaultCloudflaredImage is pinned by the operator and must not be :latest.
-	DefaultCloudflaredImage = "ghcr.io/cloudflare/cloudflared:2025.1.0"
+	DefaultCloudflaredImage = "cloudflare/cloudflared:2025.1.0"
 )
 
 // Labels returns stable labels for tunnel-owned Kubernetes workload resources.

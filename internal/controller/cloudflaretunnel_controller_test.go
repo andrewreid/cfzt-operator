@@ -166,6 +166,13 @@ var _ = Describe("CloudflareTunnel Controller", func() {
 		tunnelID := current.Status.TunnelId
 
 		Expect(k8sClient.Delete(ctx, current)).To(Succeed())
+		result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: tunnel.Name}})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.RequeueAfter).NotTo(BeZero())
+		draining := fetchTunnel(ctx, tunnel.Name)
+		Expect(draining.Finalizers).To(ContainElement(naming.Finalizer))
+		Expect(meta.FindStatusCondition(draining.Status.Conditions, ConditionReady).Reason).To(Equal(ReasonWorkloadNotReady))
+
 		reconcileTunnel(ctx, reconciler, tunnel.Name)
 
 		Eventually(func(g Gomega) {
@@ -174,7 +181,7 @@ var _ = Describe("CloudflareTunnel Controller", func() {
 		}).Should(Succeed())
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: naming.TokenSecretName(tunnel.Name)}, &corev1.Secret{})).To(MatchError(ContainSubstring("not found")))
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: naming.DaemonSetName(tunnel.Name)}, &appsv1.DaemonSet{})).To(MatchError(ContainSubstring("not found")))
-		_, err := fakeCF.Tunnels().Get(ctx, tunnelID)
+		_, err = fakeCF.Tunnels().Get(ctx, tunnelID)
 		Expect(err).To(MatchError(cloudflare.ErrNotFound))
 	})
 
@@ -189,10 +196,17 @@ var _ = Describe("CloudflareTunnel Controller", func() {
 
 		Expect(k8sClient.Delete(ctx, current)).To(Succeed())
 		result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: tunnel.Name}})
-
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.RequeueAfter).NotTo(BeZero())
 		blocked := fetchTunnel(ctx, tunnel.Name)
+		Expect(blocked.Finalizers).To(ContainElement(naming.Finalizer))
+		Expect(meta.FindStatusCondition(blocked.Status.Conditions, ConditionReady).Reason).To(Equal(ReasonWorkloadNotReady))
+
+		result, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: tunnel.Name}})
+
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.RequeueAfter).NotTo(BeZero())
+		blocked = fetchTunnel(ctx, tunnel.Name)
 		Expect(blocked.Finalizers).To(ContainElement(naming.Finalizer))
 		Expect(meta.FindStatusCondition(blocked.Status.Conditions, ConditionReady).Reason).To(Equal(ReasonCredentialsMissing))
 		_, err = fakeCF.Tunnels().Get(ctx, tunnelID)

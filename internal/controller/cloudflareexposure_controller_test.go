@@ -68,6 +68,18 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		}
 	})
 
+	It("TestAccessOwnershipTagsFitCloudflareLimit", func() {
+		uid := types.UID("c4fe2a8a-39b3-48cd-9a2a-d471cb045b4a")
+		tags := ownershipTags(uid)
+
+		for _, tag := range tags {
+			Expect(len(tag)).To(BeNumerically("<=", accessTagMaxLength))
+		}
+		parsed, ok := ownershipUIDFromTags(tags)
+		Expect(ok).To(BeTrue())
+		Expect(parsed).To(Equal(uid))
+	})
+
 	It("TestExposureCreate", func() {
 		tunnel := readyTunnel(ctx, tunnelReconciler, defaultTunnelName, defaultTunnelCFName)
 		exposure := createExposure(ctx, "jellyfin", tunnel.Name, "jellyfin.example.com", true)

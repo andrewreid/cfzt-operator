@@ -72,6 +72,10 @@ func (c *RealClient) AccessApplications() AccessApplications {
 	return &realAccessApplications{client: c}
 }
 
+func (c *RealClient) AccessTags() AccessTags {
+	return &realAccessTags{client: c}
+}
+
 func (c *RealClient) AccessPolicies() AccessPolicies {
 	return &realAccessPolicies{client: c}
 }
@@ -286,6 +290,54 @@ func (c *realConfigurations) Update(ctx context.Context, tunnelID string, config
 
 type realAccessApplications struct {
 	client *RealClient
+}
+
+type realAccessTags struct {
+	client *RealClient
+}
+
+func (t *realAccessTags) Ensure(ctx context.Context, name string) error {
+	err := t.client.withRetry(ctx, func() error {
+		_, err := t.client.api.ZeroTrust.Access.Tags.Get(ctx, name, zero_trust.AccessTagGetParams{
+			AccountID: cf.F(t.client.accountID),
+		})
+		if err != nil {
+			var apiErr *cf.Error
+			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+				return ErrNotFound
+			}
+			return err
+		}
+		return nil
+	})
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	return t.client.withRetry(ctx, func() error {
+		_, err := t.client.api.ZeroTrust.Access.Tags.New(ctx, zero_trust.AccessTagNewParams{
+			AccountID: cf.F(t.client.accountID),
+			Name:      cf.F(name),
+		})
+		return err
+	})
+}
+
+func (t *realAccessTags) Delete(ctx context.Context, name string) error {
+	return t.client.withRetry(ctx, func() error {
+		_, err := t.client.api.ZeroTrust.Access.Tags.Delete(ctx, name, zero_trust.AccessTagDeleteParams{
+			AccountID: cf.F(t.client.accountID),
+		})
+		if err != nil {
+			var apiErr *cf.Error
+			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+				return ErrNotFound
+			}
+		}
+		return err
+	})
 }
 
 func (a *realAccessApplications) List(ctx context.Context, domain string) ([]AccessApplication, error) {

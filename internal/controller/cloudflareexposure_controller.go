@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -223,6 +224,9 @@ func (r *CloudflareExposureReconciler) reconcileAccess(ctx context.Context, expo
 		Domain:     exposure.Spec.Hostname,
 		PolicyUUID: policyUUID,
 		Tags:       ownershipTags(exposure.UID),
+	}
+	if err := ensureAccessTags(ctx, cfClient, want.Tags); err != nil {
+		return nil, false, err
 	}
 	var owned *cloudflare.AccessApplication
 	for _, app := range apps {
@@ -456,6 +460,11 @@ func (r *CloudflareExposureReconciler) deleteOwnedAccessIfPresent(ctx context.Co
 			return err
 		}
 	}
+	for _, tag := range sourceUIDTags(exposure.UID) {
+		if err := cfClient.AccessTags().Delete(ctx, tag); err != nil && !errors.Is(err, cloudflare.ErrNotFound) {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -533,15 +542,95 @@ func routeHashForExposure(tunnel *cfztv1alpha1.CloudflareTunnel, exposure *cfztv
 }
 
 func ownershipTags(uid types.UID) []string {
-	return []string{"managed-by=cfzt-operator", "source-uid=" + string(uid)}
+	return append([]string{accessManagedByTag}, sourceUIDTags(uid)...)
+}
+
+const (
+	accessManagedByTag         = "managed-by=cfzt-operator"
+	accessSourceUIDTagPrefix   = "source-uid="
+	accessSourceUIDChunkPrefix = "source-uid-"
+	accessTagMaxLength         = 35
+)
+
+func ensureAccessTags(ctx context.Context, cfClient cloudflare.Client, tags []string) error {
+	for _, tag := range tags {
+		if err := cfClient.AccessTags().Ensure(ctx, tag); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func ownedByTags(tags []string, uid types.UID) bool {
-	return ownedByComment(strings.Join(tags, " "), uid)
+	found, ok := ownershipUIDFromTags(tags)
+	return ok && found == uid
 }
 
 func ownershipUIDFromTags(tags []string) (types.UID, bool) {
-	return naming.ParseOwnershipTag(strings.Join(tags, " "))
+	hasManagedBy := false
+	directUID := ""
+	chunks := map[int]string{}
+	for _, tag := range tags {
+		if tag == accessManagedByTag {
+			hasManagedBy = true
+			continue
+		}
+		if value, ok := strings.CutPrefix(tag, accessSourceUIDTagPrefix); ok {
+			directUID = value
+			continue
+		}
+		if rest, ok := strings.CutPrefix(tag, accessSourceUIDChunkPrefix); ok {
+			idxText, value, ok := strings.Cut(rest, "=")
+			if !ok || value == "" {
+				continue
+			}
+			idx, err := strconv.Atoi(idxText)
+			if err != nil || idx < 0 {
+				continue
+			}
+			chunks[idx] = value
+		}
+	}
+	if !hasManagedBy {
+		return "", false
+	}
+	if directUID != "" {
+		return types.UID(directUID), true
+	}
+	if len(chunks) == 0 {
+		return "", false
+	}
+	var b strings.Builder
+	for i := 0; i < len(chunks); i++ {
+		chunk, ok := chunks[i]
+		if !ok {
+			return "", false
+		}
+		b.WriteString(chunk)
+	}
+	return types.UID(b.String()), true
+}
+
+func sourceUIDTags(uid types.UID) []string {
+	value := string(uid)
+	direct := accessSourceUIDTagPrefix + value
+	if len(direct) <= accessTagMaxLength {
+		return []string{direct}
+	}
+	var tags []string
+	for idx := 0; value != ""; idx++ {
+		prefix := fmt.Sprintf("%s%d=", accessSourceUIDChunkPrefix, idx)
+		chunkSize := accessTagMaxLength - len(prefix)
+		if chunkSize <= 0 {
+			panic("access source UID tag prefix exceeds Cloudflare tag length limit")
+		}
+		if chunkSize > len(value) {
+			chunkSize = len(value)
+		}
+		tags = append(tags, prefix+value[:chunkSize])
+		value = value[chunkSize:]
+	}
+	return tags
 }
 
 func ownedByComment(comment string, uid types.UID) bool {

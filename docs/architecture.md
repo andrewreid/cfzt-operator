@@ -172,6 +172,9 @@ charts/cfzt-operator/              Helm chart (hand-written)
 .github/workflows/
   ci.yaml                          lint + test + generated-drift gate
   release.yaml                     image + chart publish on tag
+
+test/live/
+  cloudflare_smoke_test.go         opt-in live Cloudflare lifecycle smoke
 ```
 
 ## Tunnel-config doc
@@ -235,4 +238,9 @@ After any `api/v1alpha1` change, run `make manifests generate` and commit genera
 rtk make manifests generate
 rtk make test
 rtk go test ./...
+rtk go test -tags=live ./test/live -run TestCloudflarePreflight -count=1
 ```
+
+Live Cloudflare tests are excluded from normal test runs. The release workflow invokes the Go live test package directly; Cloudflare verification and cleanup use typed clients instead of shell JSON parsing.
+
+For local macOS smoke runs, copy `.env.live.example` to `.env.live`, fill in real Cloudflare values, then run `hack/live-cloudflare-local.sh preflight` or `hack/live-cloudflare-local.sh lifecycle`. The lifecycle command can start Colima, creates or reuses a local `kind` cluster, builds the operator image with Docker, loads it into kind, and runs the same Go live test package. `hack/live-cloudflare-local.sh down` deletes the kind cluster and stops Colima when the local runtime is Colima-backed.

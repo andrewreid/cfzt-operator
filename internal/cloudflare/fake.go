@@ -18,6 +18,7 @@ type FakeClient struct {
 	tokens                    map[string]string
 	configurations            map[string]TunnelConfiguration
 	accessApps                map[string]*AccessApplication
+	accessTags                map[string]bool
 	accessPolicies            map[string]*AccessPolicy
 	unsupportedAccessPolicies map[string]bool
 	dnsRecords                map[string]*DNSRecord
@@ -34,6 +35,7 @@ func NewFake() *FakeClient {
 		tokens:                    make(map[string]string),
 		configurations:            make(map[string]TunnelConfiguration),
 		accessApps:                make(map[string]*AccessApplication),
+		accessTags:                make(map[string]bool),
 		accessPolicies:            make(map[string]*AccessPolicy),
 		unsupportedAccessPolicies: make(map[string]bool),
 		dnsRecords:                make(map[string]*DNSRecord),
@@ -58,6 +60,10 @@ func (f *FakeClient) Configurations() Configurations {
 
 func (f *FakeClient) AccessApplications() AccessApplications {
 	return &fakeAccessApplications{fc: f}
+}
+
+func (f *FakeClient) AccessTags() AccessTags {
+	return &fakeAccessTags{fc: f}
 }
 
 func (f *FakeClient) AccessPolicies() AccessPolicies {
@@ -181,6 +187,27 @@ func (c *fakeConfigurations) Update(_ context.Context, tunnelID string, config T
 
 type fakeAccessApplications struct {
 	fc *FakeClient
+}
+
+type fakeAccessTags struct {
+	fc *FakeClient
+}
+
+func (t *fakeAccessTags) Ensure(_ context.Context, name string) error {
+	t.fc.mu.Lock()
+	defer t.fc.mu.Unlock()
+	t.fc.accessTags[name] = true
+	return nil
+}
+
+func (t *fakeAccessTags) Delete(_ context.Context, name string) error {
+	t.fc.mu.Lock()
+	defer t.fc.mu.Unlock()
+	if !t.fc.accessTags[name] {
+		return ErrNotFound
+	}
+	delete(t.fc.accessTags, name)
+	return nil
 }
 
 func (a *fakeAccessApplications) List(_ context.Context, domain string) ([]AccessApplication, error) {

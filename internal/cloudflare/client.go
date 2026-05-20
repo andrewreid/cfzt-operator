@@ -21,6 +21,7 @@ type Client interface {
 	Tunnels() Tunnels
 	Configurations() Configurations
 	AccessApplications() AccessApplications
+	AccessTags() AccessTags
 	AccessPolicies() AccessPolicies
 	DNSRecords() DNSRecords
 	Zones() Zones

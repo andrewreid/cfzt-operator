@@ -28,7 +28,7 @@ import (
 )
 
 var _ = Describe("CloudflareTunnel CRD validation", func() {
-	const validImage = "ghcr.io/cloudflare/cloudflared:2025.1.0"
+	const validImage = "cloudflare/cloudflared:2025.1.0"
 
 	validBase := func(name string) *cfztv1alpha1.CloudflareTunnel {
 		return &cfztv1alpha1.CloudflareTunnel{
@@ -54,7 +54,7 @@ var _ = Describe("CloudflareTunnel CRD validation", func() {
 	Context("image :latest rejection", func() {
 		It("rejects when cloudflared.image ends with :latest", func() {
 			obj := validBase("cel-latest-image")
-			obj.Spec.Cloudflared.Image = "ghcr.io/cloudflare/cloudflared:latest"
+			obj.Spec.Cloudflared.Image = "cloudflare/cloudflared:latest"
 
 			err := k8sClient.Create(ctx, obj)
 			Expect(err).To(HaveOccurred(), "expected CEL rejection for :latest image")

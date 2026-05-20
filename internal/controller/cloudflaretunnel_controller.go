@@ -60,6 +60,7 @@ type CloudflareTunnelReconciler struct {
 // +kubebuilder:rbac:groups=cfzt.reid.ee,resources=cloudflaretunnels/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=cfzt.reid.ee,resources=cloudflaretunnels/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
@@ -156,6 +157,18 @@ func (r *CloudflareTunnelReconciler) reconcileDelete(ctx context.Context, tunnel
 		r.event(tunnel, corev1.EventTypeWarning, EventBlockedByExposures, "Deletion blocked by %d CloudflareExposure resources", len(exposures))
 		return ctrl.Result{}, nil
 	}
+	waitingForWorkload, err := r.ensureCloudflaredStopped(ctx, tunnel)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if waitingForWorkload {
+		setCondition(&tunnel.Status.Conditions, ConditionReady, metav1.ConditionFalse, ReasonWorkloadNotReady, "waiting for cloudflared DaemonSet to terminate before deleting Cloudflare tunnel", tunnel.Generation)
+		setCondition(&tunnel.Status.Conditions, ConditionProgressing, metav1.ConditionTrue, ReasonWorkloadNotReady, "waiting for cloudflared DaemonSet to terminate before deleting Cloudflare tunnel", tunnel.Generation)
+		if err := r.Status().Update(ctx, tunnel); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
 	if tunnel.Status.TunnelId != "" {
 		cfClient, err := r.cloudflareClient(ctx, tunnel)
 		if err != nil {
@@ -181,11 +194,29 @@ func (r *CloudflareTunnelReconciler) reconcileDelete(ctx context.Context, tunnel
 	if err := r.deleteNamespaced(ctx, &corev1.Secret{}, tunnel.Spec.Cloudflared.Namespace, naming.TokenSecretName(tunnel.Name)); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.deleteNamespaced(ctx, &appsv1.DaemonSet{}, tunnel.Spec.Cloudflared.Namespace, naming.DaemonSetName(tunnel.Name)); err != nil {
-		return ctrl.Result{}, err
-	}
 	controllerutil.RemoveFinalizer(tunnel, naming.Finalizer)
 	return ctrl.Result{}, r.Update(ctx, tunnel)
+}
+
+func (r *CloudflareTunnelReconciler) ensureCloudflaredStopped(ctx context.Context, tunnel *cfztv1alpha1.CloudflareTunnel) (bool, error) {
+	var ds appsv1.DaemonSet
+	key := types.NamespacedName{Namespace: tunnel.Spec.Cloudflared.Namespace, Name: naming.DaemonSetName(tunnel.Name)}
+	if err := r.Get(ctx, key, &ds); err == nil {
+		if ds.DeletionTimestamp.IsZero() {
+			if err := r.Delete(ctx, &ds); err != nil && !apierrors.IsNotFound(err) {
+				return false, err
+			}
+		}
+		return true, nil
+	} else if !apierrors.IsNotFound(err) {
+		return false, err
+	}
+
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods, client.InNamespace(tunnel.Spec.Cloudflared.Namespace), client.MatchingLabels(workload.Labels(tunnel.Name))); err != nil {
+		return false, err
+	}
+	return len(pods.Items) > 0, nil
 }
 
 func (r *CloudflareTunnelReconciler) referencingExposures(ctx context.Context, tunnelName string) ([]cfztv1alpha1.CloudflareExposure, error) {
