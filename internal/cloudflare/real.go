@@ -70,6 +70,10 @@ func (c *RealClient) AccessApplications() AccessApplications {
 	return &realAccessApplications{client: c}
 }
 
+func (c *RealClient) AccessPolicies() AccessPolicies {
+	return &realAccessPolicies{client: c}
+}
+
 func (c *RealClient) DNSRecords() DNSRecords {
 	return &realDNSRecords{client: c}
 }
@@ -537,6 +541,235 @@ func stringSlice(value any) []string {
 	default:
 		return nil
 	}
+}
+
+type realAccessPolicies struct {
+	client *RealClient
+}
+
+func (p *realAccessPolicies) List(ctx context.Context) ([]AccessPolicy, error) {
+	var out []AccessPolicy
+	err := p.client.withRetry(ctx, func() error {
+		params := zero_trust.AccessPolicyListParams{AccountID: cf.F(p.client.accountID)}
+		pager := p.client.api.ZeroTrust.Access.Policies.ListAutoPaging(ctx, params)
+		out = out[:0]
+		for pager.Next() {
+			item := pager.Current()
+			out = append(out, AccessPolicy{
+				ID:                           item.ID,
+				Name:                         item.Name,
+				Decision:                     string(item.Decision),
+				Include:                      fromAccessRules(item.Include),
+				Exclude:                      fromAccessRules(item.Exclude),
+				Require:                      fromAccessRules(item.Require),
+				SessionDuration:              item.SessionDuration,
+				PurposeJustificationRequired: item.PurposeJustificationRequired,
+				PurposeJustificationPrompt:   item.PurposeJustificationPrompt,
+			})
+		}
+		return pager.Err()
+	})
+	return out, err
+}
+
+func (p *realAccessPolicies) Get(ctx context.Context, id string) (*AccessPolicy, error) {
+	var result *AccessPolicy
+	err := p.client.withRetry(ctx, func() error {
+		resp, err := p.client.api.ZeroTrust.Access.Policies.Get(ctx, id,
+			zero_trust.AccessPolicyGetParams{AccountID: cf.F(p.client.accountID)},
+		)
+		if err != nil {
+			var apiErr *cf.Error
+			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+				return ErrNotFound
+			}
+			return err
+		}
+		result = &AccessPolicy{
+			ID:                           resp.ID,
+			Name:                         resp.Name,
+			Decision:                     string(resp.Decision),
+			Include:                      fromAccessRules(resp.Include),
+			Exclude:                      fromAccessRules(resp.Exclude),
+			Require:                      fromAccessRules(resp.Require),
+			SessionDuration:              resp.SessionDuration,
+			PurposeJustificationRequired: resp.PurposeJustificationRequired,
+			PurposeJustificationPrompt:   resp.PurposeJustificationPrompt,
+		}
+		return nil
+	})
+	return result, err
+}
+
+func (p *realAccessPolicies) Create(ctx context.Context, in AccessPolicyInput) (*AccessPolicy, error) {
+	decision, err := toDecision(in.Decision)
+	if err != nil {
+		return nil, err
+	}
+	var result *AccessPolicy
+	cerr := p.client.withRetry(ctx, func() error {
+		resp, err := p.client.api.ZeroTrust.Access.Policies.New(ctx, zero_trust.AccessPolicyNewParams{
+			AccountID:                    cf.F(p.client.accountID),
+			Name:                         cf.F(in.Name),
+			Decision:                     cf.F(decision),
+			Include:                      cf.F(toAccessRuleParams(in.Include)),
+			Exclude:                      cf.F(toAccessRuleParams(in.Exclude)),
+			Require:                      cf.F(toAccessRuleParams(in.Require)),
+			SessionDuration:              cf.F(in.SessionDuration),
+			PurposeJustificationRequired: cf.F(in.PurposeJustificationRequired),
+			PurposeJustificationPrompt:   cf.F(in.PurposeJustificationPrompt),
+		})
+		if err != nil {
+			return err
+		}
+		result = &AccessPolicy{
+			ID:                           resp.ID,
+			Name:                         resp.Name,
+			Decision:                     string(resp.Decision),
+			Include:                      fromAccessRules(resp.Include),
+			Exclude:                      fromAccessRules(resp.Exclude),
+			Require:                      fromAccessRules(resp.Require),
+			SessionDuration:              resp.SessionDuration,
+			PurposeJustificationRequired: resp.PurposeJustificationRequired,
+			PurposeJustificationPrompt:   resp.PurposeJustificationPrompt,
+		}
+		return nil
+	})
+	return result, cerr
+}
+
+func (p *realAccessPolicies) Update(ctx context.Context, id string, in AccessPolicyInput) (*AccessPolicy, error) {
+	decision, err := toDecision(in.Decision)
+	if err != nil {
+		return nil, err
+	}
+	var result *AccessPolicy
+	cerr := p.client.withRetry(ctx, func() error {
+		resp, err := p.client.api.ZeroTrust.Access.Policies.Update(ctx, id, zero_trust.AccessPolicyUpdateParams{
+			AccountID:                    cf.F(p.client.accountID),
+			Name:                         cf.F(in.Name),
+			Decision:                     cf.F(decision),
+			Include:                      cf.F(toAccessRuleParams(in.Include)),
+			Exclude:                      cf.F(toAccessRuleParams(in.Exclude)),
+			Require:                      cf.F(toAccessRuleParams(in.Require)),
+			SessionDuration:              cf.F(in.SessionDuration),
+			PurposeJustificationRequired: cf.F(in.PurposeJustificationRequired),
+			PurposeJustificationPrompt:   cf.F(in.PurposeJustificationPrompt),
+		})
+		if err != nil {
+			var apiErr *cf.Error
+			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+				return ErrNotFound
+			}
+			return err
+		}
+		result = &AccessPolicy{
+			ID:                           resp.ID,
+			Name:                         resp.Name,
+			Decision:                     string(resp.Decision),
+			Include:                      fromAccessRules(resp.Include),
+			Exclude:                      fromAccessRules(resp.Exclude),
+			Require:                      fromAccessRules(resp.Require),
+			SessionDuration:              resp.SessionDuration,
+			PurposeJustificationRequired: resp.PurposeJustificationRequired,
+			PurposeJustificationPrompt:   resp.PurposeJustificationPrompt,
+		}
+		return nil
+	})
+	return result, cerr
+}
+
+func (p *realAccessPolicies) Delete(ctx context.Context, id string) error {
+	return p.client.withRetry(ctx, func() error {
+		_, err := p.client.api.ZeroTrust.Access.Policies.Delete(ctx, id,
+			zero_trust.AccessPolicyDeleteParams{AccountID: cf.F(p.client.accountID)},
+		)
+		if err != nil {
+			var apiErr *cf.Error
+			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+				return ErrNotFound
+			}
+		}
+		return err
+	})
+}
+
+// toDecision validates and casts a string Decision to the SDK type.
+// Decision strings beyond the four MVP values are rejected at this boundary so
+// invalid input never reaches Cloudflare.
+func toDecision(d string) (zero_trust.Decision, error) {
+	switch zero_trust.Decision(d) {
+	case zero_trust.DecisionAllow, zero_trust.DecisionDeny,
+		zero_trust.DecisionBypass, zero_trust.DecisionNonIdentity:
+		return zero_trust.Decision(d), nil
+	}
+	return "", fmt.Errorf("cloudflare: invalid decision %q", d)
+}
+
+// toAccessRuleParams maps the package-local AccessRule slice to the SDK union
+// param slice. The first non-zero field on each item picks the variant; order
+// matches the discriminator order in api/v1alpha1.AccessRule.
+func toAccessRuleParams(rules []AccessRule) []zero_trust.AccessRuleUnionParam {
+	if len(rules) == 0 {
+		return nil
+	}
+	out := make([]zero_trust.AccessRuleUnionParam, 0, len(rules))
+	for _, r := range rules {
+		switch {
+		case r.Email != "":
+			out = append(out, zero_trust.EmailRuleParam{
+				Email: cf.F(zero_trust.EmailRuleEmailParam{Email: cf.F(r.Email)}),
+			})
+		case r.EmailDomain != "":
+			out = append(out, zero_trust.DomainRuleParam{
+				EmailDomain: cf.F(zero_trust.DomainRuleEmailDomainParam{Domain: cf.F(r.EmailDomain)}),
+			})
+		case r.IP != "":
+			out = append(out, zero_trust.IPRuleParam{
+				IP: cf.F(zero_trust.IPRuleIPParam{IP: cf.F(r.IP)}),
+			})
+		case r.Everyone:
+			out = append(out, zero_trust.EveryoneRuleParam{
+				Everyone: cf.F(zero_trust.EveryoneRuleEveryoneParam{}),
+			})
+		case r.ServiceToken != "":
+			out = append(out, zero_trust.ServiceTokenRuleParam{
+				ServiceToken: cf.F(zero_trust.ServiceTokenRuleServiceTokenParam{TokenID: cf.F(r.ServiceToken)}),
+			})
+		case r.GeoCountryCode != "":
+			out = append(out, zero_trust.CountryRuleParam{
+				Geo: cf.F(zero_trust.CountryRuleGeoParam{CountryCode: cf.F(r.GeoCountryCode)}),
+			})
+		}
+	}
+	return out
+}
+
+// fromAccessRules maps an SDK response AccessRule slice back into the local
+// shape using the SDK's union accessor. Unknown variants (e.g. group, okta,
+// saml — beyond MVP) are skipped so they cannot crash the controller.
+func fromAccessRules(rules []zero_trust.AccessRule) []AccessRule {
+	if len(rules) == 0 {
+		return nil
+	}
+	out := make([]AccessRule, 0, len(rules))
+	for _, r := range rules {
+		switch u := r.AsUnion().(type) {
+		case zero_trust.EmailRule:
+			out = append(out, AccessRule{Email: u.Email.Email})
+		case zero_trust.DomainRule:
+			out = append(out, AccessRule{EmailDomain: u.EmailDomain.Domain})
+		case zero_trust.IPRule:
+			out = append(out, AccessRule{IP: u.IP.IP})
+		case zero_trust.EveryoneRule:
+			out = append(out, AccessRule{Everyone: true})
+		case zero_trust.ServiceTokenRule:
+			out = append(out, AccessRule{ServiceToken: u.ServiceToken.TokenID})
+		case zero_trust.CountryRule:
+			out = append(out, AccessRule{GeoCountryCode: u.Geo.CountryCode})
+		}
+	}
+	return out
 }
 
 func firstPolicyID(value any) string {

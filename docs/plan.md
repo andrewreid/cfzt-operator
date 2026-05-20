@@ -71,6 +71,25 @@ Completed on 2026-05-19:
   derivation, CRD-absent discovery, and Slice 3 CRD validation relaxation.
 
 Completed on 2026-05-20:
+- Slice 4 subtask 3: `internal/cloudflare/access_policies.go` adds
+  `AccessPolicies` interface + value types (`AccessPolicy`,
+  `AccessPolicyInput`, package-local `AccessRule` discriminated union)
+  with List/Get/Create/Update/Delete. `Client` interface extended.
+  `FakeClient` gains `accessPolicies` map + deep-copying
+  `fakeAccessPolicies`. `RealClient` adds `realAccessPolicies` wrapping
+  every call in `withRetry`; 404 → `ErrNotFound`; boundary `toDecision`
+  validates the four MVP decision values; `toAccessRuleParams` /
+  `fromAccessRules` translate the six MVP rule variants via the SDK's
+  `AsUnion()` accessor (unknown variants on response silently skipped).
+  `AccessPolicyListParams` has no name field — `List` returns all and
+  the controller filters by name (spec.md SDK mapping note).
+  cloudflare-go/v4 `AccessPolicy*` types carry no comment/tag field,
+  so ownership tracking is ID-only (mirrors D9 tunnel pattern;
+  spec.md:506). Tests `TestFakeAccessPolicyCreateGetDelete`,
+  `TestFakeAccessPolicyListByName`,
+  `TestFakeAccessPolicyUpdateRulesIdempotent` cover round-trip,
+  client-side name filtering, and update idempotence. `rtk make test`
+  green.
 - Slice 4 subtask 2: `CloudflareExposure.spec.access.policyRef.name` added
   (RFC 1123 subdomain pattern, maxLength 253) and the access CEL rule
   rewritten to require exactly one of `policyRef.uuid` or `policyRef.name`

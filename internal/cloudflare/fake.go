@@ -18,6 +18,7 @@ type FakeClient struct {
 	tokens         map[string]string
 	configurations map[string]TunnelConfiguration
 	accessApps     map[string]*AccessApplication
+	accessPolicies map[string]*AccessPolicy
 	dnsRecords     map[string]*DNSRecord
 	zones          map[string]*Zone
 }
@@ -29,6 +30,7 @@ func NewFake() *FakeClient {
 		tokens:         make(map[string]string),
 		configurations: make(map[string]TunnelConfiguration),
 		accessApps:     make(map[string]*AccessApplication),
+		accessPolicies: make(map[string]*AccessPolicy),
 		dnsRecords:     make(map[string]*DNSRecord),
 		zones:          make(map[string]*Zone),
 	}
@@ -51,6 +53,10 @@ func (f *FakeClient) Configurations() Configurations {
 
 func (f *FakeClient) AccessApplications() AccessApplications {
 	return &fakeAccessApplications{fc: f}
+}
+
+func (f *FakeClient) AccessPolicies() AccessPolicies {
+	return &fakeAccessPolicies{fc: f}
 }
 
 func (f *FakeClient) DNSRecords() DNSRecords {
@@ -315,4 +321,82 @@ func applyDNSRecord(record *DNSRecord, in DNSRecordInput) {
 	record.Content = in.Content
 	record.Proxied = in.Proxied
 	record.Comment = in.Comment
+}
+
+type fakeAccessPolicies struct {
+	fc *FakeClient
+}
+
+func (p *fakeAccessPolicies) List(_ context.Context) ([]AccessPolicy, error) {
+	p.fc.mu.Lock()
+	defer p.fc.mu.Unlock()
+	out := make([]AccessPolicy, 0, len(p.fc.accessPolicies))
+	for _, pol := range p.fc.accessPolicies {
+		out = append(out, copyAccessPolicy(pol))
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
+}
+
+func (p *fakeAccessPolicies) Get(_ context.Context, id string) (*AccessPolicy, error) {
+	p.fc.mu.Lock()
+	defer p.fc.mu.Unlock()
+	pol, ok := p.fc.accessPolicies[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	c := copyAccessPolicy(pol)
+	return &c, nil
+}
+
+func (p *fakeAccessPolicies) Create(_ context.Context, in AccessPolicyInput) (*AccessPolicy, error) {
+	p.fc.mu.Lock()
+	defer p.fc.mu.Unlock()
+	id := uuid.New().String()
+	pol := &AccessPolicy{ID: id}
+	applyAccessPolicy(pol, in)
+	p.fc.accessPolicies[id] = pol
+	c := copyAccessPolicy(pol)
+	return &c, nil
+}
+
+func (p *fakeAccessPolicies) Update(_ context.Context, id string, in AccessPolicyInput) (*AccessPolicy, error) {
+	p.fc.mu.Lock()
+	defer p.fc.mu.Unlock()
+	pol, ok := p.fc.accessPolicies[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	applyAccessPolicy(pol, in)
+	c := copyAccessPolicy(pol)
+	return &c, nil
+}
+
+func (p *fakeAccessPolicies) Delete(_ context.Context, id string) error {
+	p.fc.mu.Lock()
+	defer p.fc.mu.Unlock()
+	if _, ok := p.fc.accessPolicies[id]; !ok {
+		return ErrNotFound
+	}
+	delete(p.fc.accessPolicies, id)
+	return nil
+}
+
+func applyAccessPolicy(pol *AccessPolicy, in AccessPolicyInput) {
+	pol.Name = in.Name
+	pol.Decision = in.Decision
+	pol.Include = append([]AccessRule(nil), in.Include...)
+	pol.Exclude = append([]AccessRule(nil), in.Exclude...)
+	pol.Require = append([]AccessRule(nil), in.Require...)
+	pol.SessionDuration = in.SessionDuration
+	pol.PurposeJustificationRequired = in.PurposeJustificationRequired
+	pol.PurposeJustificationPrompt = in.PurposeJustificationPrompt
+}
+
+func copyAccessPolicy(pol *AccessPolicy) AccessPolicy {
+	c := *pol
+	c.Include = append([]AccessRule(nil), pol.Include...)
+	c.Exclude = append([]AccessRule(nil), pol.Exclude...)
+	c.Require = append([]AccessRule(nil), pol.Require...)
+	return c
 }
