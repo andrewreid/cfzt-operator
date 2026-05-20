@@ -130,10 +130,36 @@ Completed on 2026-05-20:
   `TestAccessPolicyForeignStatusIDRefuses`,
   `TestAccessPolicyFinalizerBlocksForeignStatusID`. `rtk make test`,
   `rtk go test ./...`, and `rtk helm lint charts/cfzt-operator` are green.
+- Slice 4 subtasks 5-9: Managed policy reconciliation is complete in
+  controllers. `internal/controller/accesspolicy_hash.go` computes
+  deterministic `sha256:` hashes over canonical Access rules, with rule lists
+  sorted and include/exclude/require encoded in fixed order. Policy reconcile
+  now writes `status.observedRulesHash`, updates the CF policy on spec or CF
+  drift, records `status.referencedBy[]` / `referencedByCount` from
+  `CloudflareExposure.spec.access.policyRef.name`, watches Exposures to keep
+  those references fresh, and blocks finalizer deletion with
+  `Reason=BlockedByExposures` while references exist. Exposure reconcile now
+  resolves `policyRef.name` to the referenced `CloudflareAccessPolicy`
+  `status.policyId`, reports `Reason=PolicyNotFound` or
+  `Reason=PolicyNotReady` when binding cannot proceed, binds the resolved UUID
+  through Access application create/update, and watches AccessPolicy status
+  changes to requeue referencing Exposures. Events include
+  `UpdatedAccessPolicy` and `BlockedByExposures`. Tests added/expanded:
+  `TestAccessPolicyRulesHashCanonical`, `TestAccessPolicyRulesDrift`,
+  `TestAccessPolicyReferencedByPopulated`,
+  `TestAccessPolicyReferencedByDecrements`,
+  `TestAccessPolicyFinalizerBlockedByExposures`,
+  `TestAccessPolicyFinalizerUnblocks`, `TestAccessPolicyConditionsTransition`,
+  `TestExposurePolicyRefName`, `TestExposurePolicyRefNamePolicyNotReady`,
+  `TestExposurePolicyRefNameMissingPolicyCR`, and
+  `TestPolicyStatusUpdatePropagatesToExposures`.
+- Slice 4 subtask 10: RBAC markers for CFAP and exposure policy reads were
+  regenerated with `rtk make manifests generate`. Helm CRDs and ClusterRole
+  were already synced in subtask 4 and remain current. `rtk make test`,
+  `rtk go test ./...`, and `rtk helm lint charts/cfzt-operator` are green.
 
-Next: Slice 4 subtask 5 (rule-hash drift detection + update path). Manual
-live-cluster smoke for Slices 1-4 remains pending because it requires a
-Kubernetes cluster and Cloudflare credentials.
+Next: manual live-cluster smoke for Slices 1-4 remains pending because it
+requires a Kubernetes cluster and Cloudflare credentials.
 
 ## 3. Slice plan
 

@@ -21,6 +21,8 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -43,6 +45,7 @@ var _ = Describe("CloudflareAccessPolicy Controller", func() {
 	BeforeEach(func() {
 		ctx = context.Background()
 		ensureNamespace(ctx, credsNamespace)
+		ensureNamespace(ctx, exposureTestNamespace)
 		fakeCF = cloudflare.NewFake()
 		reconciler = &CloudflareAccessPolicyReconciler{
 			Client: k8sClient,
@@ -74,6 +77,7 @@ var _ = Describe("CloudflareAccessPolicy Controller", func() {
 		Expect(cfPolicy.Decision).To(Equal("allow"))
 		Expect(cfPolicy.Include).To(HaveLen(1))
 		Expect(cfPolicy.Include[0].EmailDomain).To(Equal("example.com"))
+		Expect(got.Status.ObservedRulesHash).To(HavePrefix("sha256:"))
 	})
 
 	It("TestAccessPolicyCreateUsesSpecPolicyName", func() {
@@ -112,6 +116,52 @@ var _ = Describe("CloudflareAccessPolicy Controller", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(all).To(HaveLen(1))
 		Expect(all[0].Name).To(Equal("foreign-policy-cfzt"))
+	})
+
+	It("TestAccessPolicyRulesDrift", func() {
+		policy := createAccessPolicy(ctx, "drift-policy", "")
+		reconcileAccessPolicy(ctx, reconciler, policy.Name)
+		current := fetchAccessPolicy(ctx, policy.Name)
+		oldHash := current.Status.ObservedRulesHash
+		current.Spec.Rules.Include = []cfztv1alpha1.AccessRule{{EmailDomain: "changed.example.com"}}
+		Expect(k8sClient.Update(ctx, current)).To(Succeed())
+
+		reconcileAccessPolicy(ctx, reconciler, current.Name)
+
+		updated := fetchAccessPolicy(ctx, current.Name)
+		Expect(updated.Status.ObservedRulesHash).NotTo(Equal(oldHash))
+		cfPolicy, err := fakeCF.AccessPolicies().Get(ctx, updated.Status.PolicyId)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfPolicy.Include).To(Equal([]cloudflare.AccessRule{{EmailDomain: "changed.example.com"}}))
+	})
+
+	It("TestAccessPolicyReferencedByPopulated", func() {
+		policy := createAccessPolicy(ctx, "ref-policy", "")
+		first := createPolicyRefExposure(ctx, "ref-one", policy.Name)
+		second := createPolicyRefExposure(ctx, "ref-two", policy.Name)
+
+		reconcileAccessPolicy(ctx, reconciler, policy.Name)
+
+		got := fetchAccessPolicy(ctx, policy.Name)
+		Expect(got.Status.ReferencedByCount).To(Equal(int32(2)))
+		Expect(got.Status.ReferencedBy).To(ConsistOf(
+			cfztv1alpha1.ReferencedExposure{Namespace: first.Namespace, Name: first.Name, Uid: first.UID},
+			cfztv1alpha1.ReferencedExposure{Namespace: second.Namespace, Name: second.Name, Uid: second.UID},
+		))
+	})
+
+	It("TestAccessPolicyReferencedByDecrements", func() {
+		policy := createAccessPolicy(ctx, "ref-decrement-policy", "")
+		first := createPolicyRefExposure(ctx, "ref-dec-one", policy.Name)
+		_ = createPolicyRefExposure(ctx, "ref-dec-two", policy.Name)
+		reconcileAccessPolicy(ctx, reconciler, policy.Name)
+		Expect(k8sClient.Delete(ctx, first)).To(Succeed())
+
+		reconcileAccessPolicy(ctx, reconciler, policy.Name)
+
+		got := fetchAccessPolicy(ctx, policy.Name)
+		Expect(got.Status.ReferencedByCount).To(Equal(int32(1)))
+		Expect(got.Status.ReferencedBy[0].Name).To(Equal("ref-dec-two"))
 	})
 
 	It("TestAccessPolicyStaleStatusIDRecreates", func() {
@@ -173,6 +223,57 @@ var _ = Describe("CloudflareAccessPolicy Controller", func() {
 		_, err = fakeCF.AccessPolicies().Get(ctx, cfPolicy.ID)
 		Expect(err).NotTo(HaveOccurred())
 	})
+
+	It("TestAccessPolicyFinalizerBlockedByExposures", func() {
+		policy := createAccessPolicy(ctx, "blocked-policy", "")
+		_ = createPolicyRefExposure(ctx, "blocked-ref", policy.Name)
+		reconcileAccessPolicy(ctx, reconciler, policy.Name)
+		current := fetchAccessPolicy(ctx, policy.Name)
+
+		Expect(k8sClient.Delete(ctx, current)).To(Succeed())
+		reconcileAccessPolicy(ctx, reconciler, current.Name)
+
+		blocked := fetchAccessPolicy(ctx, policy.Name)
+		Expect(blocked.Finalizers).To(ContainElement(naming.Finalizer))
+		Expect(meta.FindStatusCondition(blocked.Status.Conditions, ConditionReady).Reason).To(Equal(ReasonBlockedByExposures))
+	})
+
+	It("TestAccessPolicyFinalizerUnblocks", func() {
+		policy := createAccessPolicy(ctx, "unblock-policy", "")
+		ref := createPolicyRefExposure(ctx, "unblock-ref", policy.Name)
+		reconcileAccessPolicy(ctx, reconciler, policy.Name)
+		current := fetchAccessPolicy(ctx, policy.Name)
+		policyID := current.Status.PolicyId
+		Expect(k8sClient.Delete(ctx, current)).To(Succeed())
+		reconcileAccessPolicy(ctx, reconciler, current.Name)
+		Expect(k8sClient.Delete(ctx, ref)).To(Succeed())
+
+		reconcileAccessPolicy(ctx, reconciler, current.Name)
+
+		Eventually(func(g Gomega) {
+			err := k8sClient.Get(ctx, types.NamespacedName{Name: policy.Name}, &cfztv1alpha1.CloudflareAccessPolicy{})
+			g.Expect(apierrors.IsNotFound(err)).To(BeTrue())
+		}).Should(Succeed())
+		_, err := fakeCF.AccessPolicies().Get(ctx, policyID)
+		Expect(err).To(MatchError(cloudflare.ErrNotFound))
+	})
+
+	It("TestAccessPolicyConditionsTransition", func() {
+		_ = k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "cloudflare-credentials", Namespace: credsNamespace}})
+		policy := createAccessPolicy(ctx, "condition-policy", "")
+		_ = createPolicyRefExposure(ctx, "condition-ref", policy.Name)
+
+		reconcileAccessPolicy(ctx, reconciler, policy.Name)
+
+		missing := fetchAccessPolicy(ctx, policy.Name)
+		Expect(meta.FindStatusCondition(missing.Status.Conditions, ConditionReady).Reason).To(Equal(ReasonCredentialsMissing))
+		Expect(missing.Status.ReferencedByCount).To(Equal(int32(1)))
+		createCredentials(ctx)
+		reconcileAccessPolicy(ctx, reconciler, policy.Name)
+		ready := fetchAccessPolicy(ctx, policy.Name)
+		Expect(meta.FindStatusCondition(ready.Status.Conditions, ConditionReady).Status).To(Equal(metav1.ConditionTrue))
+		Expect(meta.FindStatusCondition(ready.Status.Conditions, ConditionProgressing).Status).To(Equal(metav1.ConditionFalse))
+	})
 })
 
 func createAccessPolicy(ctx context.Context, name, policyName string) *cfztv1alpha1.CloudflareAccessPolicy {
@@ -203,4 +304,25 @@ func fetchAccessPolicy(ctx context.Context, name string) *cfztv1alpha1.Cloudflar
 func reconcileAccessPolicy(ctx context.Context, reconciler *CloudflareAccessPolicyReconciler, name string) {
 	_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name}})
 	Expect(err).NotTo(HaveOccurred())
+}
+
+func createPolicyRefExposure(ctx context.Context, name, policyName string) *cfztv1alpha1.CloudflareExposure {
+	exposure := &cfztv1alpha1.CloudflareExposure{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: exposureTestNamespace},
+		Spec: cfztv1alpha1.CloudflareExposureSpec{
+			Hostname:  name + ".example.com",
+			TunnelRef: cfztv1alpha1.TunnelRef{Name: "policy-ref-" + policyName},
+			Origin: &cfztv1alpha1.OriginSpec{
+				Protocol: "http",
+				Host:     name + "." + exposureTestNamespace + ".svc.cluster.local",
+				Port:     8096,
+			},
+			Access: cfztv1alpha1.AccessSpec{
+				Enabled:   true,
+				PolicyRef: cfztv1alpha1.AccessPolicyRef{Name: policyName},
+			},
+		},
+	}
+	Expect(k8sClient.Create(ctx, exposure)).To(Succeed())
+	return exposure
 }

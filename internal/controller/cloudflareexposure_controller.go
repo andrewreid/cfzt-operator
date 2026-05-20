@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -59,6 +60,7 @@ type CloudflareExposureReconciler struct {
 // +kubebuilder:rbac:groups=cfzt.reid.ee,resources=cloudflareexposures/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=cfzt.reid.ee,resources=cloudflareexposures/finalizers,verbs=update
 // +kubebuilder:rbac:groups=cfzt.reid.ee,resources=cloudflaretunnels,verbs=get;list;watch
+// +kubebuilder:rbac:groups=cfzt.reid.ee,resources=cloudflareaccesspolicies,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch
@@ -125,6 +127,15 @@ func (r *CloudflareExposureReconciler) Reconcile(ctx context.Context, req ctrl.R
 			}
 			if errors.Is(err, errForeignResource) {
 				return r.setExposureStatusAndBackoff(ctx, &exposure, status, ReasonForeignResource, err.Error())
+			}
+			if errors.Is(err, errPolicyNotFound) {
+				return ctrl.Result{}, r.setExposureStatus(ctx, &exposure, status, false, ReasonPolicyNotFound, err.Error())
+			}
+			if errors.Is(err, errPolicyNotReady) {
+				if statusErr := r.setExposureStatus(ctx, &exposure, status, false, ReasonPolicyNotReady, err.Error()); statusErr != nil {
+					return ctrl.Result{}, statusErr
+				}
+				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 			}
 			return ctrl.Result{}, err
 		}
@@ -194,6 +205,8 @@ func (r *CloudflareExposureReconciler) cloudflareClient(ctx context.Context, tun
 var (
 	errHostnameConflict = errors.New("hostname conflict")
 	errForeignResource  = errors.New("foreign resource")
+	errPolicyNotFound   = errors.New("policy not found")
+	errPolicyNotReady   = errors.New("policy not ready")
 )
 
 func (r *CloudflareExposureReconciler) reconcileAccess(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, cfClient cloudflare.Client) (*cloudflare.AccessApplication, bool, error) {
@@ -201,10 +214,14 @@ func (r *CloudflareExposureReconciler) reconcileAccess(ctx context.Context, expo
 	if err != nil {
 		return nil, false, err
 	}
+	policyUUID, err := r.resolveAccessPolicyUUID(ctx, exposure)
+	if err != nil {
+		return nil, false, err
+	}
 	want := cloudflare.AccessApplicationInput{
 		Name:       naming.AccessAppName(exposure.Spec.DisplayName, exposure.Name),
 		Domain:     exposure.Spec.Hostname,
-		PolicyUUID: exposure.Spec.Access.PolicyRef.UUID,
+		PolicyUUID: policyUUID,
 		Tags:       ownershipTags(exposure.UID),
 	}
 	var owned *cloudflare.AccessApplication
@@ -232,6 +249,28 @@ func (r *CloudflareExposureReconciler) reconcileAccess(ctx context.Context, expo
 	}
 	app, err := cfClient.AccessApplications().Create(ctx, want)
 	return app, true, err
+}
+
+func (r *CloudflareExposureReconciler) resolveAccessPolicyUUID(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure) (string, error) {
+	if exposure.Spec.Access.PolicyRef.UUID != "" {
+		return exposure.Spec.Access.PolicyRef.UUID, nil
+	}
+	name := exposure.Spec.Access.PolicyRef.Name
+	if name == "" {
+		return "", fmt.Errorf("%w: access.policyRef.name is empty", errPolicyNotFound)
+	}
+	var policy cfztv1alpha1.CloudflareAccessPolicy
+	if err := r.Get(ctx, types.NamespacedName{Name: name}, &policy); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", fmt.Errorf("%w: CloudflareAccessPolicy %q not found", errPolicyNotFound, name)
+		}
+		return "", err
+	}
+	ready := meta.FindStatusCondition(policy.Status.Conditions, ConditionReady)
+	if !policy.DeletionTimestamp.IsZero() || policy.Status.PolicyId == "" || ready == nil || ready.Status != metav1.ConditionTrue || ready.ObservedGeneration != policy.Generation {
+		return "", fmt.Errorf("%w: CloudflareAccessPolicy %q is not ready", errPolicyNotReady, name)
+	}
+	return policy.Status.PolicyId, nil
 }
 
 func (r *CloudflareExposureReconciler) hasDuplicateHostname(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure) (bool, error) {
@@ -512,6 +551,7 @@ func (r *CloudflareExposureReconciler) SetupWithManager(mgr ctrl.Manager) error 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&cfztv1alpha1.CloudflareExposure{}).
 		Watches(&cfztv1alpha1.CloudflareTunnel{}, handler.EnqueueRequestsFromMapFunc(r.tunnelToExposures)).
+		Watches(&cfztv1alpha1.CloudflareAccessPolicy{}, handler.EnqueueRequestsFromMapFunc(r.policyToExposures)).
 		Named("cloudflareexposure").
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 		Complete(r)
@@ -541,6 +581,36 @@ func (r *CloudflareExposureReconciler) exposuresForTunnel(ctx context.Context, t
 	var out []cfztv1alpha1.CloudflareExposure
 	for _, exposure := range list.Items {
 		if exposure.Spec.TunnelRef.Name == tunnelName {
+			out = append(out, exposure)
+		}
+	}
+	return out, nil
+}
+
+func (r *CloudflareExposureReconciler) policyToExposures(ctx context.Context, obj client.Object) []reconcile.Request {
+	policy, ok := obj.(*cfztv1alpha1.CloudflareAccessPolicy)
+	if !ok {
+		return nil
+	}
+	exposures, err := r.exposuresForPolicy(ctx, policy.Name)
+	if err != nil {
+		return nil
+	}
+	requests := make([]reconcile.Request, 0, len(exposures))
+	for _, exposure := range exposures {
+		requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: exposure.Namespace, Name: exposure.Name}})
+	}
+	return requests
+}
+
+func (r *CloudflareExposureReconciler) exposuresForPolicy(ctx context.Context, policyName string) ([]cfztv1alpha1.CloudflareExposure, error) {
+	var list cfztv1alpha1.CloudflareExposureList
+	if err := r.List(ctx, &list); err != nil {
+		return nil, err
+	}
+	var out []cfztv1alpha1.CloudflareExposure
+	for _, exposure := range list.Items {
+		if exposure.Spec.Access.PolicyRef.Name == policyName {
 			out = append(out, exposure)
 		}
 	}
