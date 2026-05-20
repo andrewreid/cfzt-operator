@@ -115,7 +115,7 @@ All Cloudflare API calls go through `internal/cloudflare`. Controllers never imp
 
 Rate limiting: per-token bucket inside `internal/cloudflare/client.go`, keyed by API token hash. Exponential backoff on 429 and 5xx responses.
 
-Zone resolution: longest-suffix match against a cached zone list. The cache is populated on first use and refreshed on miss. No PSL parsing.
+Zone resolution: longest-suffix match against a cached zone list. The cache is populated on first use and refreshed on miss, so tokens used with managed DNS must be able to read the relevant zones. No PSL parsing.
 
 Access policy `List` and `GetMetadata` return metadata only and intentionally do not parse rule bodies; this prevents unsupported rule variants on unrelated policies from blocking name or finalizer checks. `Get` parses rule bodies and returns `ErrUnsupportedAccessRule` so the controller can surface tracked unsupported drift instead of silently treating it as equal.
 

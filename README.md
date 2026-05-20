@@ -43,6 +43,7 @@ Minimum API token scopes:
 |---|---|
 | Account / Cloudflare Tunnel: Edit | Always |
 | Account / Access: Apps and Policies: Edit | Always |
+| Zone / Zone: Read | When `dns.manage: true` so the operator can resolve hostnames to Cloudflare zone IDs |
 | Zone / DNS: Edit | Only when `dns.manage: true` (default) |
 
 ## Quick start

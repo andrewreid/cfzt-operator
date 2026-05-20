@@ -141,6 +141,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: validate Cloudflare smoke environment
+        run: hack/live-cloudflare-smoke.sh --preflight
+
       - uses: azure/setup-helm@v5
         with:
           version: v3.16.0

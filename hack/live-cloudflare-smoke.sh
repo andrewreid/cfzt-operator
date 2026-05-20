@@ -128,6 +128,29 @@ cf_tunnels_for_name() {
   cf_api GET "/accounts/${CF_ACCOUNT_ID}/cfd_tunnel?name=${name}"
 }
 
+resolve_zone_id() {
+  if [[ -n "${CF_ZONE_ID:-}" ]]; then
+    log "using Cloudflare zone ID from CF_ZONE_ID" >&2
+    echo "$CF_ZONE_ID"
+    return 0
+  fi
+
+  log "resolving Cloudflare zone for ${CF_TEST_ZONE}" >&2
+  local zone_id
+  zone_id="$(cf_zone_id_for_hostname "$CF_TEST_ZONE")"
+  [[ -n "$zone_id" ]] || die "no Cloudflare zone found for ${CF_TEST_ZONE}; set CF_ZONE_ID if the token cannot list zones"
+  echo "$zone_id"
+}
+
+preflight_cloudflare() {
+  local zone_id
+  zone_id="$(resolve_zone_id)"
+  cf_dns_records_for_hostname "$zone_id" "__cfzt-smoke-preflight-${RUN_SUFFIX}.${CF_TEST_ZONE}" >/dev/null
+  cf_access_policies_for_name "__cfzt-smoke-preflight-${RUN_SUFFIX}" >/dev/null
+  cf_tunnels_for_name "__cfzt-smoke-preflight-${RUN_SUFFIX}" >/dev/null
+  log "Cloudflare smoke preflight passed"
+}
+
 wait_for_jsonpath() {
   local description="$1"
   local command="$2"
@@ -261,16 +284,23 @@ cleanup() {
   rm -rf "$TMP_DIR"
   exit "$status"
 }
+
+case "${1:-}" in
+  --preflight)
+    preflight_cloudflare
+    rm -rf "$TMP_DIR"
+    exit 0
+    ;;
+  "")
+    ;;
+  *)
+    die "unsupported argument: $1"
+    ;;
+esac
+
 trap cleanup EXIT
 
-if [[ -n "${CF_ZONE_ID:-}" ]]; then
-  log "using Cloudflare zone ID from CF_ZONE_ID"
-  ZONE_ID="${CF_ZONE_ID}"
-else
-  log "resolving Cloudflare zone for ${CF_TEST_ZONE}"
-  ZONE_ID="$(cf_zone_id_for_hostname "$CF_TEST_ZONE")"
-  [[ -n "$ZONE_ID" ]] || die "no Cloudflare zone found for ${CF_TEST_ZONE}; set CF_ZONE_ID if the token cannot list zones"
-fi
+ZONE_ID="$(resolve_zone_id)"
 
 log "installing released Helm chart ${CHART_REF} ${VERSION}"
 kubectl create namespace "$OPERATOR_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -

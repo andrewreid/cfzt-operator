@@ -544,6 +544,7 @@ API token MVP scopes:
 
 - `Account:Cloudflare Tunnel:Edit`
 - `Access: Apps and Policies:Edit`
+- `Zone:Zone:Read` on every zone covered by managed hostnames — **only** when any referenced `CloudflareTunnel` has `dns.manage: true`.
 - `Zone:DNS:Edit` on every zone covered by managed hostnames — **only** when any referenced `CloudflareTunnel` has `dns.manage: true`.
 
 ## RBAC (operator ServiceAccount)
@@ -569,7 +570,7 @@ API token MVP scopes:
 
 When `CloudflareTunnel.spec.dns.manage: true` (default), operator creates a proxied CNAME for `spec.hostname` → `<tunnelId>.cfargotunnel.com` for each Exposure. Records tagged per ownership rules.
 
-**Zone resolution.** Operator lists zones the API token can see at startup and on cache miss, then matches the longest zone-name suffix of `spec.hostname`. No PSL parsing.
+**Zone resolution.** Operator lists zones the API token can see at startup and on cache miss, then matches the longest zone-name suffix of `spec.hostname`. Tokens used with managed DNS need zone read access for those zones. No PSL parsing.
 
 **External-dns coexistence.** Operator never emits external-dns annotations. With `dns.manage: true`, users running external-dns on the same zone with overlapping hostnames must scope external-dns to other zones or filter records out. With `dns.manage: false`, operator creates no records and external-dns (or any other tool) is free to manage them. `CloudflareTunnel.status.dnsMode` reports `"managed"` or `"external"`.
 
