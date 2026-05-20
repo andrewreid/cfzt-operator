@@ -78,33 +78,27 @@ cf_zone_id_for_hostname() {
   local response
   local zone_id
   response="$(cf_api GET "/zones?name=${hostname}")"
-  zone_id="$(jq -r '
-    if (.result | type) == "array" and (.result[0] | type) == "object" then
-      .result[0].id // empty
-    else
-      empty
-    end
+  zone_id="$(jq -r --arg host "$hostname" '
+    try (
+      if (.result | type) == "array" then .result else [] end
+      | map(select((.name? // "") == $host))
+      | first
+      | .id // empty
+    ) catch empty
   ' <<<"$response")"
   if [[ -n "$zone_id" ]]; then
     echo "$zone_id"
     return 0
   fi
   cf_api GET "/zones" | jq -r --arg host "$hostname" '
-    (if (.result | type) == "array" then .result else [] end)
-    | map(select(
-        if type == "object" then
-          if (.name | type) == "string" then
-            $host == .name or ($host | endswith("." + .name))
-          else
-            false
-          end
-        else
-          false
-        end
-      ))
-    | sort_by(.name | length)
-    | last
-    | .id // empty
+    try (
+      if (.result | type) == "array" then .result else [] end
+      | map(select((.name? | type) == "string"))
+      | map(select($host == (.name? // "") or ($host | endswith("." + (.name? // "")))))
+      | sort_by(.name | length)
+      | last
+      | .id // empty
+    ) catch empty
   '
 }
 
