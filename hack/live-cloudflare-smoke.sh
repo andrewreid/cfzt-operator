@@ -75,9 +75,17 @@ cf_api() {
 
 cf_zone_id_for_hostname() {
   local hostname="$1"
+  local response
+  local zone_id
+  response="$(cf_api GET "/zones?name=${hostname}")"
+  zone_id="$(jq -r '.result[0].id // empty' <<<"$response")"
+  if [[ -n "$zone_id" ]]; then
+    echo "$zone_id"
+    return 0
+  fi
   cf_api GET "/zones" | jq -r --arg host "$hostname" '
-    .result
-    | map(select($host == .name or ($host | endswith("." + .name))))
+    (.result // [])
+    | map(select(type == "object" and (.name | type == "string") and ($host == .name or ($host | endswith("." + .name)))))
     | sort_by(.name | length)
     | last
     | .id // empty
