@@ -90,8 +90,18 @@ cf_zone_id_for_hostname() {
     return 0
   fi
   cf_api GET "/zones" | jq -r --arg host "$hostname" '
-    (.result // [])
-    | map(select(type == "object" and (.name | type == "string") and ($host == .name or ($host | endswith("." + .name)))))
+    (if (.result | type) == "array" then .result else [] end)
+    | map(select(
+        if type == "object" then
+          if (.name | type) == "string" then
+            $host == .name or ($host | endswith("." + .name))
+          else
+            false
+          end
+        else
+          false
+        end
+      ))
     | sort_by(.name | length)
     | last
     | .id // empty
