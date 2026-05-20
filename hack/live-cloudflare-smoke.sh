@@ -36,6 +36,9 @@ required_env CF_TEST_ZONE
 
 echo "::add-mask::${CF_ACCOUNT_ID}"
 echo "::add-mask::${CF_API_TOKEN}"
+if [[ -n "${CF_ZONE_ID:-}" ]]; then
+  echo "::add-mask::${CF_ZONE_ID}"
+fi
 
 log() {
   printf '\n==> %s\n' "$*"
@@ -260,9 +263,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
-log "resolving Cloudflare zone for ${CF_TEST_ZONE}"
-ZONE_ID="$(cf_zone_id_for_hostname "$CF_TEST_ZONE")"
-[[ -n "$ZONE_ID" ]] || die "no Cloudflare zone found for ${CF_TEST_ZONE}"
+if [[ -n "${CF_ZONE_ID:-}" ]]; then
+  log "using Cloudflare zone ID from CF_ZONE_ID"
+  ZONE_ID="${CF_ZONE_ID}"
+else
+  log "resolving Cloudflare zone for ${CF_TEST_ZONE}"
+  ZONE_ID="$(cf_zone_id_for_hostname "$CF_TEST_ZONE")"
+  [[ -n "$ZONE_ID" ]] || die "no Cloudflare zone found for ${CF_TEST_ZONE}; set CF_ZONE_ID if the token cannot list zones"
+fi
 
 log "installing released Helm chart ${CHART_REF} ${VERSION}"
 kubectl create namespace "$OPERATOR_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
