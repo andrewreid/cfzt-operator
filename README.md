@@ -172,8 +172,48 @@ Status fields:
 |---|---|
 | `status.cloudflare.accessApplicationId` | Cloudflare Access app UUID |
 | `status.cloudflare.dnsRecordId` | DNS record ID when managed |
-| `status.cloudflare.publicHostnameRouteHash` | SHA of the ingress rule placed in tunnel config |
+| `status.cloudflare.publicHostnameRouteHash` | `sha256:<hash>` of the canonical ingress rule placed in tunnel config |
 | `status.conditions` | `Ready` and `Progressing` conditions |
+
+## CloudflareAccessPolicy reference
+
+`CloudflareAccessPolicy` is cluster-scoped (`cfap`) and manages one reusable account-level Cloudflare Access policy. Exposures can bind to it with `spec.access.policyRef.name` instead of binding directly to a Cloudflare policy UUID.
+
+```yaml
+apiVersion: cfzt.reid.ee/v1alpha1
+kind: CloudflareAccessPolicy
+metadata:
+  name: family-only
+spec:
+  credentialsSecretRef:
+    namespace: cfzt-system
+    name: cloudflare-credentials
+  # policyName defaults to "<metadata.name>-cfzt"; cannot change after creation.
+  policyName: Family Only
+  decision: allow
+  rules:
+    include:
+      - emailDomain: example.com
+    require:
+      - geoCountryCode: US
+  sessionDuration: 24h
+  purposeJustification:
+    required: false
+```
+
+Supported rule item types are `email`, `emailDomain`, `ip`, `everyone: true`, `serviceToken`, and `geoCountryCode`. Each rule item must set exactly one type; `everyone: false` is rejected because it is not a real rule.
+
+Status fields:
+
+| Field | Description |
+|---|---|
+| `status.policyId` | Cloudflare Access policy UUID — authoritative ownership record |
+| `status.observedRulesHash` | `sha256:<hash>` of the reconciled rule set |
+| `status.referencedBy[]` | Exposures currently using `policyRef.name` |
+| `status.referencedByCount` | Count of referencing Exposures |
+| `status.conditions` | `Ready` and `Progressing` conditions |
+
+Name-colliding pre-existing Cloudflare policies are not auto-adopted. The controller sets `Ready=False, Reason=ForeignPolicy` and leaves the policy untouched. Unsupported Cloudflare rule variants on the tracked policy are surfaced as `Ready=False, Reason=UnsupportedDrift`; the controller does not silently treat them as equal or erase them.
 
 ## External (non-Kubernetes) origins
 
@@ -244,6 +284,7 @@ The operator refuses to mutate Cloudflare resources it does not own.
 
 - **Tunnels** are tracked by ID in `status.tunnelId`. A name collision with no local ID record → `Reason=ForeignTunnel`, no mutation.
 - **Access applications and DNS records** carry `managed-by=cfzt-operator source-uid=<exposure-uid>` tags. A resource with a different UID → `Reason=ForeignResource` or `Reason=HostnameConflict`, no mutation.
+- **Access policies** are tracked by ID in `CloudflareAccessPolicy.status.policyId`. A name collision with no local ID record → `Reason=ForeignPolicy`, no mutation.
 - **Ingress rules** inside the tunnel-config doc are always fully rewritten from Kubernetes state — they are not tagged individually.
 
 Repeated reconciles are idempotent. Drift in the Cloudflare dashboard is corrected on the next reconcile.
@@ -257,23 +298,17 @@ Deleting a `CloudflareExposure` removes:
 
 Deleting a `CloudflareTunnel` while Exposures still reference it is blocked. The tunnel stays, conditions show `Ready=False, Reason=BlockedByExposures`. Delete all Exposures first, then delete the tunnel.
 
+Deleting a `CloudflareAccessPolicy` while Exposures still reference it is also blocked with `Reason=BlockedByExposures`. Delete or update the referencing Exposures first.
+
 ## CRD upgrades
 
 CRDs live in `charts/cfzt-operator/crds/`. Helm 3 installs them but does not upgrade them on `helm upgrade`. The API is `v1alpha1` — breaking changes are allowed without a conversion webhook. To upgrade after a breaking CRD change: export `CloudflareTunnel`, `CloudflareExposure`, and `CloudflareAccessPolicy` manifests, uninstall, install the new chart version, reapply.
 
 ## Observability
 
-Prometheus metrics on the controller-runtime metrics endpoint:
+The chart can expose the controller-runtime metrics endpoint by setting `metrics.enabled: true`; it defaults off. Managed cloudflared DaemonSets also run cloudflared with `--metrics` on container port `2000`.
 
-| Metric | Labels |
-|---|---|
-| `cfzt_reconcile_total` | `controller`, `result` |
-| `cfzt_reconcile_duration_seconds` | `controller` |
-| `cfzt_cloudflare_api_total` | `endpoint`, `status` |
-| `cfzt_cloudflare_api_duration_seconds` | `endpoint` |
-| `cfzt_resource_ready` | `kind`, `namespace` |
-
-Kubernetes Events: `CreatedTunnel`, `CreatedAccessApp`, `TokenRotated`, `HostnameConflict`, `ForeignTunnel`, `BlockedByExposures`, `ReconcileFailed`.
+Kubernetes Events include `CreatedTunnel`, `CreatedAccessApp`, `CreatedAccessPolicy`, `UpdatedAccessPolicy`, `TokenRotated`, `HostnameConflict`, `ForeignTunnel`, `BlockedByExposures`, and `ReconcileFailed`.
 
 ## What is not supported
 
@@ -285,7 +320,7 @@ These are deliberate scope decisions, not gaps:
 - **Cloudflare Gateway management** — not in scope.
 - **Multi-cluster / multi-account** — single cluster, single account per operator instance.
 - **Conversion webhooks** — `v1alpha1` is delete-and-recreate only.
-- **Multiple Cloudflare accounts per operator** — not supported; use one operator per account.
+- **Multi-account coordination** — credentials are configured on Tunnel and AccessPolicy CRs, but the operator does not model account boundaries. Keep each Tunnel, its Exposures, and any referenced `CloudflareAccessPolicy` in the same Cloudflare account.
 
 ## Development
 

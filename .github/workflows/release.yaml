@@ -124,7 +124,6 @@ jobs:
     env:
       CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
       CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-      CF_ACCESS_POLICY_UUID: ${{ secrets.CF_ACCESS_POLICY_UUID }}
       CF_TEST_ZONE: ${{ vars.CF_TEST_ZONE }}
       CHART_REF: oci://ghcr.io/andrewreid/charts/cfzt-operator
       IMAGE_REPOSITORY: ghcr.io/andrewreid/cfzt-operator

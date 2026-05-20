@@ -7,6 +7,8 @@ RELEASE_TAG="${GITHUB_REF_NAME:?GITHUB_REF_NAME is required}"
 VERSION="${RELEASE_TAG#v}"
 RUN_SUFFIX="${GITHUB_RUN_ID:?GITHUB_RUN_ID is required}-${GITHUB_RUN_ATTEMPT:?GITHUB_RUN_ATTEMPT is required}"
 TUNNEL_NAME="cfzt-smoke-${RUN_SUFFIX}"
+ACCESS_POLICY="cfzt-smoke-policy-${RUN_SUFFIX}"
+ACCESS_POLICY_NAME="${ACCESS_POLICY}"
 PUBLIC_EXPOSURE="public-smoke"
 ACCESS_EXPOSURE="access-smoke"
 CONFLICT_EXPOSURE="conflict-smoke"
@@ -30,12 +32,10 @@ required_env() {
 
 required_env CF_ACCOUNT_ID
 required_env CF_API_TOKEN
-required_env CF_ACCESS_POLICY_UUID
 required_env CF_TEST_ZONE
 
 echo "::add-mask::${CF_ACCOUNT_ID}"
 echo "::add-mask::${CF_API_TOKEN}"
-echo "::add-mask::${CF_ACCESS_POLICY_UUID}"
 
 log() {
   printf '\n==> %s\n' "$*"
@@ -93,6 +93,13 @@ cf_dns_records_for_hostname() {
 cf_access_apps_for_hostname() {
   local hostname="$1"
   cf_api GET "/accounts/${CF_ACCOUNT_ID}/access/apps?domain=${hostname}&exact=true"
+}
+
+cf_access_policies_for_name() {
+  local name="$1"
+  cf_api GET "/accounts/${CF_ACCOUNT_ID}/access/policies" | jq --arg name "$name" '
+    .result |= map(select(.name == $name))
+  '
 }
 
 cf_tunnels_for_name() {
@@ -192,6 +199,7 @@ wait_cloudflare_absent() {
 collect_diagnostics() {
   log "collecting diagnostics"
   kubectl get cloudflaretunnels -o yaml || true
+  kubectl get cloudflareaccesspolicies -o yaml || true
   kubectl get cloudflareexposures -A -o yaml || true
   kubectl -n "$OPERATOR_NAMESPACE" get pods,deploy,ds,events || true
   kubectl -n "$SMOKE_NAMESPACE" get all,events || true
@@ -211,6 +219,9 @@ cleanup() {
     "$PUBLIC_EXPOSURE" "$ACCESS_EXPOSURE" "$CONFLICT_EXPOSURE" \
     --ignore-not-found --wait=true --timeout=300s
 
+  log "cleanup: deleting CloudflareAccessPolicy"
+  kubectl delete cloudflareaccesspolicy "$ACCESS_POLICY" --ignore-not-found --wait=true --timeout=300s
+
   log "cleanup: deleting CloudflareTunnel"
   kubectl delete cloudflaretunnel "$TUNNEL_NAME" --ignore-not-found --wait=true --timeout=300s
 
@@ -223,6 +234,7 @@ cleanup() {
     wait_cloudflare_absent "access DNS record" "cf_dns_records_for_hostname '${ZONE_ID}' '${ACCESS_HOSTNAME}'" '.result | length == 0' 180
   fi
   wait_cloudflare_absent "Access application" "cf_access_apps_for_hostname '${ACCESS_HOSTNAME}'" '.result | length == 0' 180
+  wait_cloudflare_absent "Access policy" "cf_access_policies_for_name '${ACCESS_POLICY_NAME}'" '.result | length == 0' 180
   wait_cloudflare_absent "Cloudflare tunnel" "cf_tunnels_for_name '${TUNNEL_NAME}'" '.result | length == 0' 180
 
   rm -rf "$TMP_DIR"
@@ -298,6 +310,31 @@ spec:
 EOF
 kubectl -n "$SMOKE_NAMESPACE" rollout status deploy/smoke-echo --timeout=180s
 
+log "creating managed Access policy"
+kubectl apply -f - <<EOF
+apiVersion: cfzt.reid.ee/v1alpha1
+kind: CloudflareAccessPolicy
+metadata:
+  name: ${ACCESS_POLICY}
+spec:
+  credentialsSecretRef:
+    namespace: ${OPERATOR_NAMESPACE}
+    name: cloudflare-credentials
+  policyName: ${ACCESS_POLICY_NAME}
+  decision: allow
+  rules:
+    include:
+      - emailDomain: ${CF_TEST_ZONE}
+  sessionDuration: 24h
+EOF
+kubectl wait --for=condition=Ready "cloudflareaccesspolicy/${ACCESS_POLICY}" --timeout=420s
+POLICY_ID_BEFORE="$(wait_for_jsonpath "Access policy ID" "kubectl get cloudflareaccesspolicy '${ACCESS_POLICY}' -o jsonpath='{.status.policyId}'" 60)"
+POLICY_RULES_HASH_BEFORE="$(wait_for_jsonpath "Access policy rules hash" "kubectl get cloudflareaccesspolicy '${ACCESS_POLICY}' -o jsonpath='{.status.observedRulesHash}'" 60)"
+[[ "$POLICY_RULES_HASH_BEFORE" == sha256:* ]] || die "unexpected Access policy rules hash ${POLICY_RULES_HASH_BEFORE}"
+POLICIES_FOR_NAME="$(cf_access_policies_for_name "$ACCESS_POLICY_NAME")"
+[[ "$(jq -r '.result | length' <<<"$POLICIES_FOR_NAME")" == "1" ]] || die "expected exactly one managed Access policy named ${ACCESS_POLICY_NAME}"
+[[ "$(jq -r '.result[0].id' <<<"$POLICIES_FOR_NAME")" == "$POLICY_ID_BEFORE" ]] || die "managed Access policy ID mismatch"
+
 log "creating tunnel"
 kubectl apply -f - <<EOF
 apiVersion: cfzt.reid.ee/v1alpha1
@@ -328,6 +365,7 @@ spec:
     name: ${TUNNEL_NAME}
   hostname: ${PUBLIC_HOSTNAME}
   sourceRef:
+    apiVersion: v1
     kind: Service
     name: smoke-echo
   access:
@@ -342,12 +380,13 @@ spec:
     name: ${TUNNEL_NAME}
   hostname: ${ACCESS_HOSTNAME}
   sourceRef:
+    apiVersion: v1
     kind: Service
     name: smoke-echo
   access:
     enabled: true
     policyRef:
-      uuid: ${CF_ACCESS_POLICY_UUID}
+      name: ${ACCESS_POLICY}
 EOF
 kubectl -n "$SMOKE_NAMESPACE" wait --for=condition=Ready "cloudflareexposure/${PUBLIC_EXPOSURE}" --timeout=420s
 kubectl -n "$SMOKE_NAMESPACE" wait --for=condition=Ready "cloudflareexposure/${ACCESS_EXPOSURE}" --timeout=420s
@@ -363,6 +402,22 @@ wait_for_public_route
 assert_access_challenged
 
 log "checking idempotency after re-apply and operator restart"
+kubectl apply -f - <<EOF
+apiVersion: cfzt.reid.ee/v1alpha1
+kind: CloudflareAccessPolicy
+metadata:
+  name: ${ACCESS_POLICY}
+spec:
+  credentialsSecretRef:
+    namespace: ${OPERATOR_NAMESPACE}
+    name: cloudflare-credentials
+  policyName: ${ACCESS_POLICY_NAME}
+  decision: allow
+  rules:
+    include:
+      - emailDomain: ${CF_TEST_ZONE}
+  sessionDuration: 24h
+EOF
 kubectl apply -f - <<EOF
 apiVersion: cfzt.reid.ee/v1alpha1
 kind: CloudflareTunnel
@@ -385,6 +440,7 @@ spec:
     name: ${TUNNEL_NAME}
   hostname: ${PUBLIC_HOSTNAME}
   sourceRef:
+    apiVersion: v1
     kind: Service
     name: smoke-echo
   access:
@@ -399,19 +455,23 @@ spec:
     name: ${TUNNEL_NAME}
   hostname: ${ACCESS_HOSTNAME}
   sourceRef:
+    apiVersion: v1
     kind: Service
     name: smoke-echo
   access:
     enabled: true
     policyRef:
-      uuid: ${CF_ACCESS_POLICY_UUID}
+      name: ${ACCESS_POLICY}
 EOF
 kubectl -n "$OPERATOR_NAMESPACE" rollout restart deploy/cfzt-operator
 kubectl -n "$OPERATOR_NAMESPACE" rollout status deploy/cfzt-operator --timeout=180s
+kubectl wait --for=condition=Ready "cloudflareaccesspolicy/${ACCESS_POLICY}" --timeout=240s
 kubectl wait --for=condition=Ready "cloudflaretunnel/${TUNNEL_NAME}" --timeout=240s
 kubectl -n "$SMOKE_NAMESPACE" wait --for=condition=Ready "cloudflareexposure/${PUBLIC_EXPOSURE}" --timeout=240s
 kubectl -n "$SMOKE_NAMESPACE" wait --for=condition=Ready "cloudflareexposure/${ACCESS_EXPOSURE}" --timeout=240s
 
+[[ "$(kubectl get cloudflareaccesspolicy "$ACCESS_POLICY" -o jsonpath='{.status.policyId}')" == "$POLICY_ID_BEFORE" ]] || die "Access policy ID changed after idempotency check"
+[[ "$(kubectl get cloudflareaccesspolicy "$ACCESS_POLICY" -o jsonpath='{.status.observedRulesHash}')" == "$POLICY_RULES_HASH_BEFORE" ]] || die "Access policy rules hash changed after idempotency check"
 [[ "$(kubectl get cloudflaretunnel "$TUNNEL_NAME" -o jsonpath='{.status.tunnelId}')" == "$TUNNEL_ID_BEFORE" ]] || die "tunnel ID changed after idempotency check"
 [[ "$(kubectl -n "$SMOKE_NAMESPACE" get cloudflareexposure "$PUBLIC_EXPOSURE" -o jsonpath='{.status.cloudflare.dnsRecordId}')" == "$PUBLIC_DNS_BEFORE" ]] || die "public DNS record ID changed after idempotency check"
 [[ "$(kubectl -n "$SMOKE_NAMESPACE" get cloudflareexposure "$ACCESS_EXPOSURE" -o jsonpath='{.status.cloudflare.dnsRecordId}')" == "$ACCESS_DNS_BEFORE" ]] || die "access DNS record ID changed after idempotency check"
@@ -433,6 +493,7 @@ spec:
     name: ${TUNNEL_NAME}
   hostname: ${CONFLICT_HOSTNAME}
   sourceRef:
+    apiVersion: v1
     kind: Service
     name: smoke-echo
   access:

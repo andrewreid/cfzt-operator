@@ -14,11 +14,11 @@ The hard part of this operator is not making Cloudflare API calls. It is:
 
 Every decision below follows from these constraints.
 
-## Two controllers, one writer
+## Three controllers, one tunnel-config writer
 
-`CloudflareTunnel` and `CloudflareExposure` are reconciled by separate controllers. The key asymmetry: **only the Tunnel controller writes the tunnel-config doc.**
+`CloudflareTunnel`, `CloudflareExposure`, and `CloudflareAccessPolicy` are reconciled by separate controllers. The key asymmetry: **only the Tunnel controller writes the tunnel-config doc.**
 
-Exposure controllers validate, ensure Access apps and DNS records, then enqueue the owning Tunnel. The Tunnel controller lists all referencing Exposures, computes the full ingress document, and PUTs it in a single call. This is safe because:
+Exposure controllers validate, ensure Access apps and DNS records, then enqueue the owning Tunnel. The AccessPolicy controller manages reusable Cloudflare Access policies referenced by Exposure `policyRef.name`. The Tunnel controller lists all referencing Exposures, computes the full ingress document, and PUTs it in a single call. This is safe because:
 
 - D11: the doc is computed entirely from Kubernetes state on every reconcile
 - D12: leader election means one operator process per cluster
@@ -34,12 +34,17 @@ Tunnel controller watches `CloudflareExposure` (cluster-wide, maps to owning Tun
 
 Exposure controller watches `CloudflareTunnel` (maps to all Exposures referencing that Tunnel) so Tunnel status writes (route hashes) propagate back to Exposure `Ready` gating.
 
+Exposure controller also watches `CloudflareAccessPolicy` (maps to Exposures using `policyRef.name`) so policy readiness and policy ID changes propagate into Access application binding. AccessPolicy controller watches `CloudflareExposure` (maps by `policyRef.name`) so `status.referencedBy[]` and deletion blocking stay current.
+
+Exposure lookups are indexed by `spec.tunnelRef.name`, `spec.hostname`, and `spec.access.policyRef.name`; map functions and duplicate-host checks should use those indexes rather than cluster-wide scans.
+
 ## Ownership model
 
 | Resource type | Ownership record |
 |---|---|
 | Cloudflare Tunnel | `CloudflareTunnel.status.tunnelId` (local, not a CF-side tag) |
 | Access application | `tags` field: `managed-by=cfzt-operator`, `source-uid=<exposure-uid>` |
+| Access policy | `CloudflareAccessPolicy.status.policyId` (local ID record; name is verified before mutation/delete) |
 | DNS record | `comment` field: `managed-by=cfzt-operator source-uid=<exposure-uid>` |
 | Ingress rules | Not tagged — entire doc overwritten from K8s state each reconcile |
 
@@ -48,6 +53,8 @@ Exposure controller watches `CloudflareTunnel` (maps to all Exposures referencin
 **Hostname conflict:** a resource exists for a hostname and its `source-uid` does not match → `Ready=False, Reason=HostnameConflict`. Do not touch. Requeue with backoff. Two Exposures claiming the same hostname → builder detects the collision at compile time and marks both `HostnameConflict`.
 
 **Tunnel adoption:** if `status.tunnelId` is unset and a name-matched tunnel exists → `Ready=False, Reason=ForeignTunnel`, no mutation. Pre-existing tunnels must be adopted out-of-band by patching `status.tunnelId` directly.
+
+**Policy adoption:** if `CloudflareAccessPolicy.status.policyId` is unset and a name-matched Cloudflare Access policy exists → `Ready=False, Reason=ForeignPolicy`, no mutation. The operator does not auto-adopt existing policies.
 
 ## Reconcile idempotency
 
@@ -67,24 +74,25 @@ If you cannot prove a code path is idempotent, it is wrong.
 
 ## Finalizers
 
-Both CRDs use finalizer `cfzt.reid.ee/finalizer`.
+All owning CRDs use finalizer `cfzt.reid.ee/finalizer`.
 
 **Exposure finalizer:** on deletion, removes the DNS record and Access app (for owned resources only), then enqueues the owning Tunnel so the ingress doc is rewritten without the deleted Exposure.
 
 **Tunnel finalizer:** blocks deletion while any `CloudflareExposure` references this tunnel (`Reason=BlockedByExposures`). Once all Exposures are deleted, the finalizer removes the Cloudflare tunnel, token Secret, and DaemonSet.
 
+**AccessPolicy finalizer:** blocks deletion while any `CloudflareExposure` references this policy by name (`Reason=BlockedByExposures`). Once unreferenced, it verifies the tracked policy ID still has the expected name, deletes it, and removes the finalizer. Metadata-only reads are used in the delete path so unsupported Cloudflare rule variants cannot wedge cleanup.
+
 Deletion only touches resources the local CR demonstrably owns. Partial cleanup on a previous delete attempt is handled gracefully — missing owned resources are not errors.
 
 ## Status conditions
 
-Both CRDs expose exactly `Ready` and `Progressing`. Detail is in `Reason` and `Message`.
+All owning CRDs expose exactly `Ready` and `Progressing`. Detail is in `Reason` and `Message`.
 
 `Reason` values:
 
 | Value | Meaning |
 |---|---|
 | `CredentialsMissing` | Secret not found or missing key |
-| `CredentialsInvalid` | API token rejected |
 | `TunnelCreating` | Waiting for Cloudflare tunnel to become available |
 | `TokenFetchFailed` | Could not retrieve tunnel token |
 | `WorkloadNotReady` | DaemonSet has no ready pods |
@@ -94,8 +102,11 @@ Both CRDs expose exactly `Ready` and `Progressing`. Detail is in `Reason` and `M
 | `ForeignTunnel` | Name-matching tunnel exists with no local ID record |
 | `AccessAppPending` | Access app not yet confirmed ready |
 | `PolicyNotFound` | Access policy UUID not found in account |
+| `PolicyNotReady` | Referenced `CloudflareAccessPolicy` is missing, deleting, stale, or not ready |
 | `DNSWriteFailed` | DNS record creation or update failed |
 | `BlockedByExposures` | Tunnel deletion blocked by referencing Exposures |
+| `ForeignPolicy` | Name-matching Access policy exists with no local ID record, or tracked policy name does not match |
+| `UnsupportedDrift` | Tracked Access policy uses a Cloudflare rule variant outside the supported structured subset |
 | `Reconciled` | All resources in desired state |
 
 ## Cloudflare client interface
@@ -104,7 +115,9 @@ All Cloudflare API calls go through `internal/cloudflare`. Controllers never imp
 
 Rate limiting: per-token bucket inside `internal/cloudflare/client.go`, keyed by API token hash. Exponential backoff on 429 and 5xx responses.
 
-Zone resolution: longest-suffix match against a cached zone list. Cache is refreshed on miss and on 401 responses. No PSL parsing.
+Zone resolution: longest-suffix match against a cached zone list. The cache is populated on first use and refreshed on miss. No PSL parsing.
+
+Access policy `List` and `GetMetadata` return metadata only and intentionally do not parse rule bodies; this prevents unsupported rule variants on unrelated policies from blocking name or finalizer checks. `Get` parses rule bodies and returns `ErrUnsupportedAccessRule` so the controller can surface tracked unsupported drift instead of silently treating it as equal.
 
 ## Package layout
 
@@ -112,18 +125,21 @@ Zone resolution: longest-suffix match against a cached zone list. Cache is refre
 api/v1alpha1/
   cloudflaretunnel_types.go        CRD types, cluster-scoped
   cloudflareexposure_types.go      CRD types, namespaced
+  cloudflareaccesspolicy_types.go  CRD types, cluster-scoped
   groupversion_info.go
   zz_generated.deepcopy.go         generated — do not edit
 
 internal/controller/
   cloudflaretunnel_controller.go   Tunnel reconcile loop
   cloudflareexposure_controller.go Exposure reconcile loop
+  cloudflareaccesspolicy_controller.go  managed Access policy reconcile loop
+  accesspolicy_hash.go             canonical policy rule hash
   conditions.go                    condition helpers
   httproute_discovery.go           startup CRD detection for HTTPRoute
+  indexes.go                       Exposure field indexes
 
 internal/tunnelconfig/
   builder.go                       builds ingress[] from Exposure list; hostname-sorted, 404 catch-all last
-  reconciler.go                    invoked by Tunnel controller; PUT full doc
 
 internal/cloudflare/
   client.go                        interface + rate limiter
@@ -132,6 +148,7 @@ internal/cloudflare/
   tunnels.go                       tunnel + token methods
   configurations.go                tunnel-config doc methods
   access_applications.go           Access app + policy binding
+  access_policies.go               reusable Access policy methods
   dns.go                           DNS record CRUD
   zones.go                         zone list cache + longest-suffix resolution
 
@@ -173,7 +190,7 @@ The operator manages one DaemonSet named `cloudflared-<tunnel-name>` in `spec.cl
 
 When `hostNetwork: true`, `dnsPolicy` is set to `ClusterFirstWithHostNet`.
 
-The cloudflared image is pinned to a specific version as a Go constant in `internal/workload/daemonset.go`. The `:latest` tag is rejected by CRD validation.
+The cloudflared image is pinned to a specific version as a Go constant in `internal/workload/daemonset.go`. The `:latest` tag is rejected by CRD validation. Generated pods set `automountServiceAccountToken: false`, run with `seccompProfile: RuntimeDefault`, and expose cloudflared metrics on container port `2000`.
 
 ## Binding decisions
 
@@ -187,8 +204,8 @@ The cloudflared image is pinned to a specific version as a Go constant in `inter
 | D6 | `CloudflareTunnel` is cluster-scoped. cloudflared workload is namespaced. |
 | D7 | DaemonSet only. No Deployment option. |
 | D8 | `Ready` + `Progressing` conditions only. Detail in Reason/Message. |
-| D9 | Tunnel ownership via local `status.tunnelId`, not a CF-side tag. Name collision without local ID → `ForeignTunnel`. Access/DNS resources tagged with `source-uid`. |
-| D10 | Origin always explicit in MVP. Slice 3 adds Service defaulting. |
+| D9 | Tunnel ownership via local `status.tunnelId`, not a CF-side tag. Name collision without local ID → `ForeignTunnel`. Access apps and DNS records are tagged with `source-uid`; Access policies are tracked by `status.policyId`. |
+| D10 | Origin may be explicit, or partially derived by `sourceRef`: Service can derive host/port; HTTPRoute can derive hostname. |
 | D11 | Single writer for tunnel-config doc: Tunnel controller only. Exposure controller never calls the configurations endpoint. |
 | D12 | Leader election required ON. |
 | D13 | SDK: `github.com/cloudflare/cloudflare-go/v4`. Wrapped behind internal interface. |
@@ -197,8 +214,8 @@ The cloudflared image is pinned to a specific version as a Go constant in `inter
 | D16 | External (non-Kubernetes) origins are first-class. |
 | D17 | Helm chart under `charts/cfzt-operator/`. CRDs in `crds/` (install-only). Leader election is always enabled. |
 | D18 | CI in GitHub Actions: lint, test, generated-drift gate on PR; image + chart publish on tag. |
-| D19 | `MaxConcurrentReconciles=1` on both controllers. |
-| D20 | Cross-controller watches: Tunnel watches Exposure, Exposure watches Tunnel. |
+| D19 | `MaxConcurrentReconciles=1` on all controllers. |
+| D20 | Cross-controller watches: Tunnel watches Exposure, Exposure watches Tunnel, Exposure watches AccessPolicy, and AccessPolicy watches Exposure. |
 | D21 | Finalizer string: `cfzt.reid.ee/finalizer` on all owning CRDs. |
 | D22 | Minimum Kubernetes 1.27 (stable CEL CRD validation). |
 | D23 | Helm CRDs are install-only. ArgoCD/Flux users: document in NOTES.txt. |
