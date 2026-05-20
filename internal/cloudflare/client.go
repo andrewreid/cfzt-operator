@@ -11,6 +11,10 @@ var ErrNotFound = errors.New("cloudflare: resource not found")
 // ErrNotImplemented is returned by stub methods not yet wired to the SDK.
 var ErrNotImplemented = errors.New("cloudflare: not implemented")
 
+// ErrUnsupportedAccessRule is returned when Cloudflare returns an Access rule
+// variant outside the MVP rule set supported by this operator.
+var ErrUnsupportedAccessRule = errors.New("cloudflare: unsupported access rule")
+
 // Client is the SDK boundary. Slice 1 exposes Tunnels only; later slices add
 // Configurations, Access, DNS, and Zones onto this interface (Slice 2).
 type Client interface {

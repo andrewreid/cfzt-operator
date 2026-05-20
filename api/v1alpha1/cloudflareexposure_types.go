@@ -29,6 +29,8 @@ type TunnelRef struct {
 }
 
 // SourceRef identifies a same-namespace source object used for defaulting.
+//
+// +kubebuilder:validation:XValidation:rule="(self.kind == 'Service' && has(self.apiVersion) && self.apiVersion == 'v1') || (self.kind == 'HTTPRoute' && has(self.apiVersion) && self.apiVersion == 'gateway.networking.k8s.io/v1')",message="sourceRef.apiVersion must be v1 for Service and gateway.networking.k8s.io/v1 for HTTPRoute"
 type SourceRef struct {
 	// +kubebuilder:validation:Optional
 	ApiVersion string `json:"apiVersion,omitempty"`
@@ -86,6 +88,9 @@ type AccessSpec struct {
 // +kubebuilder:validation:XValidation:rule="(has(self.sourceRef) && self.sourceRef.kind == 'Service') || (has(self.origin) && has(self.origin.protocol) && has(self.origin.host) && has(self.origin.port))",message="origin protocol, host, and port are required unless sourceRef.kind is Service"
 // +kubebuilder:validation:XValidation:rule="has(self.hostname) || (has(self.sourceRef) && self.sourceRef.kind == 'HTTPRoute')",message="hostname is required unless sourceRef.kind is HTTPRoute"
 // +kubebuilder:validation:XValidation:rule="!has(self.access) || !self.access.enabled || (has(self.access.policyRef) && ((has(self.access.policyRef.uuid) && size(self.access.policyRef.uuid) > 0) != (has(self.access.policyRef.name) && size(self.access.policyRef.name) > 0)))",message="access.policyRef requires exactly one of uuid or name when access.enabled is true"
+// +kubebuilder:validation:XValidation:rule="has(oldSelf.hostname) ? (has(self.hostname) && self.hostname == oldSelf.hostname) : (!has(self.hostname) || (has(self.sourceRef) && self.sourceRef.kind == 'HTTPRoute'))",message="hostname is immutable except when initially derived from an HTTPRoute sourceRef"
+// +kubebuilder:validation:XValidation:rule="self.tunnelRef.name == oldSelf.tunnelRef.name",message="tunnelRef.name is immutable"
+// +kubebuilder:validation:XValidation:rule="has(self.sourceRef) == has(oldSelf.sourceRef) && (!has(self.sourceRef) || self.sourceRef == oldSelf.sourceRef)",message="sourceRef is immutable"
 type CloudflareExposureSpec struct {
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:MaxLength=120

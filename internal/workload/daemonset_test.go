@@ -43,8 +43,17 @@ func TestDaemonSetSpecMatchesSpec(t *testing.T) {
 	if container.SecurityContext == nil || len(container.SecurityContext.Capabilities.Drop) != 1 || container.SecurityContext.Capabilities.Drop[0] != "ALL" {
 		t.Fatalf("missing hardened security context")
 	}
+	if ds.Spec.Template.Spec.AutomountServiceAccountToken == nil || *ds.Spec.Template.Spec.AutomountServiceAccountToken {
+		t.Fatalf("automountServiceAccountToken = %#v, want false", ds.Spec.Template.Spec.AutomountServiceAccountToken)
+	}
+	if ds.Spec.Template.Spec.SecurityContext == nil || ds.Spec.Template.Spec.SecurityContext.SeccompProfile == nil || ds.Spec.Template.Spec.SecurityContext.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		t.Fatalf("missing RuntimeDefault seccomp profile")
+	}
 	if container.ReadinessProbe.PeriodSeconds != 5 {
 		t.Fatalf("readiness period = %d, want 5", container.ReadinessProbe.PeriodSeconds)
+	}
+	if container.ReadinessProbe.InitialDelaySeconds != 0 {
+		t.Fatalf("readiness initial delay = %d, want 0", container.ReadinessProbe.InitialDelaySeconds)
 	}
 	if container.LivenessProbe.PeriodSeconds != 10 {
 		t.Fatalf("liveness period = %d, want 10", container.LivenessProbe.PeriodSeconds)

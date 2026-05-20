@@ -151,8 +151,8 @@ spec:
                       - message: each rule item must set exactly one of email, emailDomain,
                           ip, everyone, serviceToken, geoCountryCode
                         rule: '[has(self.email), has(self.emailDomain), has(self.ip),
-                          has(self.everyone), has(self.serviceToken), has(self.geoCountryCode)].filter(b,
-                          b).size() == 1'
+                          has(self.everyone) && self.everyone, has(self.serviceToken),
+                          has(self.geoCountryCode)].filter(b, b).size() == 1'
                     maxItems: 64
                     type: array
                   include:
@@ -183,8 +183,8 @@ spec:
                       - message: each rule item must set exactly one of email, emailDomain,
                           ip, everyone, serviceToken, geoCountryCode
                         rule: '[has(self.email), has(self.emailDomain), has(self.ip),
-                          has(self.everyone), has(self.serviceToken), has(self.geoCountryCode)].filter(b,
-                          b).size() == 1'
+                          has(self.everyone) && self.everyone, has(self.serviceToken),
+                          has(self.geoCountryCode)].filter(b, b).size() == 1'
                     maxItems: 64
                     type: array
                   require:
@@ -215,8 +215,8 @@ spec:
                       - message: each rule item must set exactly one of email, emailDomain,
                           ip, everyone, serviceToken, geoCountryCode
                         rule: '[has(self.email), has(self.emailDomain), has(self.ip),
-                          has(self.everyone), has(self.serviceToken), has(self.geoCountryCode)].filter(b,
-                          b).size() == 1'
+                          has(self.everyone) && self.everyone, has(self.serviceToken),
+                          has(self.geoCountryCode)].filter(b, b).size() == 1'
                     maxItems: 64
                     type: array
                 type: object
@@ -233,6 +233,9 @@ spec:
                 or require
               rule: size(self.rules.include) + size(self.rules.exclude) + size(self.rules.require)
                 >= 1
+            - message: policyName is immutable
+              rule: has(self.policyName) == has(oldSelf.policyName) && (!has(self.policyName)
+                || self.policyName == oldSelf.policyName)
           status:
             description: CloudflareAccessPolicyStatus defines the observed state of
               CloudflareAccessPolicy.

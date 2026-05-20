@@ -1,12 +1,14 @@
 package tunnelconfig
 
 import (
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	cfztv1alpha1 "github.com/andrewreid/cfzt-operator/api/v1alpha1"
+	"github.com/andrewreid/cfzt-operator/internal/cloudflare"
 )
 
 func TestTunnelConfigBuilderDeterministic(t *testing.T) {
@@ -28,6 +30,19 @@ func TestTunnelConfigBuilderDeterministic(t *testing.T) {
 	}
 	if result.Routes[0].Hash == "" || result.Routes[0].Hash != HashRule(result.Config.Ingress[0]) {
 		t.Fatalf("route hash not stable")
+	}
+}
+
+func TestHashRuleUsesCanonicalJSON(t *testing.T) {
+	rule := resultIngressRule("jellyfin.example.com", "http://jellyfin.media.svc.cluster.local:80")
+
+	got := HashRule(rule)
+	want := "sha256:4c898e712c692aed20894bb3693c45f6ca5864015b5afd47d64864de6e30678c"
+	if got != want {
+		t.Fatalf("HashRule = %q, want %q", got, want)
+	}
+	if !strings.HasPrefix(got, "sha256:") {
+		t.Fatalf("HashRule missing sha256 prefix: %q", got)
 	}
 }
 
@@ -80,4 +95,8 @@ func exposure(name, hostname, host, uid string) cfztv1alpha1.CloudflareExposure 
 			Origin:    &cfztv1alpha1.OriginSpec{Protocol: "http", Host: host, Port: 80},
 		},
 	}
+}
+
+func resultIngressRule(hostname, service string) cloudflare.IngressRule {
+	return cloudflare.IngressRule{Hostname: hostname, Service: service}
 }

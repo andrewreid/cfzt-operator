@@ -83,6 +83,7 @@ jobs:
           kubectl -n cfzt-system rollout status deploy/cfzt-operator --timeout=180s
           kubectl get crd cloudflaretunnels.cfzt.reid.ee
           kubectl get crd cloudflareexposures.cfzt.reid.ee
+          kubectl get crd cloudflareaccesspolicies.cfzt.reid.ee
           kubectl -n cfzt-system get pods -l app.kubernetes.io/name=cfzt-operator
 
       - name: build + push image
@@ -96,9 +97,10 @@ jobs:
       - name: package + push chart
         run: |
           VERSION="${{ steps.version.outputs.version }}"
+          TAG="${{ steps.version.outputs.tag }}"
           helm package charts/cfzt-operator \
             --version "${VERSION}" \
-            --app-version "${VERSION}" \
+            --app-version "${TAG}" \
             --destination dist
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login \
             -u "${{ github.actor }}" --password-stdin "${{ env.REGISTRY }}"

@@ -13,26 +13,31 @@ import (
 // FakeClient is an in-memory implementation of Client for unit tests.
 // No global state; each instance is independent.
 type FakeClient struct {
-	mu             sync.Mutex
-	tunnels        map[string]*Tunnel
-	tokens         map[string]string
-	configurations map[string]TunnelConfiguration
-	accessApps     map[string]*AccessApplication
-	accessPolicies map[string]*AccessPolicy
-	dnsRecords     map[string]*DNSRecord
-	zones          map[string]*Zone
+	mu                        sync.Mutex
+	tunnels                   map[string]*Tunnel
+	tokens                    map[string]string
+	configurations            map[string]TunnelConfiguration
+	accessApps                map[string]*AccessApplication
+	accessPolicies            map[string]*AccessPolicy
+	unsupportedAccessPolicies map[string]bool
+	dnsRecords                map[string]*DNSRecord
+	zones                     map[string]*Zone
+	zoneCache                 []Zone
+	zoneCacheReady            bool
+	zoneListCalls             int
 }
 
 // NewFake returns a ready-to-use FakeClient.
 func NewFake() *FakeClient {
 	return &FakeClient{
-		tunnels:        make(map[string]*Tunnel),
-		tokens:         make(map[string]string),
-		configurations: make(map[string]TunnelConfiguration),
-		accessApps:     make(map[string]*AccessApplication),
-		accessPolicies: make(map[string]*AccessPolicy),
-		dnsRecords:     make(map[string]*DNSRecord),
-		zones:          make(map[string]*Zone),
+		tunnels:                   make(map[string]*Tunnel),
+		tokens:                    make(map[string]string),
+		configurations:            make(map[string]TunnelConfiguration),
+		accessApps:                make(map[string]*AccessApplication),
+		accessPolicies:            make(map[string]*AccessPolicy),
+		unsupportedAccessPolicies: make(map[string]bool),
+		dnsRecords:                make(map[string]*DNSRecord),
+		zones:                     make(map[string]*Zone),
 	}
 }
 
@@ -71,6 +76,19 @@ func (f *FakeClient) AddZone(id, name string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.zones[id] = &Zone{ID: id, Name: name}
+}
+
+func (f *FakeClient) ZoneListCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.zoneListCalls
+}
+
+// MarkAccessPolicyUnsupported makes Get return ErrUnsupportedAccessRule for id.
+func (f *FakeClient) MarkAccessPolicyUnsupported(id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.unsupportedAccessPolicies[id] = true
 }
 
 type fakeTunnels struct {
@@ -259,10 +277,11 @@ func (d *fakeDNSRecords) Update(_ context.Context, id string, in DNSRecordInput)
 	return &copy, nil
 }
 
-func (d *fakeDNSRecords) Delete(_ context.Context, _ string, id string) error {
+func (d *fakeDNSRecords) Delete(_ context.Context, zoneID, id string) error {
 	d.fc.mu.Lock()
 	defer d.fc.mu.Unlock()
-	if _, ok := d.fc.dnsRecords[id]; !ok {
+	record, ok := d.fc.dnsRecords[id]
+	if !ok || record.ZoneID != zoneID {
 		return ErrNotFound
 	}
 	delete(d.fc.dnsRecords, id)
@@ -276,6 +295,7 @@ type fakeZones struct {
 func (z *fakeZones) List(_ context.Context) ([]Zone, error) {
 	z.fc.mu.Lock()
 	defer z.fc.mu.Unlock()
+	z.fc.zoneListCalls++
 	out := make([]Zone, 0, len(z.fc.zones))
 	for _, zone := range z.fc.zones {
 		out = append(out, *zone)
@@ -285,10 +305,24 @@ func (z *fakeZones) List(_ context.Context) ([]Zone, error) {
 }
 
 func (z *fakeZones) Resolve(ctx context.Context, hostname string) (*Zone, error) {
+	z.fc.mu.Lock()
+	if z.fc.zoneCacheReady {
+		if zone, ok := LongestMatchingZone(z.fc.zoneCache, hostname); ok {
+			z.fc.mu.Unlock()
+			return zone, nil
+		}
+	}
+	z.fc.mu.Unlock()
+
 	zones, err := z.List(ctx)
 	if err != nil {
 		return nil, err
 	}
+	z.fc.mu.Lock()
+	z.fc.zoneCache = append([]Zone(nil), zones...)
+	z.fc.zoneCacheReady = true
+	z.fc.mu.Unlock()
+
 	zone, ok := LongestMatchingZone(zones, hostname)
 	if !ok {
 		return nil, ErrNotFound
@@ -305,11 +339,17 @@ func applyAccessApplication(app *AccessApplication, in AccessApplicationInput) {
 	app.Name = in.Name
 	app.Domain = in.Domain
 	app.PolicyUUID = in.PolicyUUID
+	if in.PolicyUUID == "" {
+		app.PolicyUUIDs = nil
+	} else {
+		app.PolicyUUIDs = []string{in.PolicyUUID}
+	}
 	app.Tags = append([]string(nil), in.Tags...)
 }
 
 func copyAccessApplication(app *AccessApplication) AccessApplication {
 	copy := *app
+	copy.PolicyUUIDs = append([]string(nil), app.PolicyUUIDs...)
 	copy.Tags = append([]string(nil), app.Tags...)
 	return copy
 }
@@ -332,10 +372,21 @@ func (p *fakeAccessPolicies) List(_ context.Context) ([]AccessPolicy, error) {
 	defer p.fc.mu.Unlock()
 	out := make([]AccessPolicy, 0, len(p.fc.accessPolicies))
 	for _, pol := range p.fc.accessPolicies {
-		out = append(out, copyAccessPolicy(pol))
+		out = append(out, accessPolicyMetadata(pol))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
+}
+
+func (p *fakeAccessPolicies) GetMetadata(_ context.Context, id string) (*AccessPolicy, error) {
+	p.fc.mu.Lock()
+	defer p.fc.mu.Unlock()
+	pol, ok := p.fc.accessPolicies[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	c := accessPolicyMetadata(pol)
+	return &c, nil
 }
 
 func (p *fakeAccessPolicies) Get(_ context.Context, id string) (*AccessPolicy, error) {
@@ -344,6 +395,9 @@ func (p *fakeAccessPolicies) Get(_ context.Context, id string) (*AccessPolicy, e
 	pol, ok := p.fc.accessPolicies[id]
 	if !ok {
 		return nil, ErrNotFound
+	}
+	if p.fc.unsupportedAccessPolicies[id] {
+		return nil, ErrUnsupportedAccessRule
 	}
 	c := copyAccessPolicy(pol)
 	return &c, nil
@@ -399,4 +453,15 @@ func copyAccessPolicy(pol *AccessPolicy) AccessPolicy {
 	c.Exclude = append([]AccessRule(nil), pol.Exclude...)
 	c.Require = append([]AccessRule(nil), pol.Require...)
 	return c
+}
+
+func accessPolicyMetadata(pol *AccessPolicy) AccessPolicy {
+	return AccessPolicy{
+		ID:                           pol.ID,
+		Name:                         pol.Name,
+		Decision:                     pol.Decision,
+		SessionDuration:              pol.SessionDuration,
+		PurposeJustificationRequired: pol.PurposeJustificationRequired,
+		PurposeJustificationPrompt:   pol.PurposeJustificationPrompt,
+	}
 }

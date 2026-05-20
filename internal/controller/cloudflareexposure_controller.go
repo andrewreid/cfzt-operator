@@ -76,6 +76,10 @@ func (r *CloudflareExposureReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
+	if !exposure.DeletionTimestamp.IsZero() {
+		return r.reconcileDelete(ctx, &exposure)
+	}
+
 	var tunnel cfztv1alpha1.CloudflareTunnel
 	if err := r.Get(ctx, types.NamespacedName{Name: exposure.Spec.TunnelRef.Name}, &tunnel); err != nil {
 		return ctrl.Result{}, r.setExposureStatus(ctx, &exposure, exposure.Status.Cloudflare, false, ReasonOriginInvalid, fmt.Sprintf("referenced CloudflareTunnel not found: %v", err))
@@ -84,10 +88,6 @@ func (r *CloudflareExposureReconciler) Reconcile(ctx context.Context, req ctrl.R
 	cfClient, err := r.cloudflareClient(ctx, &tunnel)
 	if err != nil {
 		return ctrl.Result{}, r.setExposureStatus(ctx, &exposure, exposure.Status.Cloudflare, false, ReasonCredentialsMissing, err.Error())
-	}
-
-	if !exposure.DeletionTimestamp.IsZero() {
-		return ctrl.Result{}, r.reconcileDelete(ctx, &exposure, cfClient)
 	}
 
 	if controllerutil.AddFinalizer(&exposure, naming.Finalizer) {
@@ -227,7 +227,7 @@ func (r *CloudflareExposureReconciler) reconcileAccess(ctx context.Context, expo
 	var owned *cloudflare.AccessApplication
 	for _, app := range apps {
 		if owner, ok := ownershipUIDFromTags(app.Tags); ok && owner != exposure.UID {
-			return nil, false, fmt.Errorf("%w: Access application %s for hostname %s", errForeignResource, app.ID, exposure.Spec.Hostname)
+			return nil, false, fmt.Errorf("%w: Access application %s for hostname %s", errHostnameConflict, app.ID, exposure.Spec.Hostname)
 		}
 		if !ownedByTags(app.Tags, exposure.UID) {
 			return nil, false, fmt.Errorf("%w: Access application %s for hostname %s", errHostnameConflict, app.ID, exposure.Spec.Hostname)
@@ -240,7 +240,7 @@ func (r *CloudflareExposureReconciler) reconcileAccess(ctx context.Context, expo
 		}
 	}
 	if owned != nil {
-		if owned.Name == want.Name && owned.PolicyUUID == want.PolicyUUID && sameStringSet(owned.Tags, want.Tags) {
+		if owned.Name == want.Name && accessApplicationPoliciesMatch(*owned, want.PolicyUUID) && sameStringSet(owned.Tags, want.Tags) {
 			copy := *owned
 			return &copy, false, nil
 		}
@@ -274,11 +274,13 @@ func (r *CloudflareExposureReconciler) resolveAccessPolicyUUID(ctx context.Conte
 }
 
 func (r *CloudflareExposureReconciler) hasDuplicateHostname(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure) (bool, error) {
-	var list cfztv1alpha1.CloudflareExposureList
-	if err := r.List(ctx, &list); err != nil {
+	others, err := listCloudflareExposuresByField(ctx, r.Client, exposureIndexHostname, exposure.Spec.Hostname, func(other cfztv1alpha1.CloudflareExposure) bool {
+		return other.Spec.Hostname == exposure.Spec.Hostname
+	})
+	if err != nil {
 		return false, err
 	}
-	for _, other := range list.Items {
+	for _, other := range others {
 		if other.UID == exposure.UID {
 			continue
 		}
@@ -296,6 +298,9 @@ func (r *CloudflareExposureReconciler) defaultFromSourceRef(ctx context.Context,
 	before := exposure.DeepCopy()
 	switch exposure.Spec.SourceRef.Kind {
 	case origin.ServiceKind:
+		if exposure.Spec.SourceRef.ApiVersion != "v1" {
+			return false, fmt.Errorf("sourceRef.apiVersion must be v1 for Service")
+		}
 		svc := &corev1.Service{}
 		if err := r.Get(ctx, types.NamespacedName{Namespace: exposure.Namespace, Name: exposure.Spec.SourceRef.Name}, svc); err != nil {
 			return false, fmt.Errorf("sourceRef Service %s/%s not readable: %w", exposure.Namespace, exposure.Spec.SourceRef.Name, err)
@@ -307,6 +312,9 @@ func (r *CloudflareExposureReconciler) defaultFromSourceRef(ctx context.Context,
 		exposure.Spec.Origin = resolved
 		ensureOwnerReference(exposure, "v1", origin.ServiceKind, svc.Name, svc.UID)
 	case origin.HTTPRouteKind:
+		if exposure.Spec.SourceRef.ApiVersion != origin.HTTPRouteAPIVersion {
+			return false, fmt.Errorf("sourceRef.apiVersion must be %s for HTTPRoute", origin.HTTPRouteAPIVersion)
+		}
 		if !r.HTTPRouteSourceEnabled {
 			return false, errors.New("HTTPRoute CRD not found, controller disabled")
 		}
@@ -375,7 +383,7 @@ func (r *CloudflareExposureReconciler) reconcileDNS(ctx context.Context, exposur
 	var owned *cloudflare.DNSRecord
 	for _, record := range records {
 		if owner, ok := naming.ParseOwnershipTag(record.Comment); ok && owner != exposure.UID {
-			return nil, fmt.Errorf("%w: DNS record %s for hostname %s", errForeignResource, record.ID, exposure.Spec.Hostname)
+			return nil, fmt.Errorf("%w: DNS record %s for hostname %s", errHostnameConflict, record.ID, exposure.Spec.Hostname)
 		}
 		if !ownedByComment(record.Comment, exposure.UID) {
 			return nil, fmt.Errorf("%w: DNS record %s for hostname %s", errHostnameConflict, record.ID, exposure.Spec.Hostname)
@@ -397,24 +405,36 @@ func (r *CloudflareExposureReconciler) reconcileDNS(ctx context.Context, exposur
 	return cfClient.DNSRecords().Create(ctx, want)
 }
 
-func (r *CloudflareExposureReconciler) reconcileDelete(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, cfClient cloudflare.Client) error {
+func (r *CloudflareExposureReconciler) reconcileDelete(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure) (ctrl.Result, error) {
 	if !controllerutil.ContainsFinalizer(exposure, naming.Finalizer) {
-		return nil
+		return ctrl.Result{}, nil
+	}
+	if exposure.Status.Cloudflare.AccessApplicationId == "" && exposure.Status.Cloudflare.DnsRecordId == "" {
+		controllerutil.RemoveFinalizer(exposure, naming.Finalizer)
+		return ctrl.Result{}, r.Update(ctx, exposure)
+	}
+	var tunnel cfztv1alpha1.CloudflareTunnel
+	if err := r.Get(ctx, types.NamespacedName{Name: exposure.Spec.TunnelRef.Name}, &tunnel); err != nil {
+		return r.setExposureStatusAndRequeue(ctx, exposure, exposure.Status.Cloudflare, ReasonCredentialsMissing, fmt.Sprintf("cleanup needs referenced CloudflareTunnel credentials: %v", err))
+	}
+	cfClient, err := r.cloudflareClient(ctx, &tunnel)
+	if err != nil {
+		return r.setExposureStatusAndRequeue(ctx, exposure, exposure.Status.Cloudflare, ReasonCredentialsMissing, err.Error())
 	}
 	if err := r.deleteOwnedDNSIfPresent(ctx, exposure, cfClient); err != nil {
 		if errors.Is(err, errForeignResource) {
-			return r.setExposureStatus(ctx, exposure, exposure.Status.Cloudflare, false, ReasonForeignResource, "DNS record is not owned by this CloudflareExposure")
+			return ctrl.Result{}, r.setExposureStatus(ctx, exposure, exposure.Status.Cloudflare, false, ReasonForeignResource, "DNS record is not owned by this CloudflareExposure")
 		}
-		return err
+		return ctrl.Result{}, err
 	}
 	if err := r.deleteOwnedAccessIfPresent(ctx, exposure, cfClient); err != nil {
 		if errors.Is(err, errForeignResource) {
-			return r.setExposureStatus(ctx, exposure, exposure.Status.Cloudflare, false, ReasonForeignResource, "Access application is not owned by this CloudflareExposure")
+			return ctrl.Result{}, r.setExposureStatus(ctx, exposure, exposure.Status.Cloudflare, false, ReasonForeignResource, "Access application is not owned by this CloudflareExposure")
 		}
-		return err
+		return ctrl.Result{}, err
 	}
 	controllerutil.RemoveFinalizer(exposure, naming.Finalizer)
-	return r.Update(ctx, exposure)
+	return ctrl.Result{}, r.Update(ctx, exposure)
 }
 
 func (r *CloudflareExposureReconciler) deleteOwnedAccessIfPresent(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, cfClient cloudflare.Client) error {
@@ -496,6 +516,13 @@ func (r *CloudflareExposureReconciler) setExposureStatusAndBackoff(ctx context.C
 	return ctrl.Result{}, fmt.Errorf("%s: %s", reason, message)
 }
 
+func (r *CloudflareExposureReconciler) setExposureStatusAndRequeue(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, cfStatus cfztv1alpha1.ExposureCloudflareStatus, reason, message string) (ctrl.Result, error) {
+	if err := r.setExposureStatus(ctx, exposure, cfStatus, false, reason, message); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+}
+
 func routeHashForExposure(tunnel *cfztv1alpha1.CloudflareTunnel, exposure *cfztv1alpha1.CloudflareExposure) string {
 	for _, route := range tunnel.Status.Routes {
 		if route.ExposureUid == exposure.UID && route.Namespace == exposure.Namespace && route.Name == exposure.Name && route.Hostname == exposure.Spec.Hostname {
@@ -539,6 +566,13 @@ func sameStringSet(a, b []string) bool {
 	return true
 }
 
+func accessApplicationPoliciesMatch(app cloudflare.AccessApplication, wantPolicyUUID string) bool {
+	if len(app.PolicyUUIDs) > 0 {
+		return sameStringSet(app.PolicyUUIDs, []string{wantPolicyUUID})
+	}
+	return app.PolicyUUID == wantPolicyUUID
+}
+
 func (r *CloudflareExposureReconciler) event(exposure *cfztv1alpha1.CloudflareExposure, eventType, reason, messageFmt string, args ...any) {
 	if r.Recorder == nil {
 		return
@@ -548,6 +582,9 @@ func (r *CloudflareExposureReconciler) event(exposure *cfztv1alpha1.CloudflareEx
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *CloudflareExposureReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := indexCloudflareExposureFields(context.Background(), mgr); err != nil {
+		return err
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&cfztv1alpha1.CloudflareExposure{}).
 		Watches(&cfztv1alpha1.CloudflareTunnel{}, handler.EnqueueRequestsFromMapFunc(r.tunnelToExposures)).
@@ -574,17 +611,9 @@ func (r *CloudflareExposureReconciler) tunnelToExposures(ctx context.Context, ob
 }
 
 func (r *CloudflareExposureReconciler) exposuresForTunnel(ctx context.Context, tunnelName string) ([]cfztv1alpha1.CloudflareExposure, error) {
-	var list cfztv1alpha1.CloudflareExposureList
-	if err := r.List(ctx, &list); err != nil {
-		return nil, err
-	}
-	var out []cfztv1alpha1.CloudflareExposure
-	for _, exposure := range list.Items {
-		if exposure.Spec.TunnelRef.Name == tunnelName {
-			out = append(out, exposure)
-		}
-	}
-	return out, nil
+	return listCloudflareExposuresByField(ctx, r.Client, exposureIndexTunnelRefName, tunnelName, func(exposure cfztv1alpha1.CloudflareExposure) bool {
+		return exposure.Spec.TunnelRef.Name == tunnelName
+	})
 }
 
 func (r *CloudflareExposureReconciler) policyToExposures(ctx context.Context, obj client.Object) []reconcile.Request {
@@ -604,15 +633,7 @@ func (r *CloudflareExposureReconciler) policyToExposures(ctx context.Context, ob
 }
 
 func (r *CloudflareExposureReconciler) exposuresForPolicy(ctx context.Context, policyName string) ([]cfztv1alpha1.CloudflareExposure, error) {
-	var list cfztv1alpha1.CloudflareExposureList
-	if err := r.List(ctx, &list); err != nil {
-		return nil, err
-	}
-	var out []cfztv1alpha1.CloudflareExposure
-	for _, exposure := range list.Items {
-		if exposure.Spec.Access.PolicyRef.Name == policyName {
-			out = append(out, exposure)
-		}
-	}
-	return out, nil
+	return listCloudflareExposuresByField(ctx, r.Client, exposureIndexPolicyRefName, policyName, func(exposure cfztv1alpha1.CloudflareExposure) bool {
+		return exposure.Spec.Access.PolicyRef.Name == policyName
+	})
 }

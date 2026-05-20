@@ -85,6 +85,8 @@ type CloudflaredSpec struct {
 }
 
 // CloudflareTunnelSpec defines the desired state of CloudflareTunnel.
+//
+// +kubebuilder:validation:XValidation:rule="self.tunnelName == oldSelf.tunnelName",message="tunnelName is immutable"
 type CloudflareTunnelSpec struct {
 	// +kubebuilder:validation:Required
 	CredentialsSecretRef CredentialsSecretRef `json:"credentialsSecretRef"`

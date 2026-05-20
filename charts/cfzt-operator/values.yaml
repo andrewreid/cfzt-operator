@@ -6,9 +6,6 @@ imagePullSecrets: []
 
 replicaCount: 2
 
-leaderElection:
-  enabled: true                    # D12, never disable in production
-
 resources: {}
 nodeSelector: {}
 tolerations: []

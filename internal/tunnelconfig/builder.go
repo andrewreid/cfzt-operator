@@ -2,6 +2,7 @@ package tunnelconfig
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"sort"
 
@@ -86,6 +87,17 @@ func Build(exposures []cfztv1alpha1.CloudflareExposure) (*Result, error) {
 }
 
 func HashRule(rule cloudflare.IngressRule) string {
-	sum := sha256.Sum256([]byte(rule.Hostname + "\x00" + rule.Service))
-	return fmt.Sprintf("%x", sum)
+	canonical := struct {
+		Hostname string `json:"hostname,omitempty"`
+		Service  string `json:"service"`
+	}{
+		Hostname: rule.Hostname,
+		Service:  rule.Service,
+	}
+	data, err := json.Marshal(canonical)
+	if err != nil {
+		panic(fmt.Sprintf("marshal ingress rule hash input: %v", err))
+	}
+	sum := sha256.Sum256(data)
+	return fmt.Sprintf("sha256:%x", sum)
 }

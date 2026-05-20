@@ -42,7 +42,7 @@ type AccessPolicyCredentialsSecretRef struct {
 
 // AccessRule is a discriminated union; exactly one field must be set per item.
 //
-// +kubebuilder:validation:XValidation:rule="[has(self.email), has(self.emailDomain), has(self.ip), has(self.everyone), has(self.serviceToken), has(self.geoCountryCode)].filter(b, b).size() == 1",message="each rule item must set exactly one of email, emailDomain, ip, everyone, serviceToken, geoCountryCode"
+// +kubebuilder:validation:XValidation:rule="[has(self.email), has(self.emailDomain), has(self.ip), has(self.everyone) && self.everyone, has(self.serviceToken), has(self.geoCountryCode)].filter(b, b).size() == 1",message="each rule item must set exactly one of email, emailDomain, ip, everyone, serviceToken, geoCountryCode"
 type AccessRule struct {
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:MaxLength=320
@@ -103,6 +103,7 @@ type PurposeJustification struct {
 // CloudflareAccessPolicySpec defines the desired state of CloudflareAccessPolicy.
 //
 // +kubebuilder:validation:XValidation:rule="size(self.rules.include) + size(self.rules.exclude) + size(self.rules.require) >= 1",message="rules must contain at least one item across include, exclude, or require"
+// +kubebuilder:validation:XValidation:rule="has(self.policyName) == has(oldSelf.policyName) && (!has(self.policyName) || self.policyName == oldSelf.policyName)",message="policyName is immutable"
 type CloudflareAccessPolicySpec struct {
 	// +kubebuilder:validation:Required
 	CredentialsSecretRef AccessPolicyCredentialsSecretRef `json:"credentialsSecretRef"`

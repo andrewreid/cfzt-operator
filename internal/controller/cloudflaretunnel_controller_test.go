@@ -178,6 +178,34 @@ var _ = Describe("CloudflareTunnel Controller", func() {
 		Expect(err).To(MatchError(cloudflare.ErrNotFound))
 	})
 
+	It("TestTunnelFinalizerMissingCredentialsRequeues", func() {
+		tunnel := createTunnel(ctx, "delete-tunnel-missing-creds", "delete-missing-creds")
+		createCredentials(ctx)
+		reconcileTunnel(ctx, reconciler, tunnel.Name)
+		current := fetchTunnel(ctx, tunnel.Name)
+		tunnelID := current.Status.TunnelId
+		Expect(tunnelID).NotTo(BeEmpty())
+		Expect(k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "cloudflare-credentials", Namespace: namespace}})).To(Succeed())
+
+		Expect(k8sClient.Delete(ctx, current)).To(Succeed())
+		result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: tunnel.Name}})
+
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.RequeueAfter).NotTo(BeZero())
+		blocked := fetchTunnel(ctx, tunnel.Name)
+		Expect(blocked.Finalizers).To(ContainElement(naming.Finalizer))
+		Expect(meta.FindStatusCondition(blocked.Status.Conditions, ConditionReady).Reason).To(Equal(ReasonCredentialsMissing))
+		_, err = fakeCF.Tunnels().Get(ctx, tunnelID)
+		Expect(err).NotTo(HaveOccurred())
+
+		createCredentials(ctx)
+		reconcileTunnel(ctx, reconciler, tunnel.Name)
+		Eventually(func(g Gomega) {
+			err := k8sClient.Get(ctx, types.NamespacedName{Name: tunnel.Name}, &cfztv1alpha1.CloudflareTunnel{})
+			g.Expect(apierrors.IsNotFound(err)).To(BeTrue())
+		}).Should(Succeed())
+	})
+
 	It("TestTunnelConditionsTransition", func() {
 		tunnel := createTunnel(ctx, "condition-tunnel", "condition-me")
 		_ = k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "cloudflare-credentials", Namespace: namespace}})

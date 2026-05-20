@@ -2,7 +2,7 @@
 
 Kubernetes operator for publishing workloads through Cloudflare Tunnel, Cloudflare Access, and managed DNS — all from a single custom resource alongside your workload.
 
-Create one `CloudflareTunnel` per tunnel. Create one `CloudflareExposure` per hostname you want to publish. The operator handles tunnel lifecycle, cloudflared DaemonSet deployment, ingress-rule configuration, DNS CNAMEs, and Access application creation and policy binding.
+Create one `CloudflareTunnel` per tunnel. Create one `CloudflareExposure` per hostname you want to publish. Optionally create `CloudflareAccessPolicy` resources for reusable managed Access policies. The operator handles tunnel lifecycle, cloudflared DaemonSet deployment, ingress-rule configuration, DNS CNAMEs, Access application creation, and policy binding by UUID or managed policy name.
 
 Non-Kubernetes origins (a LAN device, home server, or any host reachable from cloudflared pods) work the same way — just set an explicit `origin` with no `sourceRef`. This keeps your entire tunnel topology in GitOps.
 
@@ -157,7 +157,9 @@ spec:
   access:
     enabled: true
     policyRef:
+      # Exactly one of uuid or name when access.enabled: true.
       uuid: 00000000-0000-4000-8000-000000000001   # UUID v4 of an existing policy
+      # name: family-only                          # CloudflareAccessPolicy name
 ```
 
 `access.enabled: false` exposes the hostname without Access protection.
@@ -257,7 +259,7 @@ Deleting a `CloudflareTunnel` while Exposures still reference it is blocked. The
 
 ## CRD upgrades
 
-CRDs live in `charts/cfzt-operator/crds/`. Helm 3 installs them but does not upgrade them on `helm upgrade`. The API is `v1alpha1` — breaking changes are allowed without a conversion webhook. To upgrade after a breaking CRD change: export manifests, uninstall, install the new chart version, reapply.
+CRDs live in `charts/cfzt-operator/crds/`. Helm 3 installs them but does not upgrade them on `helm upgrade`. The API is `v1alpha1` — breaking changes are allowed without a conversion webhook. To upgrade after a breaking CRD change: export `CloudflareTunnel`, `CloudflareExposure`, and `CloudflareAccessPolicy` manifests, uninstall, install the new chart version, reapply.
 
 ## Observability
 
@@ -278,7 +280,6 @@ Kubernetes Events: `CreatedTunnel`, `CreatedAccessApp`, `TokenRotated`, `Hostnam
 These are deliberate scope decisions, not gaps:
 
 - **Annotation-driven UX** — the operator has no annotation controller. `CloudflareExposure` is the only user-facing surface.
-- **`CloudflareAccessPolicy` CRD** — policies are referenced by UUID only. No embedded policy JSON, no policy management.
 - **Ingress source** — `sourceRef.kind: Ingress` is not supported.
 - **Private network / WARP routing** — not in scope.
 - **Cloudflare Gateway management** — not in scope.

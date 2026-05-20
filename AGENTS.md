@@ -2,7 +2,7 @@
 
 Operator-maintainer handbook for future Codex / Claude Code / other agent sessions in this repo.
 
-`spec.md` = product direction + binding decisions (D1–D21). Read it before non-trivial work. This file = how to operate. No architecture restated here.
+`spec.md` = product direction + binding decisions (D1–D24). Read it before non-trivial work. This file = how to operate. No architecture restated here.
 
 ---
 
@@ -36,7 +36,7 @@ Plan lives at `docs/plan.md` (in-repo, committed). Updated each slice.
 - Token economy = repo policy. Terse caveman default. Drop only when clarity or safety needs it.
 - Consider delegation **before** coding. Cheapest sufficient model wins.
 - `rg` over broad reads. Targeted `Read` over file dumps.
-- `spec.md` describes intent. Decisions table (D1–D21) is binding — do not relitigate without user.
+- `spec.md` describes intent. Decisions table (D1–D24) is binding — do not relitigate without user.
 - Verify implementation before assuming. spec ≠ proof code exists.
 - **All shell commands prefix with `rtk`.** Even inside `&&` chains. See `## RTK` below.
 
@@ -171,7 +171,7 @@ Out of scope until MVP ships. Work on `main` directly is acceptable until then. 
 
 ## Update policy (spec / AGENTS / code)
 
-- **Decisions D1–D21 in `spec.md`** are not changed without user sign-off. If a decision turns out wrong mid-implementation, stop, ask, do not silently work around.
+- **Decisions D1–D24 in `spec.md`** are not changed without user sign-off. If a decision turns out wrong mid-implementation, stop, ask, do not silently work around.
 - **Other `spec.md` sections** (CRD examples, package layout, RBAC table, etc.) may be corrected in the same PR as the discovering change. Note the correction in the commit message.
 - **`AGENTS.md`** updated when operational reality drifts from documented practice (new tooling, command, convention).
 - **`docs/plan.md`** updated every slice — current state, next subtask, blockers.
@@ -190,7 +190,7 @@ Out of scope until MVP ships. Work on `main` directly is acceptable until then. 
 - Composition over inheritance-style wrappers.
 - No hidden magic. No global state beyond the cloudflare-client token bucket.
 - Status conditions: `Ready` + `Progressing` only (D8). Detail in `Reason`/`Message`.
-- Finalizer string: `cfzt.reid.ee/finalizer` on both CRDs (D21).
+- Finalizer string: `cfzt.reid.ee/finalizer` on all owning CRDs (D21).
 - Service and HTTPRoute paths converge through `CloudflareExposure`. Source-kind-specific code is confined to `internal/origin/`.
 - Pin cloudflared image as a Go constant in `internal/workload/`. Never `:latest`. Validation marker rejects `:latest` in user spec.
 - Leader election ON (D12) — assume single writer per process. Do not add per-process locks.
@@ -224,7 +224,7 @@ Out of scope until MVP ships. Work on `main` directly is acceptable until then. 
 - Per-tunnel token (D4). Fetched via SDK. Stored in operator-managed Secret `<tunnel-cr-name>-token` (key `token`) in cloudflared namespace.
 - DNS managed by default (D2). Proxied CNAME → `<tunnelId>.cfargotunnel.com`. `dns.manage: false` → operator creates **zero** DNS records. No external-dns annotations emitted, ever.
 - Zone resolution: longest zone-suffix match against cached zone list. No PSL parsing.
-- Access policy: existing CF policy referenced by **UUID** in MVP (D3). No name lookup. No embedded policy JSON. No `CloudflareAccessPolicy` CRD in MVP.
+- Access policy: `CloudflareExposure.spec.access.policyRef` references either an existing CF policy by UUID or a managed `CloudflareAccessPolicy` by name (D24). Exactly one is required when Access is enabled.
 - Access app naming: `<displayName | metadata.name>-cfzt` (suffix to avoid colliding with hand-created apps).
 - API token: minimum scopes per `spec.md ## Credentials`. Add `Zone:DNS:Edit` only when DNS managed.
 - Rate limiting: per-token bucket inside `internal/cloudflare/client.go`. Backoff on 429 / 5xx.
@@ -255,6 +255,7 @@ MVP scope (`spec.md ## MVP scope`):
 
 - `CloudflareTunnel` CR — adopt/create tunnel, manage token Secret, run cloudflared DaemonSet.
 - `CloudflareExposure` CR — published hostname route, proxied DNS CNAME, Access app, policy binding by UUID.
+- `CloudflareAccessPolicy` CR — managed reusable account-level Access policy with structured rule subset (D24).
 - External (non-K8s) origins (D16).
 - `Ready` + `Progressing` conditions, finalizers, ownership tagging.
 - Helm OCI distribution + CI/release pipeline.
@@ -262,8 +263,6 @@ MVP scope (`spec.md ## MVP scope`):
 Deferred (do not implement without user sign-off):
 
 - Annotation-driven UX (post-MVP convenience layer).
-- `CloudflareAccessPolicy` CRD.
-- HTTPRoute / Service `sourceRef` derivation (Slice 3 — only after Slices 1 + 2 ship).
 - Ingress source.
 - WARP routing.
 - Cloudflare Gateway management.

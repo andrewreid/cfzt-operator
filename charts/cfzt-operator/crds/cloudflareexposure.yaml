@@ -121,6 +121,12 @@ spec:
                 - kind
                 - name
                 type: object
+                x-kubernetes-validations:
+                - message: sourceRef.apiVersion must be v1 for Service and gateway.networking.k8s.io/v1
+                    for HTTPRoute
+                  rule: (self.kind == 'Service' && has(self.apiVersion) && self.apiVersion
+                    == 'v1') || (self.kind == 'HTTPRoute' && has(self.apiVersion)
+                    && self.apiVersion == 'gateway.networking.k8s.io/v1')
               tunnelRef:
                 description: TunnelRef identifies the CloudflareTunnel that publishes
                   this exposure.
@@ -148,6 +154,16 @@ spec:
                 && ((has(self.access.policyRef.uuid) && size(self.access.policyRef.uuid)
                 > 0) != (has(self.access.policyRef.name) && size(self.access.policyRef.name)
                 > 0)))'
+            - message: hostname is immutable except when initially derived from an
+                HTTPRoute sourceRef
+              rule: 'has(oldSelf.hostname) ? (has(self.hostname) && self.hostname
+                == oldSelf.hostname) : (!has(self.hostname) || (has(self.sourceRef)
+                && self.sourceRef.kind == ''HTTPRoute''))'
+            - message: tunnelRef.name is immutable
+              rule: self.tunnelRef.name == oldSelf.tunnelRef.name
+            - message: sourceRef is immutable
+              rule: has(self.sourceRef) == has(oldSelf.sourceRef) && (!has(self.sourceRef)
+                || self.sourceRef == oldSelf.sourceRef)
           status:
             description: CloudflareExposureStatus defines the observed state of CloudflareExposure.
             properties:

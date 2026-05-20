@@ -181,7 +181,7 @@ The cloudflared image is pinned to a specific version as a Go constant in `inter
 |---|---|
 | D1 | Remotely-managed tunnel config only. cloudflared pods get no `config.yml`. |
 | D2 | DNS managed by default. `spec.dns.manage: false` → operator creates zero DNS records. |
-| D3 | Access policies referenced by UUID only. No name lookup. No `CloudflareAccessPolicy` CRD. |
+| D3 | Superseded by D24. Existing Access policy UUID binding remains supported. |
 | D4 | Per-tunnel token stored in operator-managed Secret. No `cert.pem`. |
 | D5 | CR-only interface. No annotation controller. |
 | D6 | `CloudflareTunnel` is cluster-scoped. cloudflared workload is namespaced. |
@@ -193,15 +193,16 @@ The cloudflared image is pinned to a specific version as a Go constant in `inter
 | D12 | Leader election required ON. |
 | D13 | SDK: `github.com/cloudflare/cloudflare-go/v4`. Wrapped behind internal interface. |
 | D14 | Helm OCI chart + container image on GHCR. |
-| D15 | API is `v1alpha1`. Breaking changes allowed. Upgrade = delete-and-recreate. |
+| D15 | API is `v1alpha1`. Breaking changes allowed. Upgrade = export Tunnel/Exposure/AccessPolicy CRs, delete-and-recreate. |
 | D16 | External (non-Kubernetes) origins are first-class. |
-| D17 | Helm chart under `charts/cfzt-operator/`. CRDs in `crds/` (install-only). |
+| D17 | Helm chart under `charts/cfzt-operator/`. CRDs in `crds/` (install-only). Leader election is always enabled. |
 | D18 | CI in GitHub Actions: lint, test, generated-drift gate on PR; image + chart publish on tag. |
 | D19 | `MaxConcurrentReconciles=1` on both controllers. |
 | D20 | Cross-controller watches: Tunnel watches Exposure, Exposure watches Tunnel. |
-| D21 | Finalizer string: `cfzt.reid.ee/finalizer` on both CRDs. |
+| D21 | Finalizer string: `cfzt.reid.ee/finalizer` on all owning CRDs. |
 | D22 | Minimum Kubernetes 1.27 (stable CEL CRD validation). |
 | D23 | Helm CRDs are install-only. ArgoCD/Flux users: document in NOTES.txt. |
+| D24 | `CloudflareAccessPolicy` CRD is in scope. Exposures bind exactly one of `policyRef.uuid` or `policyRef.name` when Access is enabled. |
 
 ## Testing requirements
 

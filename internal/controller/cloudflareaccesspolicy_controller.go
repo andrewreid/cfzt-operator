@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -65,7 +66,7 @@ func (r *CloudflareAccessPolicyReconciler) Reconcile(ctx context.Context, req ct
 	}
 
 	if !policy.DeletionTimestamp.IsZero() {
-		return ctrl.Result{}, r.reconcileDelete(ctx, &policy)
+		return r.reconcileDelete(ctx, &policy)
 	}
 
 	if controllerutil.AddFinalizer(&policy, naming.Finalizer) {
@@ -117,6 +118,9 @@ func (r *CloudflareAccessPolicyReconciler) Reconcile(ctx context.Context, req ct
 		return ctrl.Result{Requeue: true}, nil
 	}
 	if err != nil {
+		if errors.Is(err, cloudflare.ErrUnsupportedAccessRule) {
+			return ctrl.Result{}, r.setPolicyStatus(ctx, &policy, policy.Status.PolicyId, policy.Status.ObservedRulesHash, references, false, ReasonUnsupportedDrift, err.Error())
+		}
 		return ctrl.Result{}, err
 	}
 	if cfPolicy.Name != policyName {
@@ -137,13 +141,13 @@ func (r *CloudflareAccessPolicyReconciler) Reconcile(ctx context.Context, req ct
 	return ctrl.Result{}, r.setPolicyStatus(ctx, &policy, policy.Status.PolicyId, desiredHash, references, true, ReasonReconciled, "Cloudflare Access policy reconciled")
 }
 
-func (r *CloudflareAccessPolicyReconciler) reconcileDelete(ctx context.Context, policy *cfztv1alpha1.CloudflareAccessPolicy) error {
+func (r *CloudflareAccessPolicyReconciler) reconcileDelete(ctx context.Context, policy *cfztv1alpha1.CloudflareAccessPolicy) (ctrl.Result, error) {
 	if !controllerutil.ContainsFinalizer(policy, naming.Finalizer) {
-		return nil
+		return ctrl.Result{}, nil
 	}
 	references, err := r.referencedBy(ctx, policy.Name)
 	if err != nil {
-		return err
+		return ctrl.Result{}, err
 	}
 	if len(references) > 0 {
 		policy.Status.ReferencedBy = references
@@ -151,33 +155,34 @@ func (r *CloudflareAccessPolicyReconciler) reconcileDelete(ctx context.Context, 
 		setCondition(&policy.Status.Conditions, ConditionReady, metav1.ConditionFalse, ReasonBlockedByExposures, "CloudflareAccessPolicy still has referencing CloudflareExposures", policy.Generation)
 		setCondition(&policy.Status.Conditions, ConditionProgressing, metav1.ConditionTrue, ReasonBlockedByExposures, "waiting for CloudflareExposures to stop referencing this policy", policy.Generation)
 		if err := r.Status().Update(ctx, policy); err != nil {
-			return err
+			return ctrl.Result{}, err
 		}
 		r.event(policy, corev1.EventTypeWarning, EventBlockedByExposures, "Deletion blocked by %d CloudflareExposure resources", len(references))
-		return nil
+		return ctrl.Result{}, nil
 	}
 	if policy.Status.PolicyId != "" {
 		cfClient, err := r.cloudflareClient(ctx, policy)
 		if err != nil {
-			setCondition(&policy.Status.Conditions, ConditionReady, metav1.ConditionFalse, ReasonCredentialsMissing, err.Error(), policy.Generation)
-			_ = r.Status().Update(ctx, policy)
-			return nil
+			if statusErr := r.setPolicyStatus(ctx, policy, policy.Status.PolicyId, policy.Status.ObservedRulesHash, references, false, ReasonCredentialsMissing, err.Error()); statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
-		cfPolicy, err := cfClient.AccessPolicies().Get(ctx, policy.Status.PolicyId)
+		cfPolicy, err := cfClient.AccessPolicies().GetMetadata(ctx, policy.Status.PolicyId)
 		if err != nil && !errors.Is(err, cloudflare.ErrNotFound) {
-			return err
+			return ctrl.Result{}, err
 		}
 		if err == nil && cfPolicy.Name != desiredPolicyName(policy) {
 			setCondition(&policy.Status.Conditions, ConditionReady, metav1.ConditionFalse, ReasonForeignPolicy, "tracked Cloudflare Access policy name does not match desired policy name", policy.Generation)
 			setCondition(&policy.Status.Conditions, ConditionProgressing, metav1.ConditionTrue, ReasonForeignPolicy, "deletion blocked to avoid deleting a foreign Cloudflare Access policy", policy.Generation)
-			return r.Status().Update(ctx, policy)
+			return ctrl.Result{}, r.Status().Update(ctx, policy)
 		}
 		if err := cfClient.AccessPolicies().Delete(ctx, policy.Status.PolicyId); err != nil && !errors.Is(err, cloudflare.ErrNotFound) {
-			return err
+			return ctrl.Result{}, err
 		}
 	}
 	controllerutil.RemoveFinalizer(policy, naming.Finalizer)
-	return r.Update(ctx, policy)
+	return ctrl.Result{}, r.Update(ctx, policy)
 }
 
 func (r *CloudflareAccessPolicyReconciler) cloudflareClient(ctx context.Context, policy *cfztv1alpha1.CloudflareAccessPolicy) (cloudflare.Client, error) {
@@ -334,15 +339,14 @@ func canonicalizeCloudflareRules(in []cloudflare.AccessRule) []canonicalAccessRu
 }
 
 func (r *CloudflareAccessPolicyReconciler) referencedBy(ctx context.Context, policyName string) ([]cfztv1alpha1.ReferencedExposure, error) {
-	var list cfztv1alpha1.CloudflareExposureList
-	if err := r.List(ctx, &list); err != nil {
+	exposures, err := listCloudflareExposuresByField(ctx, r.Client, exposureIndexPolicyRefName, policyName, func(exposure cfztv1alpha1.CloudflareExposure) bool {
+		return exposure.Spec.Access.PolicyRef.Name == policyName
+	})
+	if err != nil {
 		return nil, err
 	}
 	refs := make([]cfztv1alpha1.ReferencedExposure, 0)
-	for _, exposure := range list.Items {
-		if exposure.Spec.Access.PolicyRef.Name != policyName {
-			continue
-		}
+	for _, exposure := range exposures {
 		refs = append(refs, cfztv1alpha1.ReferencedExposure{
 			Namespace: exposure.Namespace,
 			Name:      exposure.Name,

@@ -51,6 +51,7 @@ func ApplyDaemonSet(ds *appsv1.DaemonSet, tunnel *cfztv1alpha1.CloudflareTunnel,
 	allowPrivilegeEscalation := false
 	runAsUser := int64(65532)
 	runAsGroup := int64(65532)
+	automountServiceAccountToken := false
 
 	ds.Labels = labels
 	ds.Spec.Selector = &metav1.LabelSelector{MatchLabels: labels}
@@ -68,11 +69,13 @@ func ApplyDaemonSet(ds *appsv1.DaemonSet, tunnel *cfztv1alpha1.CloudflareTunnel,
 			},
 		},
 		Spec: corev1.PodSpec{
-			HostNetwork:  tunnel.Spec.Cloudflared.HostNetwork,
-			DNSPolicy:    dnsPolicy(tunnel.Spec.Cloudflared.HostNetwork),
-			NodeSelector: tunnel.Spec.Cloudflared.NodeSelector,
-			Tolerations:  tunnel.Spec.Cloudflared.Tolerations,
-			Affinity:     tunnel.Spec.Cloudflared.Affinity,
+			HostNetwork:                  tunnel.Spec.Cloudflared.HostNetwork,
+			DNSPolicy:                    dnsPolicy(tunnel.Spec.Cloudflared.HostNetwork),
+			NodeSelector:                 tunnel.Spec.Cloudflared.NodeSelector,
+			Tolerations:                  tunnel.Spec.Cloudflared.Tolerations,
+			Affinity:                     tunnel.Spec.Cloudflared.Affinity,
+			AutomountServiceAccountToken: &automountServiceAccountToken,
+			SecurityContext:              &corev1.PodSecurityContext{SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}},
 			Containers: []corev1.Container{
 				{
 					Name:  "cloudflared",
@@ -134,9 +137,8 @@ func httpProbe(path string, periodSeconds int32) *corev1.Probe {
 				Port: intstr.FromInt32(2000),
 			},
 		},
-		InitialDelaySeconds: 10,
-		PeriodSeconds:       periodSeconds,
-		TimeoutSeconds:      1,
-		FailureThreshold:    3,
+		PeriodSeconds:    periodSeconds,
+		TimeoutSeconds:   1,
+		FailureThreshold: 3,
 	}
 }

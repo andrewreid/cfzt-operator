@@ -3,11 +3,12 @@ package cloudflare
 import "context"
 
 type AccessApplication struct {
-	ID         string
-	Name       string
-	Domain     string
-	PolicyUUID string
-	Tags       []string
+	ID          string
+	Name        string
+	Domain      string
+	PolicyUUID  string
+	PolicyUUIDs []string
+	Tags        []string
 }
 
 type AccessApplicationInput struct {

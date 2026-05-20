@@ -23,6 +23,7 @@ const (
 	ReasonDNSWriteFailed     = "DNSWriteFailed"
 	ReasonBlockedByExposures = "BlockedByExposures"
 	ReasonForeignPolicy      = "ForeignPolicy"
+	ReasonUnsupportedDrift   = "UnsupportedDrift"
 	ReasonReconciled         = "Reconciled"
 
 	EventCreatedTunnel       = "CreatedTunnel"

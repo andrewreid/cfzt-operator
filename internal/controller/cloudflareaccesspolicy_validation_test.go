@@ -20,6 +20,8 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 
 	cfztv1alpha1 "github.com/andrewreid/cfzt-operator/api/v1alpha1"
 )
@@ -75,6 +77,34 @@ var _ = Describe("CloudflareAccessPolicy CRD validation", func() {
 		Expect(err.Error()).To(ContainSubstring("exactly one of"))
 	})
 
+	It("TestCloudflareAccessPolicyCRDValidation rejects everyone false", func() {
+		obj := &unstructured.Unstructured{
+			Object: map[string]any{
+				"apiVersion": "cfzt.reid.ee/v1alpha1",
+				"kind":       "CloudflareAccessPolicy",
+				"metadata": map[string]any{
+					"name": "everyone-false",
+				},
+				"spec": map[string]any{
+					"credentialsSecretRef": map[string]any{
+						"name":      "cloudflare-credentials",
+						"namespace": "cfzt-system",
+					},
+					"decision": "allow",
+					"rules": map[string]any{
+						"include": []any{
+							map[string]any{"everyone": false},
+						},
+					},
+				},
+			},
+		}
+
+		err := k8sClient.Create(ctx, obj)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("exactly one of"))
+	})
+
 	It("TestCloudflareAccessPolicyCRDValidation rejects empty rules", func() {
 		obj := validPolicy("empty-rules")
 		obj.Spec.Rules = cfztv1alpha1.AccessRules{}
@@ -105,5 +135,20 @@ var _ = Describe("CloudflareAccessPolicy CRD validation", func() {
 		err := k8sClient.Create(ctx, obj)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("spec.decision"))
+	})
+
+	It("TestCloudflareAccessPolicyCRDValidation rejects policyName update", func() {
+		obj := validPolicy("immutable-policy-name")
+		obj.Spec.PolicyName = "family-only-cfzt"
+		Expect(k8sClient.Create(ctx, obj)).To(Succeed())
+
+		obj.Spec.PolicyName = "other-family-cfzt"
+		err := k8sClient.Update(ctx, obj)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("policyName is immutable"))
+
+		created := &cfztv1alpha1.CloudflareAccessPolicy{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "immutable-policy-name"}, created)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, created)).To(Succeed())
 	})
 })

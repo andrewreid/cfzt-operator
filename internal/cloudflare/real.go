@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"math/rand"
 	"net/http"
-	"reflect"
 	"sync"
 	"time"
 
@@ -30,9 +29,12 @@ var limiterByToken sync.Map
 // RealClient wraps the cloudflare-go/v4 SDK behind the Client interface.
 // All SDK imports are confined to this file; controllers never see cloudflare-go.
 type RealClient struct {
-	api       *cf.Client
-	accountID string
-	limiter   *rate.Limiter
+	api            *cf.Client
+	accountID      string
+	limiter        *rate.Limiter
+	mu             sync.Mutex
+	zoneCache      []Zone
+	zoneCacheReady bool
 }
 
 // New constructs a RealClient authenticated with apiToken for accountID.
@@ -298,13 +300,7 @@ func (a *realAccessApplications) List(ctx context.Context, domain string) ([]Acc
 		out = out[:0]
 		for pager.Next() {
 			item := pager.Current()
-			out = append(out, AccessApplication{
-				ID:         item.ID,
-				Name:       item.Name,
-				Domain:     item.Domain,
-				Tags:       stringSlice(item.Tags),
-				PolicyUUID: firstPolicyID(item.Policies),
-			})
+			out = append(out, accessAppFromListResponse(item))
 		}
 		return pager.Err()
 	})
@@ -321,7 +317,7 @@ func (a *realAccessApplications) Create(ctx context.Context, in AccessApplicatio
 		if err != nil {
 			return err
 		}
-		result = accessAppFromResponse(resp.ID, resp.Name, resp.Domain, in.PolicyUUID, stringSlice(resp.Tags))
+		result = accessAppFromNewResponse(resp, in.PolicyUUID)
 		return nil
 	})
 	return result, err
@@ -341,7 +337,7 @@ func (a *realAccessApplications) Update(ctx context.Context, id string, in Acces
 			}
 			return err
 		}
-		result = accessAppFromResponse(resp.ID, resp.Name, resp.Domain, in.PolicyUUID, stringSlice(resp.Tags))
+		result = accessAppFromUpdateResponse(resp, in.PolicyUUID)
 		return nil
 	})
 	return result, err
@@ -475,10 +471,24 @@ func (z *realZones) List(ctx context.Context) ([]Zone, error) {
 }
 
 func (z *realZones) Resolve(ctx context.Context, hostname string) (*Zone, error) {
+	z.client.mu.Lock()
+	if z.client.zoneCacheReady {
+		if zone, ok := LongestMatchingZone(z.client.zoneCache, hostname); ok {
+			z.client.mu.Unlock()
+			return zone, nil
+		}
+	}
+	z.client.mu.Unlock()
+
 	zones, err := z.List(ctx)
 	if err != nil {
 		return nil, err
 	}
+	z.client.mu.Lock()
+	z.client.zoneCache = append([]Zone(nil), zones...)
+	z.client.zoneCacheReady = true
+	z.client.mu.Unlock()
+
 	zone, ok := LongestMatchingZone(zones, hostname)
 	if !ok {
 		return nil, ErrNotFound
@@ -518,8 +528,112 @@ func accessUpdateBody(in AccessApplicationInput) zero_trust.AccessApplicationUpd
 	}
 }
 
-func accessAppFromResponse(id, name, domain, policyUUID string, tags []string) *AccessApplication {
-	return &AccessApplication{ID: id, Name: name, Domain: domain, PolicyUUID: policyUUID, Tags: tags}
+func accessAppFromListResponse(item zero_trust.AccessApplicationListResponse) AccessApplication {
+	policyUUIDs := accessApplicationListPolicyIDs(item.Policies)
+	tags := stringSlice(item.Tags)
+	if selfHosted, ok := item.AsUnion().(zero_trust.AccessApplicationListResponseSelfHostedApplication); ok {
+		policyUUIDs = selfHostedListPolicyIDs(selfHosted.Policies)
+		tags = append([]string(nil), selfHosted.Tags...)
+	}
+	return AccessApplication{
+		ID:          item.ID,
+		Name:        item.Name,
+		Domain:      item.Domain,
+		PolicyUUID:  firstString(policyUUIDs),
+		PolicyUUIDs: policyUUIDs,
+		Tags:        tags,
+	}
+}
+
+func accessAppFromNewResponse(resp *zero_trust.AccessApplicationNewResponse, fallbackPolicyUUID string) *AccessApplication {
+	policyUUIDs := fallbackPolicyIDs(fallbackPolicyUUID)
+	tags := stringSlice(resp.Tags)
+	if selfHosted, ok := resp.AsUnion().(zero_trust.AccessApplicationNewResponseSelfHostedApplication); ok {
+		if ids := selfHostedNewPolicyIDs(selfHosted.Policies); len(ids) > 0 {
+			policyUUIDs = ids
+		}
+		tags = append([]string(nil), selfHosted.Tags...)
+	}
+	return &AccessApplication{
+		ID:          resp.ID,
+		Name:        resp.Name,
+		Domain:      resp.Domain,
+		PolicyUUID:  firstString(policyUUIDs),
+		PolicyUUIDs: policyUUIDs,
+		Tags:        tags,
+	}
+}
+
+func accessAppFromUpdateResponse(resp *zero_trust.AccessApplicationUpdateResponse, fallbackPolicyUUID string) *AccessApplication {
+	policyUUIDs := fallbackPolicyIDs(fallbackPolicyUUID)
+	tags := stringSlice(resp.Tags)
+	if selfHosted, ok := resp.AsUnion().(zero_trust.AccessApplicationUpdateResponseSelfHostedApplication); ok {
+		if ids := selfHostedUpdatePolicyIDs(selfHosted.Policies); len(ids) > 0 {
+			policyUUIDs = ids
+		}
+		tags = append([]string(nil), selfHosted.Tags...)
+	}
+	return &AccessApplication{
+		ID:          resp.ID,
+		Name:        resp.Name,
+		Domain:      resp.Domain,
+		PolicyUUID:  firstString(policyUUIDs),
+		PolicyUUIDs: policyUUIDs,
+		Tags:        tags,
+	}
+}
+
+func accessApplicationListPolicyIDs(value any) []string {
+	switch policies := value.(type) {
+	case []zero_trust.AccessApplicationListResponseSelfHostedApplicationPolicy:
+		return selfHostedListPolicyIDs(policies)
+	default:
+		return nil
+	}
+}
+
+func selfHostedListPolicyIDs(policies []zero_trust.AccessApplicationListResponseSelfHostedApplicationPolicy) []string {
+	out := make([]string, 0, len(policies))
+	for _, policy := range policies {
+		if policy.ID != "" {
+			out = append(out, policy.ID)
+		}
+	}
+	return out
+}
+
+func selfHostedNewPolicyIDs(policies []zero_trust.AccessApplicationNewResponseSelfHostedApplicationPolicy) []string {
+	out := make([]string, 0, len(policies))
+	for _, policy := range policies {
+		if policy.ID != "" {
+			out = append(out, policy.ID)
+		}
+	}
+	return out
+}
+
+func selfHostedUpdatePolicyIDs(policies []zero_trust.AccessApplicationUpdateResponseSelfHostedApplicationPolicy) []string {
+	out := make([]string, 0, len(policies))
+	for _, policy := range policies {
+		if policy.ID != "" {
+			out = append(out, policy.ID)
+		}
+	}
+	return out
+}
+
+func fallbackPolicyIDs(policyUUID string) []string {
+	if policyUUID == "" {
+		return nil
+	}
+	return []string{policyUUID}
+}
+
+func firstString(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
 }
 
 func dnsRecordFromResponse(zoneID string, resp *cfdns.RecordResponse) *DNSRecord {
@@ -559,9 +673,6 @@ func (p *realAccessPolicies) List(ctx context.Context) ([]AccessPolicy, error) {
 				ID:                           item.ID,
 				Name:                         item.Name,
 				Decision:                     string(item.Decision),
-				Include:                      fromAccessRules(item.Include),
-				Exclude:                      fromAccessRules(item.Exclude),
-				Require:                      fromAccessRules(item.Require),
 				SessionDuration:              item.SessionDuration,
 				PurposeJustificationRequired: item.PurposeJustificationRequired,
 				PurposeJustificationPrompt:   item.PurposeJustificationPrompt,
@@ -572,7 +683,7 @@ func (p *realAccessPolicies) List(ctx context.Context) ([]AccessPolicy, error) {
 	return out, err
 }
 
-func (p *realAccessPolicies) Get(ctx context.Context, id string) (*AccessPolicy, error) {
+func (p *realAccessPolicies) GetMetadata(ctx context.Context, id string) (*AccessPolicy, error) {
 	var result *AccessPolicy
 	err := p.client.withRetry(ctx, func() error {
 		resp, err := p.client.api.ZeroTrust.Access.Policies.Get(ctx, id,
@@ -589,9 +700,47 @@ func (p *realAccessPolicies) Get(ctx context.Context, id string) (*AccessPolicy,
 			ID:                           resp.ID,
 			Name:                         resp.Name,
 			Decision:                     string(resp.Decision),
-			Include:                      fromAccessRules(resp.Include),
-			Exclude:                      fromAccessRules(resp.Exclude),
-			Require:                      fromAccessRules(resp.Require),
+			SessionDuration:              resp.SessionDuration,
+			PurposeJustificationRequired: resp.PurposeJustificationRequired,
+			PurposeJustificationPrompt:   resp.PurposeJustificationPrompt,
+		}
+		return nil
+	})
+	return result, err
+}
+
+func (p *realAccessPolicies) Get(ctx context.Context, id string) (*AccessPolicy, error) {
+	var result *AccessPolicy
+	err := p.client.withRetry(ctx, func() error {
+		resp, err := p.client.api.ZeroTrust.Access.Policies.Get(ctx, id,
+			zero_trust.AccessPolicyGetParams{AccountID: cf.F(p.client.accountID)},
+		)
+		if err != nil {
+			var apiErr *cf.Error
+			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+				return ErrNotFound
+			}
+			return err
+		}
+		include, err := fromAccessRules(resp.Include)
+		if err != nil {
+			return err
+		}
+		exclude, err := fromAccessRules(resp.Exclude)
+		if err != nil {
+			return err
+		}
+		require, err := fromAccessRules(resp.Require)
+		if err != nil {
+			return err
+		}
+		result = &AccessPolicy{
+			ID:                           resp.ID,
+			Name:                         resp.Name,
+			Decision:                     string(resp.Decision),
+			Include:                      include,
+			Exclude:                      exclude,
+			Require:                      require,
 			SessionDuration:              resp.SessionDuration,
 			PurposeJustificationRequired: resp.PurposeJustificationRequired,
 			PurposeJustificationPrompt:   resp.PurposeJustificationPrompt,
@@ -622,13 +771,25 @@ func (p *realAccessPolicies) Create(ctx context.Context, in AccessPolicyInput) (
 		if err != nil {
 			return err
 		}
+		include, err := fromAccessRules(resp.Include)
+		if err != nil {
+			return err
+		}
+		exclude, err := fromAccessRules(resp.Exclude)
+		if err != nil {
+			return err
+		}
+		require, err := fromAccessRules(resp.Require)
+		if err != nil {
+			return err
+		}
 		result = &AccessPolicy{
 			ID:                           resp.ID,
 			Name:                         resp.Name,
 			Decision:                     string(resp.Decision),
-			Include:                      fromAccessRules(resp.Include),
-			Exclude:                      fromAccessRules(resp.Exclude),
-			Require:                      fromAccessRules(resp.Require),
+			Include:                      include,
+			Exclude:                      exclude,
+			Require:                      require,
 			SessionDuration:              resp.SessionDuration,
 			PurposeJustificationRequired: resp.PurposeJustificationRequired,
 			PurposeJustificationPrompt:   resp.PurposeJustificationPrompt,
@@ -663,13 +824,25 @@ func (p *realAccessPolicies) Update(ctx context.Context, id string, in AccessPol
 			}
 			return err
 		}
+		include, err := fromAccessRules(resp.Include)
+		if err != nil {
+			return err
+		}
+		exclude, err := fromAccessRules(resp.Exclude)
+		if err != nil {
+			return err
+		}
+		require, err := fromAccessRules(resp.Require)
+		if err != nil {
+			return err
+		}
 		result = &AccessPolicy{
 			ID:                           resp.ID,
 			Name:                         resp.Name,
 			Decision:                     string(resp.Decision),
-			Include:                      fromAccessRules(resp.Include),
-			Exclude:                      fromAccessRules(resp.Exclude),
-			Require:                      fromAccessRules(resp.Require),
+			Include:                      include,
+			Exclude:                      exclude,
+			Require:                      require,
 			SessionDuration:              resp.SessionDuration,
 			PurposeJustificationRequired: resp.PurposeJustificationRequired,
 			PurposeJustificationPrompt:   resp.PurposeJustificationPrompt,
@@ -747,10 +920,10 @@ func toAccessRuleParams(rules []AccessRule) []zero_trust.AccessRuleUnionParam {
 
 // fromAccessRules maps an SDK response AccessRule slice back into the local
 // shape using the SDK's union accessor. Unknown variants (e.g. group, okta,
-// saml — beyond MVP) are skipped so they cannot crash the controller.
-func fromAccessRules(rules []zero_trust.AccessRule) []AccessRule {
+// saml — beyond MVP) are surfaced so controllers do not silently erase drift.
+func fromAccessRules(rules []zero_trust.AccessRule) ([]AccessRule, error) {
 	if len(rules) == 0 {
-		return nil
+		return nil, nil
 	}
 	out := make([]AccessRule, 0, len(rules))
 	for _, r := range rules {
@@ -767,26 +940,9 @@ func fromAccessRules(rules []zero_trust.AccessRule) []AccessRule {
 			out = append(out, AccessRule{ServiceToken: u.ServiceToken.TokenID})
 		case zero_trust.CountryRule:
 			out = append(out, AccessRule{GeoCountryCode: u.Geo.CountryCode})
+		default:
+			return nil, fmt.Errorf("%w: %T", ErrUnsupportedAccessRule, u)
 		}
 	}
-	return out
-}
-
-func firstPolicyID(value any) string {
-	rv := reflect.ValueOf(value)
-	if rv.Kind() != reflect.Slice || rv.Len() == 0 {
-		return ""
-	}
-	first := rv.Index(0)
-	if first.Kind() == reflect.Pointer {
-		first = first.Elem()
-	}
-	if first.Kind() != reflect.Struct {
-		return ""
-	}
-	field := first.FieldByName("ID")
-	if !field.IsValid() || field.Kind() != reflect.String {
-		return ""
-	}
-	return field.String()
+	return out, nil
 }

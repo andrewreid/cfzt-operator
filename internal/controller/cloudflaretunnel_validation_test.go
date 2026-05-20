@@ -73,6 +73,20 @@ var _ = Describe("CloudflareTunnel CRD validation", func() {
 			Expect(k8sClient.Delete(ctx, obj)).To(Succeed())
 		})
 
+		It("rejects tunnelName update", func() {
+			obj := validBase("immutable-tunnel-name")
+			Expect(k8sClient.Create(ctx, obj)).To(Succeed())
+
+			obj.Spec.TunnelName = "renamed-tunnel"
+			err := k8sClient.Update(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("tunnelName is immutable"))
+
+			created := &cfztv1alpha1.CloudflareTunnel{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "immutable-tunnel-name"}, created)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, created)).To(Succeed())
+		})
+
 		It("accepts defaulted cloudflared settings", func() {
 			obj := validBase("defaulted-tunnel")
 			obj.Spec.Cloudflared = cfztv1alpha1.CloudflaredSpec{}

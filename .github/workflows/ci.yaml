@@ -35,6 +35,7 @@ jobs:
       - name: generated drift check
         run: |
           make manifests generate
+          make helm-sync-crds
           git diff --exit-code
 
       - name: unit + envtest

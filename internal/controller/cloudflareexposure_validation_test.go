@@ -4,6 +4,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	cfztv1alpha1 "github.com/andrewreid/cfzt-operator/api/v1alpha1"
 )
@@ -122,5 +123,92 @@ var _ = Describe("CloudflareExposure CRD validation", func() {
 		err := k8sClient.Create(ctx, obj)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("hostname is required"))
+	})
+
+	It("TestExposureCRDValidation rejects unsupported Service sourceRef apiVersion", func() {
+		ensureNamespace(ctx, "default")
+		obj := validExposure("bad-service-apiversion")
+		obj.Spec.SourceRef = &cfztv1alpha1.SourceRef{ApiVersion: "apps/v1", Kind: "Service", Name: "jellyfin"}
+		obj.Spec.Origin = nil
+		err := k8sClient.Create(ctx, obj)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("sourceRef.apiVersion"))
+	})
+
+	It("TestExposureCRDValidation rejects unsupported HTTPRoute sourceRef apiVersion", func() {
+		ensureNamespace(ctx, "default")
+		obj := validExposure("bad-httproute-apiversion")
+		obj.Spec.SourceRef = &cfztv1alpha1.SourceRef{ApiVersion: "gateway.networking.k8s.io/v1beta1", Kind: "HTTPRoute", Name: "jellyfin"}
+		obj.Spec.Hostname = ""
+		err := k8sClient.Create(ctx, obj)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("sourceRef.apiVersion"))
+	})
+
+	It("TestExposureCRDValidation permits HTTPRoute hostname derivation once", func() {
+		ensureNamespace(ctx, "default")
+		obj := validExposure("httproute-hostname-default")
+		obj.Spec.SourceRef = &cfztv1alpha1.SourceRef{ApiVersion: "gateway.networking.k8s.io/v1", Kind: "HTTPRoute", Name: "jellyfin"}
+		obj.Spec.Hostname = ""
+		Expect(k8sClient.Create(ctx, obj)).To(Succeed())
+
+		obj.Spec.Hostname = "derived.example.com"
+		Expect(k8sClient.Update(ctx, obj)).To(Succeed())
+
+		obj.Spec.Hostname = "changed.example.com"
+		err := k8sClient.Update(ctx, obj)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("hostname is immutable"))
+
+		created := &cfztv1alpha1.CloudflareExposure{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: "httproute-hostname-default"}, created)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, created)).To(Succeed())
+	})
+
+	It("TestExposureCRDValidation rejects hostname update", func() {
+		ensureNamespace(ctx, "default")
+		obj := validExposure("immutable-hostname")
+		Expect(k8sClient.Create(ctx, obj)).To(Succeed())
+
+		obj.Spec.Hostname = "changed.example.com"
+		err := k8sClient.Update(ctx, obj)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("hostname is immutable"))
+
+		created := &cfztv1alpha1.CloudflareExposure{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: "immutable-hostname"}, created)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, created)).To(Succeed())
+	})
+
+	It("TestExposureCRDValidation rejects tunnelRef.name update", func() {
+		ensureNamespace(ctx, "default")
+		obj := validExposure("immutable-tunnelref")
+		Expect(k8sClient.Create(ctx, obj)).To(Succeed())
+
+		obj.Spec.TunnelRef.Name = "other-tunnel"
+		err := k8sClient.Update(ctx, obj)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("tunnelRef.name is immutable"))
+
+		created := &cfztv1alpha1.CloudflareExposure{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: "immutable-tunnelref"}, created)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, created)).To(Succeed())
+	})
+
+	It("TestExposureCRDValidation rejects sourceRef update", func() {
+		ensureNamespace(ctx, "default")
+		obj := validExposure("immutable-sourceref")
+		obj.Spec.SourceRef = &cfztv1alpha1.SourceRef{ApiVersion: "v1", Kind: "Service", Name: "jellyfin"}
+		obj.Spec.Origin = nil
+		Expect(k8sClient.Create(ctx, obj)).To(Succeed())
+
+		obj.Spec.SourceRef.Name = "other-service"
+		err := k8sClient.Update(ctx, obj)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("sourceRef is immutable"))
+
+		created := &cfztv1alpha1.CloudflareExposure{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: "default", Name: "immutable-sourceref"}, created)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, created)).To(Succeed())
 	})
 })

@@ -43,9 +43,13 @@ type AccessRule struct {
 }
 
 // AccessPolicies is the sub-interface for Cloudflare Access reusable policies.
-// List does NOT support a server-side name filter — callers filter client-side.
+// List does NOT support a server-side name filter; callers filter client-side.
+// List and GetMetadata intentionally return metadata only, without rule bodies,
+// so unsupported Cloudflare rule variants on unrelated policies do not block
+// name and ownership checks. Use Get when rule equality matters.
 type AccessPolicies interface {
 	List(ctx context.Context) ([]AccessPolicy, error)
+	GetMetadata(ctx context.Context, id string) (*AccessPolicy, error)
 	Get(ctx context.Context, id string) (*AccessPolicy, error)
 	Create(ctx context.Context, in AccessPolicyInput) (*AccessPolicy, error)
 	Update(ctx context.Context, id string, in AccessPolicyInput) (*AccessPolicy, error)

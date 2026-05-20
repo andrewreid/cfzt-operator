@@ -1136,6 +1136,9 @@ spec:
             - credentialsSecretRef
             - tunnelName
             type: object
+            x-kubernetes-validations:
+            - message: tunnelName is immutable
+              rule: self.tunnelName == oldSelf.tunnelName
           status:
             description: CloudflareTunnelStatus defines the observed state of CloudflareTunnel.
             properties:

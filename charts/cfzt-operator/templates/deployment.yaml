@@ -39,7 +39,7 @@ spec:
             - --metrics-bind-address={{ .Values.metrics.bindAddress }}
             - --metrics-secure={{ .Values.metrics.secure }}
             {{- end }}
-            - --leader-elect={{ .Values.leaderElection.enabled }}
+            - --leader-elect=true
             - --zap-log-level={{ .Values.logLevel }}
           ports:
             {{- if .Values.metrics.enabled }}

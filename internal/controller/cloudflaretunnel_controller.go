@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -72,7 +73,7 @@ func (r *CloudflareTunnelReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	if !tunnel.DeletionTimestamp.IsZero() {
-		return ctrl.Result{}, r.reconcileDelete(ctx, &tunnel)
+		return r.reconcileDelete(ctx, &tunnel)
 	}
 
 	if controllerutil.AddFinalizer(&tunnel, naming.Finalizer) {
@@ -138,66 +139,59 @@ func (r *CloudflareTunnelReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	return ctrl.Result{}, r.setTunnelStatus(ctx, &tunnel, cfTunnel.ID, naming.TokenSecretName(tunnel.Name), true, ReasonReconciled, "Tunnel and cloudflared workload reconciled")
 }
 
-func (r *CloudflareTunnelReconciler) reconcileDelete(ctx context.Context, tunnel *cfztv1alpha1.CloudflareTunnel) error {
+func (r *CloudflareTunnelReconciler) reconcileDelete(ctx context.Context, tunnel *cfztv1alpha1.CloudflareTunnel) (ctrl.Result, error) {
 	if !controllerutil.ContainsFinalizer(tunnel, naming.Finalizer) {
-		return nil
+		return ctrl.Result{}, nil
 	}
 	exposures, err := r.referencingExposures(ctx, tunnel.Name)
 	if err != nil {
-		return err
+		return ctrl.Result{}, err
 	}
 	if len(exposures) > 0 {
 		setCondition(&tunnel.Status.Conditions, ConditionReady, metav1.ConditionFalse, ReasonBlockedByExposures, "CloudflareTunnel still has referencing CloudflareExposures", tunnel.Generation)
 		setCondition(&tunnel.Status.Conditions, ConditionProgressing, metav1.ConditionTrue, ReasonBlockedByExposures, "waiting for CloudflareExposures to be deleted", tunnel.Generation)
 		if err := r.Status().Update(ctx, tunnel); err != nil {
-			return err
+			return ctrl.Result{}, err
 		}
 		r.event(tunnel, corev1.EventTypeWarning, EventBlockedByExposures, "Deletion blocked by %d CloudflareExposure resources", len(exposures))
-		return nil
+		return ctrl.Result{}, nil
 	}
 	if tunnel.Status.TunnelId != "" {
 		cfClient, err := r.cloudflareClient(ctx, tunnel)
 		if err != nil {
-			setCondition(&tunnel.Status.Conditions, ConditionReady, metav1.ConditionFalse, ReasonCredentialsMissing, err.Error(), tunnel.Generation)
-			_ = r.Status().Update(ctx, tunnel)
-			return nil
+			if statusErr := r.setTunnelStatus(ctx, tunnel, tunnel.Status.TunnelId, naming.TokenSecretName(tunnel.Name), false, ReasonCredentialsMissing, err.Error()); statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
 		cfTunnel, err := cfClient.Tunnels().Get(ctx, tunnel.Status.TunnelId)
 		if err != nil && !errors.Is(err, cloudflare.ErrNotFound) {
-			return err
+			return ctrl.Result{}, err
 		}
 		if err == nil && cfTunnel.Name != tunnel.Spec.TunnelName {
 			setCondition(&tunnel.Status.Conditions, ConditionReady, metav1.ConditionFalse, ReasonForeignTunnel, "tracked Cloudflare tunnel name does not match spec.tunnelName", tunnel.Generation)
 			setCondition(&tunnel.Status.Conditions, ConditionProgressing, metav1.ConditionTrue, ReasonForeignTunnel, "deletion blocked to avoid deleting a foreign Cloudflare tunnel", tunnel.Generation)
-			return r.Status().Update(ctx, tunnel)
+			return ctrl.Result{}, r.Status().Update(ctx, tunnel)
 		}
 		err = cfClient.Tunnels().Delete(ctx, tunnel.Status.TunnelId)
 		if err != nil && !errors.Is(err, cloudflare.ErrNotFound) {
-			return err
+			return ctrl.Result{}, err
 		}
 	}
 	if err := r.deleteNamespaced(ctx, &corev1.Secret{}, tunnel.Spec.Cloudflared.Namespace, naming.TokenSecretName(tunnel.Name)); err != nil {
-		return err
+		return ctrl.Result{}, err
 	}
 	if err := r.deleteNamespaced(ctx, &appsv1.DaemonSet{}, tunnel.Spec.Cloudflared.Namespace, naming.DaemonSetName(tunnel.Name)); err != nil {
-		return err
+		return ctrl.Result{}, err
 	}
 	controllerutil.RemoveFinalizer(tunnel, naming.Finalizer)
-	return r.Update(ctx, tunnel)
+	return ctrl.Result{}, r.Update(ctx, tunnel)
 }
 
 func (r *CloudflareTunnelReconciler) referencingExposures(ctx context.Context, tunnelName string) ([]cfztv1alpha1.CloudflareExposure, error) {
-	var list cfztv1alpha1.CloudflareExposureList
-	if err := r.List(ctx, &list); err != nil {
-		return nil, err
-	}
-	var out []cfztv1alpha1.CloudflareExposure
-	for _, exposure := range list.Items {
-		if exposure.Spec.TunnelRef.Name == tunnelName {
-			out = append(out, exposure)
-		}
-	}
-	return out, nil
+	return listCloudflareExposuresByField(ctx, r.Client, exposureIndexTunnelRefName, tunnelName, func(exposure cfztv1alpha1.CloudflareExposure) bool {
+		return exposure.Spec.TunnelRef.Name == tunnelName
+	})
 }
 
 func (r *CloudflareTunnelReconciler) reconcileTunnelConfig(ctx context.Context, tunnel *cfztv1alpha1.CloudflareTunnel, cfClient cloudflare.Client, tunnelID string) error {

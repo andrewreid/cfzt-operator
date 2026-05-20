@@ -135,6 +135,23 @@ var _ = Describe("CloudflareAccessPolicy Controller", func() {
 		Expect(cfPolicy.Include).To(Equal([]cloudflare.AccessRule{{EmailDomain: "changed.example.com"}}))
 	})
 
+	It("TestAccessPolicyUnsupportedDrift", func() {
+		policy := createAccessPolicy(ctx, "unsupported-drift-policy", "")
+		reconcileAccessPolicy(ctx, reconciler, policy.Name)
+		current := fetchAccessPolicy(ctx, policy.Name)
+		oldHash := current.Status.ObservedRulesHash
+		fakeCF.MarkAccessPolicyUnsupported(current.Status.PolicyId)
+
+		reconcileAccessPolicy(ctx, reconciler, policy.Name)
+
+		updated := fetchAccessPolicy(ctx, policy.Name)
+		ready := meta.FindStatusCondition(updated.Status.Conditions, ConditionReady)
+		Expect(ready).NotTo(BeNil())
+		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+		Expect(ready.Reason).To(Equal(ReasonUnsupportedDrift))
+		Expect(updated.Status.ObservedRulesHash).To(Equal(oldHash))
+	})
+
 	It("TestAccessPolicyReferencedByPopulated", func() {
 		policy := createAccessPolicy(ctx, "ref-policy", "")
 		first := createPolicyRefExposure(ctx, "ref-one", policy.Name)
@@ -248,6 +265,52 @@ var _ = Describe("CloudflareAccessPolicy Controller", func() {
 		reconcileAccessPolicy(ctx, reconciler, current.Name)
 		Expect(k8sClient.Delete(ctx, ref)).To(Succeed())
 
+		reconcileAccessPolicy(ctx, reconciler, current.Name)
+
+		Eventually(func(g Gomega) {
+			err := k8sClient.Get(ctx, types.NamespacedName{Name: policy.Name}, &cfztv1alpha1.CloudflareAccessPolicy{})
+			g.Expect(apierrors.IsNotFound(err)).To(BeTrue())
+		}).Should(Succeed())
+		_, err := fakeCF.AccessPolicies().Get(ctx, policyID)
+		Expect(err).To(MatchError(cloudflare.ErrNotFound))
+	})
+
+	It("TestAccessPolicyFinalizerMissingCredentialsRequeues", func() {
+		policy := createAccessPolicy(ctx, "missing-creds-delete-policy", "")
+		reconcileAccessPolicy(ctx, reconciler, policy.Name)
+		current := fetchAccessPolicy(ctx, policy.Name)
+		policyID := current.Status.PolicyId
+		Expect(policyID).NotTo(BeEmpty())
+		Expect(k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "cloudflare-credentials", Namespace: credsNamespace}})).To(Succeed())
+
+		Expect(k8sClient.Delete(ctx, current)).To(Succeed())
+		result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: policy.Name}})
+
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.RequeueAfter).NotTo(BeZero())
+		blocked := fetchAccessPolicy(ctx, policy.Name)
+		Expect(blocked.Finalizers).To(ContainElement(naming.Finalizer))
+		Expect(meta.FindStatusCondition(blocked.Status.Conditions, ConditionReady).Reason).To(Equal(ReasonCredentialsMissing))
+		_, err = fakeCF.AccessPolicies().Get(ctx, policyID)
+		Expect(err).NotTo(HaveOccurred())
+
+		createCredentials(ctx)
+		reconcileAccessPolicy(ctx, reconciler, policy.Name)
+		Eventually(func(g Gomega) {
+			err := k8sClient.Get(ctx, types.NamespacedName{Name: policy.Name}, &cfztv1alpha1.CloudflareAccessPolicy{})
+			g.Expect(apierrors.IsNotFound(err)).To(BeTrue())
+		}).Should(Succeed())
+	})
+
+	It("TestAccessPolicyFinalizerDeletesUnsupportedDrift", func() {
+		policy := createAccessPolicy(ctx, "unsupported-delete-policy", "")
+		reconcileAccessPolicy(ctx, reconciler, policy.Name)
+		current := fetchAccessPolicy(ctx, policy.Name)
+		policyID := current.Status.PolicyId
+		Expect(policyID).NotTo(BeEmpty())
+		fakeCF.MarkAccessPolicyUnsupported(policyID)
+
+		Expect(k8sClient.Delete(ctx, current)).To(Succeed())
 		reconcileAccessPolicy(ctx, reconciler, current.Name)
 
 		Eventually(func(g Gomega) {

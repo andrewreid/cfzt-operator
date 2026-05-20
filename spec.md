@@ -55,13 +55,13 @@ These are resolved. Treat them as binding constraints, not options.
 | D12 | **Leader election is required ON.** Together with D11 this guarantees one writer per tunnel-config doc per cluster. |
 | D13 | Cloudflare SDK: **`github.com/cloudflare/cloudflare-go/v4`** (auto-generated client). Wrapped behind an internal interface so a fake can be substituted for tests. Reference the [Cloudflare MCP server](https://github.com/cloudflare/mcp-server-cloudflare) for SDK method discovery during implementation. |
 | D14 | Distribution: **Helm chart published as an OCI artifact to GHCR** (D17 for chart shape). Container image also on GHCR. Module path: `github.com/andrewreid/cfzt-operator`. |
-| D15 | API version is `v1alpha1`. Breaking changes are permitted without a conversion webhook. **Upgrade strategy: delete and recreate CRs.** Users must export Exposure manifests, uninstall, install new version, reapply. No state migration. |
+| D15 | API version is `v1alpha1`. Breaking changes are permitted without a conversion webhook. **Upgrade strategy: delete and recreate CRs.** Users must export `CloudflareTunnel`, `CloudflareExposure`, and `CloudflareAccessPolicy` manifests, uninstall, install the new version, and reapply. No state migration. |
 | D16 | **External (non-Kubernetes) origins are first-class.** A `CloudflareExposure` with no `sourceRef` and an explicit `origin` pointing at a LAN host, public IP, or any address reachable from the cloudflared pods is fully supported. Use case: keeping a Home Assistant / NAS / appliance tunnel in GitOps without making the device a Kubernetes Service. |
-| D17 | **Helm chart shape**: hand-written under `charts/cfzt-operator/`. CRDs live in `charts/cfzt-operator/crds/` for Helm 3 native handling (install-only; upgrades do not modify CRDs — matches D15 delete-recreate policy). Templates cover Deployment, ServiceAccount, ClusterRole, ClusterRoleBinding, RBAC for leases. `values.yaml` exposes image repo/tag/pullPolicy, replicas, resources, leader-election toggle (default on), logLevel. CRDs are NOT installed by `helmify`-style generation — written by hand. |
+| D17 | **Helm chart shape**: hand-written under `charts/cfzt-operator/`. CRDs live in `charts/cfzt-operator/crds/` for Helm 3 native handling (install-only; upgrades do not modify CRDs — matches D15 delete-recreate policy). Templates cover Deployment, ServiceAccount, ClusterRole, ClusterRoleBinding, RBAC for leases. `values.yaml` exposes image repo/tag/pullPolicy, replicas, resources, and logLevel. The chart always passes `--leader-elect=true`; D12 is not user-toggleable in shipped installs. CRDs are NOT installed by `helmify`-style generation — written by hand. |
 | D18 | **CI in scope.** GitHub Actions workflows: `ci.yaml` (lint + unit + envtest on PR), `release.yaml` (tag → build + push image to GHCR + push Helm OCI chart to GHCR). |
 | D19 | **Per-controller `MaxConcurrentReconciles`**: Tunnel controller = `1` (single-writer per process for the tunnel-config doc). Exposure controller = `1` in MVP, raise post-MVP if needed. |
 | D20 | **Cross-controller wiring**: Tunnel controller watches Exposure (cluster-wide, map → tunnel). Exposure controller watches Tunnel (map → all Exposures referencing that tunnel) so status writes propagate. |
-| D21 | **Finalizer string**: `cfzt.reid.ee/finalizer` on both CRDs. |
+| D21 | **Finalizer string**: `cfzt.reid.ee/finalizer` on all owning CRDs. |
 | D22 | **Minimum Kubernetes version: 1.27.** Required for stable CEL validation (`x-kubernetes-validations`) used by CRD schema (see `## CRD validation`). |
 | D23 | **GitOps caveat for Helm CRDs**: D17 places CRDs in `charts/cfzt-operator/crds/` (Helm 3 native install-only behaviour). ArgoCD users who render the chart and apply manifests via Application sync will see CRDs *not* upgraded on chart upgrade — matches D15 delete-and-recreate policy. Flux users should set `install.crds: Create` and `upgrade.crds: CreateReplace` with care, again matching D15. Document this in chart `NOTES.txt`. |
 | D24 | **`CloudflareAccessPolicy` CRD is in scope, ships in Slice 4.** Cluster-scoped CRD modelling reusable account-level Cloudflare Access policies with a structured rule subset (decisions: allow/deny/bypass/non_identity; rule types: email, email_domain, ip, everyone, service_token, geo; rule groups: include/exclude/require). `CloudflareExposure.spec.access.policyRef` gains a `name` field that references a managed Policy CR; exactly one of `{uuid, name}` is required when `access.enabled: true`. Name-colliding pre-existing CF policies are NOT auto-adopted (mirrors D9): `Reason=ForeignPolicy`. Deletion of a Policy CR is blocked while ≥1 `CloudflareExposure` references it (`Reason=BlockedByExposures`). Policy ownership is recorded via `status.policyId`; the CF-side policy carries `managed-by=cfzt-operator` and `source-uid=<CloudflareAccessPolicy.uid>` in its tags/decoration field (verify via Cloudflare MCP at implementation time — fall back to ID-only tracking like tunnels if no taggable field exists). |
@@ -109,7 +109,6 @@ Supported:
 Deferred:
 
 - Annotation-driven UX (D5, post-MVP convenience layer).
-- HTTPRoute and Service `sourceRef` derivation (Slice 3).
 - Ingress source support.
 - Private network CIDR routes.
 - WARP routing.
@@ -648,6 +647,7 @@ charts/cfzt-operator/
   crds/
     cloudflaretunnel.yaml          # copied from config/crd by `make manifests` + script
     cloudflareexposure.yaml
+    cloudflareaccesspolicy.yaml
   templates/
     deployment.yaml
     serviceaccount.yaml
@@ -666,8 +666,6 @@ image:
   tag: ""                          # defaults to .Chart.AppVersion
   pullPolicy: IfNotPresent
 replicaCount: 2
-leaderElection:
-  enabled: true                    # D12, never disable in production
 resources: {}
 nodeSelector: {}
 tolerations: []

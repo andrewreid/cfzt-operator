@@ -28,8 +28,8 @@ CRD upgrade caveat (D23):
     with care; again matches D15.
 
   For breaking CRD changes (D15: v1alpha1 permits them without conversion
-  webhook): export Exposure manifests, uninstall, install new version,
-  reapply.
+  webhook): export CloudflareTunnel, CloudflareExposure, and
+  CloudflareAccessPolicy manifests, uninstall, install new version, reapply.
 
 Verify:
 

@@ -2,7 +2,7 @@
 
 ## 1. Context
 
-Operational plan for shipping the cfzt-operator MVP in three slices (Tunnel/connector → Exposure → sourceRef derivation). Source of truth for architecture, decisions D1–D23, CRD shapes, RBAC, and DoD lists is `spec.md`. Operating handbook (bootstrap, commands, RTK, delegation, code rules) is `AGENTS.md`. This plan turns those into ordered, single-session subtasks with cited spec sections and test names.
+Operational plan for shipping the cfzt-operator MVP in four slices (Tunnel/connector → Exposure → sourceRef derivation → managed Access policies). Source of truth for architecture, decisions D1–D24, CRD shapes, RBAC, and DoD lists is `spec.md`. Operating handbook (bootstrap, commands, RTK, delegation, code rules) is `AGENTS.md`. This plan turns those into ordered, single-session subtasks with cited spec sections and test names.
 
 Slice 4 (`CloudflareAccessPolicy` CRD, D24) added under `## 3. Slice plan` after Slice 3 ships — managed Access policies are now in scope per `spec.md ## Decisions` D24.
 
@@ -18,7 +18,8 @@ compile-time-disabled HTTPRoute discovery placeholder for Slice 3. Helm chart
 hand-written at `charts/cfzt-operator/` (D17) with NOTES.txt GitOps caveat
 (D23). CI workflows in `.github/workflows/ci.yaml` + `release.yaml` (D18).
 Makefile `test` target runs envtest via `setup-envtest`; `helm-package` +
-`helm-sync-crds` targets added.
+`helm-sync-crds` targets added. Chart installs always pass
+`--leader-elect=true`; D12 is not exposed as a Helm value.
 
 Completed on 2026-05-19:
 - Subtask 1: `CloudflareTunnel` types + CRD validation markers. API amended
@@ -445,18 +446,13 @@ Run before Slice 1 subtask 1. Per `AGENTS.md ## Bootstrap`.
 3. `rtk kubebuilder create api --group cfzt --version v1alpha1 --kind CloudflareExposure --resource --controller`. Commit.
 4. Edit generated `cmd/main.go`: enable leader election (D12), register both controllers, set `MaxConcurrentReconciles=1` on both (D19), wire `--zap-log-level`. Add HTTPRoute discovery placeholder (used in Slice 3) — for MVP scaffold leave the discovery branch as a TODO behind a build-time `false`.
 5. Hand-write `charts/cfzt-operator/` per `spec.md ## Helm chart layout` (Chart.yaml, values.yaml, crds/ placeholder, templates per layout, NOTES.txt with D23 GitOps caveat).
-6. Hand-write `.github/workflows/ci.yaml` (`go vet`, `golangci-lint`, `make manifests generate && git diff --exit-code`, `make test`, `helm lint`) and `release.yaml` (image to `ghcr.io/andrewreid/cfzt-operator:<tag>`, chart to `oci://ghcr.io/andrewreid/charts/cfzt-operator`). Per `spec.md ## CI / CD`.
+6. Hand-write `.github/workflows/ci.yaml` (`go vet`, `golangci-lint`, `make manifests generate`, `make helm-sync-crds`, `git diff --exit-code`, `make test`, `helm lint`) and `release.yaml` (image to `ghcr.io/andrewreid/cfzt-operator:<tag>`, chart to `oci://ghcr.io/andrewreid/charts/cfzt-operator`). Per `spec.md ## CI / CD`.
 7. Add envtest bootstrap to `Makefile` `test` target per `AGENTS.md ## envtest setup`. Confirm `rtk make test` works against the empty scaffold.
 8. Commit. Open Slice 1 with a working green CI baseline.
 
 ## 5. Out-of-plan deferrals
 
-None blocking. Two soft observations flagged for awareness, neither requires a decision before code:
-
-- `spec.md ## Decisions` references "D1–D21" in the design-warning section and "D1–D23" in the table itself. Mismatch is in spec, not in this plan; not a contradiction in intent. Will not be edited (`AGENTS.md ## Update policy` — D1–D23 stand; the prose reference will be corrected the next time spec is touched for a discovering change).
-- `AGENTS.md ## Bootstrap` numbers decisions D1–D21 in a parenthetical; same minor drift. Same handling.
-
-If the user wants either prose reference fixed proactively, flag separately.
+None blocking.
 
 ## 6. Verification
 
