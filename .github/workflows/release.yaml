@@ -135,6 +135,8 @@ jobs:
       CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
       CF_TEST_ZONE: ${{ secrets.CF_TEST_ZONE || vars.CF_TEST_ZONE }}
       CF_ZONE_ID: ${{ secrets.CF_ZONE_ID || vars.CF_ZONE_ID }}
+      CF_SMOKE_ROUTE_CIDR: ${{ vars.CF_SMOKE_ROUTE_CIDR }}
+      CF_SMOKE_ROUTE_CONFLICT_CIDR: ${{ vars.CF_SMOKE_ROUTE_CONFLICT_CIDR }}
       CHART_REF: oci://ghcr.io/andrewreid/charts/cfzt-operator
       IMAGE_REPOSITORY: ghcr.io/andrewreid/cfzt-operator
       IMAGE_TAG: ${{ github.ref_name }}
