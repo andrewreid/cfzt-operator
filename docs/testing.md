@@ -198,9 +198,11 @@ CF_ACCOUNT_ID
 CF_API_TOKEN
 CF_TEST_ZONE
 CF_ZONE_ID
+CF_SMOKE_ROUTE_CIDR
+CF_SMOKE_ROUTE_CONFLICT_CIDR
 ```
 
-`CF_ZONE_ID` is optional only when the token can list zones. If preflight fails while resolving the zone, fix the environment secret or variable before changing the harness.
+`CF_ZONE_ID` is optional only when the token can list zones. The route CIDR values are optional and default to the CGNAT ranges documented above. If preflight fails while resolving the zone or checking route collisions, fix the environment secret or variable before changing the harness.
 
 The workflow sets:
 
