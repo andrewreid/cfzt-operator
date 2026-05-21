@@ -97,7 +97,7 @@ spec:
             - message: virtualNetworkId cannot be cleared once set; delete and recreate
                 the route to return to the account default virtual network
               rule: '!has(oldSelf.virtualNetworkId) || oldSelf.virtualNetworkId ==
-                '''' || (has(self.virtualNetworkId) && self.virtualNetworkId != '''')'
+                "" || (has(self.virtualNetworkId) && self.virtualNetworkId != "")'
           status:
             description: CloudflareTunnelRouteStatus defines the observed state of
               CloudflareTunnelRoute.

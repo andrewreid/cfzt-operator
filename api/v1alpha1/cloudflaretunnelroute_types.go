@@ -29,7 +29,7 @@ type TunnelRouteTunnelRef struct {
 // CloudflareTunnelRouteSpec defines the desired state of CloudflareTunnelRoute.
 //
 // +kubebuilder:validation:XValidation:rule="self.tunnelRef.name == oldSelf.tunnelRef.name",message="tunnelRef.name is immutable"
-// +kubebuilder:validation:XValidation:rule="!has(oldSelf.virtualNetworkId) || oldSelf.virtualNetworkId == ” || (has(self.virtualNetworkId) && self.virtualNetworkId != ”)",message="virtualNetworkId cannot be cleared once set; delete and recreate the route to return to the account default virtual network"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.virtualNetworkId) || oldSelf.virtualNetworkId == \"\" || (has(self.virtualNetworkId) && self.virtualNetworkId != \"\")",message="virtualNetworkId cannot be cleared once set; delete and recreate the route to return to the account default virtual network"
 type CloudflareTunnelRouteSpec struct {
 	// +kubebuilder:validation:Required
 	TunnelRef TunnelRouteTunnelRef `json:"tunnelRef"`
