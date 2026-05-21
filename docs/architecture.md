@@ -235,10 +235,10 @@ The cloudflared image is pinned to a specific version as a Go constant in `inter
 After any `api/v1alpha1` change, run `make manifests generate` and commit generated output with the API change.
 
 ```sh
-rtk make manifests generate
-rtk make test
-rtk go test ./...
-rtk go test -tags=live ./test/live -run TestCloudflarePreflight -count=1
+make manifests generate
+make test
+go test ./...
+go test -tags=live ./test/live -run TestCloudflarePreflight -count=1
 ```
 
 Live Cloudflare tests are excluded from normal test runs. The release workflow invokes the Go live test package directly; Cloudflare verification and cleanup use typed clients instead of shell JSON parsing.

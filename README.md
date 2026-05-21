@@ -326,12 +326,12 @@ These are deliberate scope decisions, not gaps:
 ## Development
 
 ```sh
-rtk make manifests generate    # regenerate CRDs + deepcopy after api/ changes
-rtk make test                  # unit + envtest (installs setup-envtest automatically)
-rtk go test ./...              # raw test pass
-rtk go test -tags=live ./test/live -run TestCloudflarePreflight -count=1
-rtk helm lint charts/cfzt-operator
-rtk helm template cfzt-operator charts/cfzt-operator --namespace cfzt-system
+make manifests generate    # regenerate CRDs + deepcopy after api/ changes
+make test                  # unit + envtest (installs setup-envtest automatically)
+go test ./...              # raw test pass
+go test -tags=live ./test/live -run TestCloudflarePreflight -count=1
+helm lint charts/cfzt-operator
+helm template cfzt-operator charts/cfzt-operator --namespace cfzt-system
 ```
 
 Regenerate manifests and deepcopy after any `api/v1alpha1` change, and commit the generated output alongside the API change. CI fails on uncommitted generated drift.

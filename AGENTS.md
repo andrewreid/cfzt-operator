@@ -38,7 +38,8 @@ Plan lives at `docs/plan.md` (in-repo, committed). Updated each slice.
 - `rg` over broad reads. Targeted `Read` over file dumps.
 - `spec.md` describes intent. Decisions table (D1–D24) is binding — do not relitigate without user.
 - Verify implementation before assuming. spec ≠ proof code exists.
-- **All shell commands prefix with `rtk`.** Even inside `&&` chains. See `## RTK` below.
+- **Agent-executed shell commands prefix with `rtk`.** Even inside `&&` chains. See `## RTK` below.
+- **User-facing documentation must not include `rtk` prefixes.** Humans should see normal commands such as `make test`, `go test ./...`, and `kubectl get pods`.
 
 Orchestration:
 
@@ -63,7 +64,9 @@ Orchestration:
 
 ## RTK
 
-`rtk` = Rust Token Killer. Token-optimised CLI proxy. Installed in this repo via the RTK skill. If filter exists for a command, RTK uses it; otherwise passes through unchanged. Always safe to prefix.
+`rtk` = Rust Token Killer. Token-optimised CLI proxy for agent sessions only. Installed in this repo via the RTK skill. If filter exists for a command, RTK uses it; otherwise passes through unchanged. Always safe for agents to prefix local shell execution.
+
+Do not copy `rtk` into README/docs/examples intended for human operators. When editing docs, show the underlying command without the agent-only wrapper.
 
 Critical commands:
 
@@ -86,7 +89,7 @@ rtk discover          # scan transcripts for missed savings
 rtk proxy <cmd>       # bypass filter (debug only)
 ```
 
-Even inside chains:
+Even inside chains when the agent is executing commands locally:
 
 ```
 # wrong
@@ -127,7 +130,7 @@ Gateway API (`HTTPRoute`) support is conditional — controller only enables whe
 
 ## Commands
 
-All via `rtk`. Targets assume kubebuilder scaffold complete (see `## Bootstrap`).
+Agent execution uses `rtk`; human-facing docs should omit it. Targets assume kubebuilder scaffold complete (see `## Bootstrap`).
 
 ```
 rtk make manifests          # CRDs + RBAC from kubebuilder markers
