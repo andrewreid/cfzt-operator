@@ -129,3 +129,38 @@ func TestCloudflareTunnelDeepCopy(t *testing.T) {
 		t.Errorf("Conditions length mismatch")
 	}
 }
+
+func TestCloudflareTunnelRouteDeepCopy(t *testing.T) {
+	original := &cfztv1alpha1.CloudflareTunnelRoute{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "cfzt.reid.ee/v1alpha1",
+			Kind:       "CloudflareTunnelRoute",
+		},
+		ObjectMeta: metav1.ObjectMeta{Name: "lan"},
+		Spec: cfztv1alpha1.CloudflareTunnelRouteSpec{
+			TunnelRef:        cfztv1alpha1.TunnelRouteTunnelRef{Name: "homelab"},
+			Network:          "172.16.0.0/24",
+			VirtualNetworkId: "00000000-0000-4000-8000-000000000001",
+			Comment:          "LAN",
+		},
+		Status: cfztv1alpha1.CloudflareTunnelRouteStatus{
+			RouteId:          "route-1",
+			VirtualNetworkId: "00000000-0000-4000-8000-000000000001",
+			Conditions: []metav1.Condition{
+				{Type: "Ready", Status: metav1.ConditionTrue, Reason: "Reconciled"},
+			},
+		},
+	}
+
+	copied := original.DeepCopy()
+	if copied == original {
+		t.Fatal("DeepCopy returned same pointer")
+	}
+	if copied.Spec.Network != original.Spec.Network {
+		t.Errorf("Network mismatch: got %q want %q", copied.Spec.Network, original.Spec.Network)
+	}
+	copied.Status.Conditions[0].Reason = "Changed"
+	if original.Status.Conditions[0].Reason == "Changed" {
+		t.Error("Conditions slice was not deep copied; mutation leaked to original")
+	}
+}

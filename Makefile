@@ -137,6 +137,7 @@ helm-sync-crds: manifests ## Copy generated CRDs into the Helm chart.
 	cp config/crd/bases/cfzt.reid.ee_cloudflaretunnels.yaml $(CHART_DIR)/crds/cloudflaretunnel.yaml
 	cp config/crd/bases/cfzt.reid.ee_cloudflareexposures.yaml $(CHART_DIR)/crds/cloudflareexposure.yaml
 	cp config/crd/bases/cfzt.reid.ee_cloudflareaccesspolicies.yaml $(CHART_DIR)/crds/cloudflareaccesspolicy.yaml
+	cp config/crd/bases/cfzt.reid.ee_cloudflaretunnelroutes.yaml $(CHART_DIR)/crds/cloudflaretunnelroute.yaml
 
 .PHONY: helm-lint
 helm-lint: ## Lint the Helm chart.

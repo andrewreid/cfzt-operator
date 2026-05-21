@@ -65,6 +65,7 @@ These are resolved. Treat them as binding constraints, not options.
 | D22 | **Minimum Kubernetes version: 1.27.** Required for stable CEL validation (`x-kubernetes-validations`) used by CRD schema (see `## CRD validation`). |
 | D23 | **GitOps caveat for Helm CRDs**: D17 places CRDs in `charts/cfzt-operator/crds/` (Helm 3 native install-only behaviour). ArgoCD users who render the chart and apply manifests via Application sync will see CRDs *not* upgraded on chart upgrade — matches D15 delete-and-recreate policy. Flux users should set `install.crds: Create` and `upgrade.crds: CreateReplace` with care, again matching D15. Document this in chart `NOTES.txt`. |
 | D24 | **`CloudflareAccessPolicy` CRD is in scope, ships in Slice 4.** Cluster-scoped CRD modelling reusable account-level Cloudflare Access policies with a structured rule subset (decisions: allow/deny/bypass/non_identity; rule types: email, email_domain, ip, everyone, service_token, geo; rule groups: include/exclude/require). `CloudflareExposure.spec.access.policyRef` gains a `name` field that references a managed Policy CR; exactly one of `{uuid, name}` is required when `access.enabled: true`. Name-colliding pre-existing CF policies are NOT auto-adopted (mirrors D9): `Reason=ForeignPolicy`. Deletion of a Policy CR is blocked while ≥1 `CloudflareExposure` references it (`Reason=BlockedByExposures`). Policy ownership is recorded via `status.policyId`; the CF-side policy carries `managed-by=cfzt-operator` and `source-uid=<CloudflareAccessPolicy.uid>` in its tags/decoration field (verify via Cloudflare MCP at implementation time — fall back to ID-only tracking like tunnels if no taggable field exists). |
+| D25 | **`CloudflareTunnelRoute` CRD is in scope, ships in Slice 5.** Cluster-scoped CRD modelling a single Cloudflare Tunnel private-network route (CIDR → tunnel binding). One CR → one CF route. `spec.tunnelRef.name` references a `CloudflareTunnel`; `spec.network` is a single IPv4 or IPv6 CIDR; `spec.virtualNetworkId` is optional. When unset, the operator omits `virtual_network_id` from Cloudflare route create/update/list calls and lets Cloudflare apply the account default VNet; it does not manage or resolve VNets in Slice 5. `spec.comment` is optional human text, capped to fit beside the compact operator ownership tag in Cloudflare's 100-character route comment. Ownership is recorded via `status.routeId`; the CF-side route `comment` MUST carry `managed-by=cfzt source-uid=<CloudflareTunnelRoute.uid>`. Pre-existing CF routes with the same target CIDR/VNet and no matching source-uid are NOT auto-adopted: `Reason=ForeignRoute`. Tunnel deletion is blocked while ≥1 `CloudflareTunnelRoute` references the tunnel: `Reason=BlockedByRoutes`. WARP / Cloudflare One Client Split Tunnels, Gateway network policies, private DNS, and packet-level validation remain deferred — this CRD only registers the route on the tunnel side. |
 
 ## Design philosophy
 
@@ -101,6 +102,7 @@ Supported:
 - Creation and update of Cloudflare Access applications.
 - Binding of pre-existing Access policies to Access applications by UUID (D3 / D24 — MVP Slices 1–2).
 - Managed `CloudflareAccessPolicy` CRD with structured rule subset (D24 — Slice 4).
+- Cluster-scoped `CloudflareTunnelRoute` CRD: private network CIDR-to-tunnel routes (D25 — Slice 5).
 - External (non-K8s) origins (D16).
 - `Ready` and `Progressing` conditions on all CRDs (D8).
 - Finalizers for owned Cloudflare resources.
@@ -110,7 +112,6 @@ Deferred:
 
 - Annotation-driven UX (D5, post-MVP convenience layer).
 - Ingress source support.
-- Private network CIDR routes.
 - WARP routing.
 - Device posture management.
 - Gateway policy management.
@@ -415,6 +416,47 @@ Kubebuilder markers:
 7. Finalizer `cfzt.reid.ee/finalizer`: blocks deletion while `len(status.referencedBy) > 0` → `Ready=False, Reason=BlockedByExposures`. Once unblocked: delete CF policy if `source-uid` matches (or `status.policyId` matches when no tag field); remove finalizer.
 8. Set `Ready=True` once `status.policyId` is set and `observedRulesHash` matches desired rules.
 
+### CloudflareTunnelRoute (cluster-scoped)
+
+Ships in Slice 5 (D25). Models a single Cloudflare Tunnel private-network route — a CIDR (IPv4 or IPv6) bound to a tunnel so WARP clients (or peer tunnels) can reach IPs inside the CIDR. One CR → one CF route. WARP / Cloudflare One Client Split Tunnels, Gateway network policies, private DNS, and packet-level validation are out of scope; this CRD only registers the route on the tunnel side.
+
+```yaml
+apiVersion: cfzt.reid.ee/v1alpha1
+kind: CloudflareTunnelRoute
+metadata:
+  name: homelab-lan-v4
+spec:
+  tunnelRef:
+    name: homelab
+  network: 172.16.0.0/24            # IPv4 or IPv6 CIDR
+  virtualNetworkId: ""              # optional; omitted from CF calls when unset
+  comment: "homelab LAN via WARP"   # optional human label, max 34 chars
+status:
+  routeId: ""                       # CF route UUID once created
+  virtualNetworkId: ""              # CF value returned by the route API, if any
+  conditions: []
+```
+
+Kubebuilder markers:
+
+- `+kubebuilder:resource:scope=Cluster,shortName=cftr`
+- `+kubebuilder:subresource:status`
+- `+kubebuilder:printcolumn:name=Network,type=string,JSONPath=.spec.network`
+- `+kubebuilder:printcolumn:name=Tunnel,type=string,JSONPath=.spec.tunnelRef.name`
+- `+kubebuilder:printcolumn:name=RouteID,type=string,JSONPath=.status.routeId`
+- `+kubebuilder:printcolumn:name=Ready,type=string,JSONPath=.status.conditions[?(@.type=="Ready")].status`
+- `+kubebuilder:printcolumn:name=Age,type=date,JSONPath=.metadata.creationTimestamp`
+
+`CloudflareTunnelRoute` controller responsibilities:
+
+1. Resolve the referenced `CloudflareTunnel`; read credentials via the same path as the Exposure controller (Tunnel's `credentialsSecretRef` in its `cloudflared.namespace`). If the tunnel does not exist, is deleting, or has no `status.tunnelId`, surface `Reason=TunnelNotReady` and requeue. Do not require `CloudflareTunnel Ready=True`; private route registration only needs the CF tunnel ID and credentials.
+2. Canonicalise `spec.network` with `net/netip.ParsePrefix` and `Prefix.Masked().String()` for both IPv4 and IPv6. Invalid CIDR → `Ready=False, Reason=NetworkInvalid` with no Cloudflare call.
+3. Reconcile route identity by ID-record (mirrors D9 tunnel pattern): if `status.routeId` is set, `Get(id)` and verify canonical network, tunnel ID, and VNet match spec. If unset, `List` active routes with `tun_types=cfd_tunnel`, optional `tunnel_id`, and optional `virtual_network_id` only when `spec.virtualNetworkId` is set; exact-filter in code by canonical CIDR and VNet. Zero hits → create with compact ownership comment `managed-by=cfzt source-uid=<uid>` plus optional ` | <spec.comment>`; one or more hits → check the `comment` for matching source-uid (mutation allowed) or refuse with `Reason=ForeignRoute` (no mutation). When `spec.virtualNetworkId` is unset, the operator omits `virtual_network_id` from List/New/Edit and fails closed on exact-CIDR foreign matches because it deliberately does not resolve the account default VNet in Slice 5.
+4. Compare desired network / VNet / comment against the live route; on drift, preflight the target CIDR/VNet for foreign active routes before calling `Edit`. Network and non-empty VNet changes are allowed via update (no delete-recreate), but clearing VNet after it was set is rejected by CRD validation. A different existing route at the target CIDR/VNet → `Ready=False, Reason=ForeignRoute`.
+5. Set `status.routeId` and `status.virtualNetworkId` on success.
+6. Finalizer `cfzt.reid.ee/finalizer`: on deletion, `Get(routeId)`, verify the compact comment source-uid matches, then `Delete` the route; remove finalizer. Foreign-tagged or missing-tag route → leave alone, remove finalizer (the route is not ours to delete).
+7. Set `Ready=True` once the route is created and matches desired state.
+
 ## CRD validation
 
 CRD fields are validated by `+kubebuilder:validation:*` markers and `x-kubernetes-validations` CEL rules. No validating webhook in MVP.
@@ -461,6 +503,17 @@ CRD fields are validated by `+kubebuilder:validation:*` markers and `x-kubernete
 - `spec.purposeJustification.required`: bool, default `false`.
 - `spec.purposeJustification.prompt`: optional, maxLength 1000.
 
+`CloudflareTunnelRoute` (Slice 5, D25):
+
+- `spec.tunnelRef.name`: required, minLength 1, maxLength 253.
+- `spec.network`: required. CEL validates one of:
+  - IPv4 CIDR pattern `^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[1-2][0-9]|3[0-2])$`
+  - IPv6 CIDR pattern (compressed form accepted) `^([0-9a-fA-F:]+)/([0-9]|[1-9][0-9]|1[0-1][0-9]|12[0-8])$`
+- Controller validation MUST parse the CIDR with `net/netip.ParsePrefix` for both IPv4 and IPv6, reject non-canonical-invalid addresses missed by regex (for example IPv4 octets >255), and compare routes using the masked canonical CIDR string.
+- `spec.virtualNetworkId`: optional, general UUID pattern when set. Explicit empty string is accepted as unset. When unset, the operator omits `virtual_network_id` from Cloudflare route SDK params. Clearing a previously set value is rejected; delete and recreate the route to return to the account default VNet.
+- `spec.comment`: optional, maxLength 34. Cloudflare route comments are max 100 chars; the compact ownership prefix `managed-by=cfzt source-uid=<36-char uid>` plus ` | ` leaves 34 chars for user text.
+- Immutability CEL: `spec.tunnelRef.name` is immutable post-creation (routes do not migrate between tunnels via spec edit; delete + recreate). `spec.network` and non-empty `spec.virtualNetworkId` changes are mutable; the controller preflights target CIDR/VNet conflicts before `Edit`. Clearing `spec.virtualNetworkId` after it has been set is rejected because Slice 5 deliberately omits `virtual_network_id` when unset and does not send an API null to move a route back to the account default VNet.
+
 ## Tunnel configuration concurrency
 
 D1 forces all ingress rules for a tunnel into a single configuration doc. D11 makes the `CloudflareTunnel` controller the sole writer. D12 makes the operator process the sole writer cluster-wide. D19 makes the Tunnel controller `MaxConcurrentReconciles=1`.
@@ -503,12 +556,13 @@ The operator is conservative. It only mutates Cloudflare resources whose ownersh
 - **DNS records**: `comment` field carries `managed-by=cfzt-operator source-uid=<CloudflareExposure.uid>`.
 - **Ingress rules: not tagged.** The entire doc is overwritten each reconcile from K8s desired state.
 - **Access policies** (Slice 4, D24): `CloudflareAccessPolicy.status.policyId` is the authoritative ownership record (mirrors tunnels per D9). SDK tags/decoration carry `managed-by=cfzt-operator source-uid=<CloudflareAccessPolicy.uid>` if the policy resource supports a tag/comment field; verify at implementation via the Cloudflare MCP and fall back to ID-only if not. Name = `spec.policyName` (default `<metadata.name>-cfzt`).
+- **Tunnel routes** (Slice 5, D25): `CloudflareTunnelRoute.status.routeId` is the authoritative ownership record. CF-side `comment` carries compact ownership text `managed-by=cfzt source-uid=<CloudflareTunnelRoute.uid>`; the installed `cloudflare-go/v4` route API exposes `comment`, so Slice 5 requires this guard. Pre-existing active routes with the same target CIDR/VNet and no matching source-uid are NOT auto-adopted: `Ready=False, Reason=ForeignRoute`.
 
 **Mutation rule.** Before update or delete of an Access app or DNS record, the operator MUST verify the resource's `source-uid` matches a current local CR of the expected kind. Mismatch or missing tag → `Ready=False, Reason=ForeignResource`, no destructive action. Tunnels follow the ID-based rule above instead.
 
 **Hostname conflict rule.** If an Access app or DNS record already exists for a hostname and its `source-uid` does not match the reconciling Exposure → `Ready=False, Reason=HostnameConflict`. Do not touch the conflicting resource. Requeue with backoff. (Ingress-rule conflicts inside the doc are resolved at build time: builder errors if two Exposures claim the same hostname, surfacing on both as `HostnameConflict`.)
 
-**Tunnel deletion rule.** A `CloudflareTunnel` with ≥1 referencing `CloudflareExposure` cannot complete deletion. The tunnel finalizer holds, sets `Ready=False, Reason=BlockedByExposures`.
+**Tunnel deletion rule.** A `CloudflareTunnel` with ≥1 referencing `CloudflareExposure` cannot complete deletion. The tunnel finalizer holds, sets `Ready=False, Reason=BlockedByExposures`. A `CloudflareTunnel` with ≥1 referencing `CloudflareTunnelRoute` (Slice 5, D25) is similarly blocked with `Ready=False, Reason=BlockedByRoutes`. Both blocks must clear before deletion completes.
 
 **Policy deletion rule** (Slice 4, D24). A `CloudflareAccessPolicy` with ≥1 referencing `CloudflareExposure` (via `spec.access.policyRef.name`) cannot complete deletion. The policy finalizer holds, sets `Ready=False, Reason=BlockedByExposures`. Mirrors the tunnel-deletion rule.
 
@@ -529,9 +583,10 @@ Every CRD exposes exactly two conditions:
 
 - `CredentialsMissing`, `CredentialsInvalid`
 - `TunnelCreating`, `TokenFetchFailed`, `WorkloadNotReady`
-- `OriginInvalid`, `HostnameConflict`, `ForeignResource`, `ForeignTunnel`, `ForeignPolicy`
-- `AccessAppPending`, `PolicyNotFound`, `PolicyNotReady`, `DNSWriteFailed`
-- `BlockedByExposures`
+- `OriginInvalid`, `NetworkInvalid`, `HostnameConflict`, `ForeignResource`, `ForeignTunnel`, `ForeignPolicy`, `ForeignRoute`
+- `AccessAppPending`, `PolicyNotFound`, `PolicyNotReady`, `DNSWriteFailed`, `RouteWriteFailed`
+- `TunnelNotReady`
+- `BlockedByExposures`, `BlockedByRoutes`
 - `Reconciled`
 
 ## Credentials
@@ -557,6 +612,9 @@ API token MVP scopes:
 | `cfzt.reid.ee` | `cloudflareaccesspolicies` | `get,list,watch,create,update,patch,delete` | cluster (Slice 4) |
 | `cfzt.reid.ee` | `cloudflareaccesspolicies/status` | `get,update,patch` | cluster (Slice 4) |
 | `cfzt.reid.ee` | `cloudflareaccesspolicies/finalizers` | `update` | cluster (Slice 4) |
+| `cfzt.reid.ee` | `cloudflaretunnelroutes` | `get,list,watch,create,update,patch,delete` | cluster (Slice 5) |
+| `cfzt.reid.ee` | `cloudflaretunnelroutes/status` | `get,update,patch` | cluster (Slice 5) |
+| `cfzt.reid.ee` | `cloudflaretunnelroutes/finalizers` | `update` | cluster (Slice 5) |
 | `""` | `secrets` | `get,list,watch` | cluster (read credentials Secrets + own token Secrets) |
 | `""` | `secrets` | `create,update,patch,delete` | cluster — **operator contract**: only writes Secrets whose name matches `<CloudflareTunnel.metadata.name>-token` in `cloudflared.namespace`. Audit trail via Events. (K8s RBAC cannot pattern-match `resourceNames` so contract is enforced in code, not RBAC.) |
 | `apps` | `daemonsets` | `get,list,watch,create,update,patch,delete` | cluster — operator contract: only writes DaemonSets named `cloudflared-<CloudflareTunnel.metadata.name>` in `cloudflared.namespace`. |
@@ -630,6 +688,13 @@ Reference `cloudflare-go/v4` types and methods, not raw URLs. Use the [Cloudflar
 | Create Access policy | `client.ZeroTrust.Access.Policies.New(ctx, ...)` (Slice 4) |
 | Update Access policy | `client.ZeroTrust.Access.Policies.Update(ctx, id, ...)` (Slice 4) |
 | Delete Access policy | `client.ZeroTrust.Access.Policies.Delete(ctx, id, ...)` (Slice 4) |
+| List tunnel routes | `client.ZeroTrust.Networks.Routes.List(ctx, ...)` (Slice 5) |
+| Create tunnel route | `client.ZeroTrust.Networks.Routes.New(ctx, ...)` (Slice 5) |
+| Get tunnel route | `client.ZeroTrust.Networks.Routes.Get(ctx, id, ...)` (Slice 5) |
+| Edit tunnel route | `client.ZeroTrust.Networks.Routes.Edit(ctx, id, ...)` (Slice 5) |
+| Delete tunnel route | `client.ZeroTrust.Networks.Routes.Delete(ctx, id, ...)` (Slice 5) |
+
+For routes, use the non-deprecated route-ID endpoints above, not the deprecated CIDR-path `Routes.Networks.*` endpoints. `NetworkRouteListParams` does not have an exact `network` filter; use `network_subset` / `network_superset` plus in-code canonical exact matching, `tun_types=cfd_tunnel`, `is_deleted=false`, optional `tunnel_id`, and optional `virtual_network_id` only when `spec.virtualNetworkId` is set.
 
 Exact field names and pagination shape: confirm via MCP at implementation time. Wrap all calls behind the `internal/cloudflare` interface so the fake implementation in tests does not depend on the SDK shape.
 
@@ -704,7 +769,7 @@ Both workflows use `GITHUB_TOKEN` with `packages: write`.
   - `cfzt_cloudflare_api_duration_seconds{endpoint}`
   - `cfzt_resource_ready{kind, namespace}` (gauge; intentionally no `name` label — avoid cardinality blow-up)
 - **Logs** (logr/zap, structured). Every line carries `controller`; where relevant also `namespace`, `name`, `tunnelId`, `hostname`. Log level from `--zap-log-level` (default `info`).
-- **Events**: emit Kubernetes Events for state transitions: `CreatedTunnel`, `CreatedAccessApp`, `HostnameConflict`, `ForeignTunnel`, `ReconcileFailed`, `TokenRotated`, `BlockedByExposures`.
+- **Events**: emit Kubernetes Events for state transitions: `CreatedTunnel`, `CreatedAccessApp`, `HostnameConflict`, `ForeignTunnel`, `ReconcileFailed`, `TokenRotated`, `BlockedByExposures`, `CreatedRoute`, `DeletedRoute`, `ForeignRoute`, `BlockedByRoutes`.
 
 ## Suggested package layout
 
@@ -713,6 +778,7 @@ api/v1alpha1/
   cloudflaretunnel_types.go
   cloudflareexposure_types.go
   cloudflareaccesspolicy_types.go  # Slice 4 (D24)
+  cloudflaretunnelroute_types.go   # Slice 5 (D25)
   groupversion_info.go
   zz_generated_deepcopy.go         # generated
 
@@ -720,6 +786,7 @@ internal/controller/
   cloudflaretunnel_controller.go
   cloudflareexposure_controller.go
   cloudflareaccesspolicy_controller.go  # Slice 4 (D24)
+  cloudflaretunnelroute_controller.go   # Slice 5 (D25)
 
 internal/tunnelconfig/
   builder.go            # builds desired ingress[] from list of Exposures
@@ -734,6 +801,7 @@ internal/cloudflare/
   access_applications.go
   access_policies.go    # Slice 4 (D24) — reusable account-level policies
                         # (distinct from access_applications.go which binds existing policy UUIDs to apps)
+  routes.go             # Slice 5 (D25) — tunnel private-network routes
   dns.go
   zones.go              # zone cache + longest-suffix resolution
 
@@ -780,6 +848,9 @@ docs/
 - Tunnel ownership: tracked via `CloudflareTunnel.status.tunnelId` (no CF-side comment/tag — see D9).
 - Access policy name in Cloudflare (Slice 4, D24): `<spec.policyName | metadata.name+"-cfzt">`.
 - Access policy ownership (Slice 4): tracked via `CloudflareAccessPolicy.status.policyId`; tags `managed-by=cfzt-operator` and `source-uid=<policy-cr-uid>` written if the SDK exposes a tag/comment field for policies (verify at implementation).
+- `CloudflareTunnelRoute` `metadata.name`: user-chosen. No CF-side name (routes are identified by CIDR + VNet + ID).
+- Route `comment` in Cloudflare (Slice 5, D25): `managed-by=cfzt source-uid=<route-cr-uid>` plus optional user `spec.comment` text after a ` | ` separator. User comment is capped at 34 chars so the full CF comment fits Cloudflare's 100-char route limit.
+- Tunnel route ownership: tracked via `CloudflareTunnelRoute.status.routeId`; CF-side `comment` source-uid is the required defence-in-depth mutation guard.
 - Finalizer string: `cfzt.reid.ee/finalizer` on all CRDs (D21, plus `CloudflareAccessPolicy` in Slice 4).
 - Tunnel ingress rule ordering: sorted by hostname (lexicographic). Catch-all `service: http_status:404` always last.
 
@@ -928,9 +999,35 @@ The implementer ships in slices. Each slice has a measurable definition of done.
 - envtest tests pass: `TestAccessPolicyCreate`, `TestAccessPolicyForeignRefuses`, `TestAccessPolicyRulesDrift`, `TestAccessPolicyFinalizerBlockedByExposures`, `TestAccessPolicyFinalizerUnblocks`, `TestExposurePolicyRefName`, `TestExposurePolicyRefNamePolicyNotReady`, `TestExposurePolicyRefOneOfValidation`.
 - Manual: dashboard shows the policy was created; `kubectl edit cfap` rolls the rules in CF within one reconcile.
 
+### Slice 5 — Tunnel private network routes
+
+**Outcome**: `CloudflareTunnelRoute` CR creates and maintains a Cloudflare Tunnel private-network route (CIDR → tunnel binding). Tunnel deletion is blocked while routes reference the tunnel.
+
+**Steps**:
+
+1. `CloudflareTunnelRoute` types + CRD generation + CEL validation (coarse IPv4 / IPv6 CIDR shape, controller-side `net/netip.ParsePrefix` validation for both families, general UUID VNet with explicit empty as unset, compact comment length, immutable tunnelRef, reject clearing VNet after set).
+2. `internal/cloudflare/routes.go` interface + real + fake implementations (List, New, Get, Edit, Delete). Verify exact SDK paths via Cloudflare MCP; use route-ID endpoints and route `comment`, not deprecated CIDR-path endpoints.
+3. Route controller: credential resolution via Tunnel CR, tunnel-ID gate (`Reason=TunnelNotReady` until referenced Tunnel has `status.tunnelId`), ID-record reconcile (mirrors D9 + D24), compact comment-tag ownership, preflighted drift correction (`Edit`), finalizer cleanup with comment source-uid verification.
+4. Cross-watch: Route controller `.Watches(&CloudflareTunnel{}, …)` to retry when the referenced tunnel gets `status.tunnelId` or is deleted. Tunnel controller `.Watches(&CloudflareTunnelRoute{}, …)` to recompute its `BlockedByRoutes` finalizer state.
+5. Tunnel finalizer extension: block on referencing Routes with `Reason=BlockedByRoutes`, parallel to existing `BlockedByExposures`.
+6. RBAC markers + Helm CRD sync + ClusterRole rows.
+7. Live Cloudflare smoke coverage: extend `test/live/cloudflare_smoke_test.go` (`TestCloudflareLifecycle`) with a route create / idempotent reconcile / foreign-route conflict / cleanup phase. Packet routing through the route is NOT validated (no WARP client in kind); CF-side lifecycle is sufficient.
+8. envtest coverage.
+
+**Definition of done**:
+
+- `kubectl apply` of a `CloudflareTunnelRoute` against a tunnel with `status.tunnelId` creates the CF route, populates `status.routeId`, sets `Ready=True`.
+- `kubectl delete cloudflaretunnelroute <name>` removes the CF route and finalizer.
+- A pre-existing CF route with the same target CIDR/VNet and no local ID record or with a mismatching `source-uid` comment causes `Ready=False, Reason=ForeignRoute` with no mutation of the foreign route.
+- `kubectl delete cloudflaretunnel <name>` while a `CloudflareTunnelRoute` references it is blocked with `Reason=BlockedByRoutes`.
+- Drift: editing `spec.network`, non-empty `spec.virtualNetworkId`, or `spec.comment` preflights target CIDR/VNet conflicts, then rewrites the CF route within one reconcile when no foreign route blocks the change. Clearing a previously set `spec.virtualNetworkId` is rejected; delete + recreate to return to the account default VNet.
+- envtest tests pass: `TestCloudflareTunnelRouteCRDValidation`, `TestRouteCreate`, `TestRouteCreateIPv6`, `TestRouteForeignRefuses`, `TestRouteDriftCorrection`, `TestRouteFinalizerDeletes`, `TestRouteFinalizerLeavesForeign`, `TestRouteTunnelNotReady`, `TestTunnelBlockedByRoutes`, `TestRouteConditionsTransition`.
+- Live smoke (`hack/live-cloudflare-local.sh lifecycle`) creates, re-reconciles, refuses a foreign-CIDR collision, and cleans up the `CloudflareTunnelRoute` against real Cloudflare.
+- `ci.yaml` green; `helm lint` clean; manual: dashboard Networks → Routes shows the route with compact `managed-by=cfzt` source-uid in the comment.
+
 ### Post-MVP
 
-Annotation→Exposure convenience controller, parentRefs-based Gateway origin auto-resolution, Ingress source, private network routes, additional Access rule types (groups, IdP claims, certificate, mTLS, posture).
+Annotation→Exposure convenience controller, parentRefs-based Gateway origin auto-resolution, Ingress source, additional Access rule types (groups, IdP claims, certificate, mTLS, posture), WARP client-side routing for private networks.
 
 ## Non-goals for early implementation
 

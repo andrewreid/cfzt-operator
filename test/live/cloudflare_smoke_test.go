@@ -38,6 +38,7 @@ const (
 	conditionReady         = "Ready"
 	reasonHostnameConflict = "HostnameConflict"
 	reasonForeignResource  = "ForeignResource"
+	reasonForeignRoute     = "ForeignRoute"
 
 	operatorReleaseName = "cfzt-operator"
 	credentialsSecret   = "cloudflare-credentials"
@@ -48,24 +49,28 @@ const (
 )
 
 type smokeConfig struct {
-	operatorNamespace string
-	smokeNamespace    string
-	repoRoot          string
-	releaseTag        string
-	version           string
-	runSuffix         string
-	tunnelName        string
-	accessPolicy      string
-	publicHostname    string
-	accessHostname    string
-	conflictHostname  string
-	chartRef          string
-	imageRepository   string
-	imageTag          string
-	accountID         string
-	apiToken          string
-	testZone          string
-	zoneID            string
+	operatorNamespace       string
+	smokeNamespace          string
+	repoRoot                string
+	releaseTag              string
+	version                 string
+	runSuffix               string
+	tunnelName              string
+	accessPolicy            string
+	tunnelRoute             string
+	tunnelRouteConflict     string
+	publicHostname          string
+	accessHostname          string
+	conflictHostname        string
+	tunnelRouteCIDR         string
+	tunnelRouteConflictCIDR string
+	chartRef                string
+	imageRepository         string
+	imageTag                string
+	accountID               string
+	apiToken                string
+	testZone                string
+	zoneID                  string
 }
 
 type smokeHarness struct {
@@ -75,6 +80,7 @@ type smokeHarness struct {
 	cf              cloudflare.Client
 	k8s             client.Client
 	foreignRecordID string
+	foreignRouteID  string
 }
 
 func TestCloudflarePreflight(t *testing.T) {
@@ -136,6 +142,12 @@ func TestCloudflareLifecycle(t *testing.T) {
 	}
 	h.waitDaemonSetReady("cloudflared-"+h.cfg.tunnelName, 3*time.Minute)
 
+	t.Log("creating tunnel private route")
+	h.createTunnelRoute()
+	tunnelRoute := h.waitTunnelRouteReady(7 * time.Minute)
+	tunnelRouteIDBefore := tunnelRoute.Status.RouteId
+	h.assertOneTunnelRoute(tunnelRouteIDBefore, tunnelIDBefore, h.cfg.tunnelRouteCIDR)
+
 	t.Log("creating public and Access exposures")
 	h.createExposures()
 	public := h.waitExposureReady(publicExposure, 7*time.Minute)
@@ -155,17 +167,20 @@ func TestCloudflareLifecycle(t *testing.T) {
 	t.Log("checking idempotency after re-apply and operator restart")
 	h.updateAccessPolicyNoop()
 	h.updateTunnelNoop()
+	h.updateTunnelRouteNoop()
 	h.updateExposuresNoop()
 	h.restartOperator()
 
 	policy = h.waitAccessPolicyReady(4 * time.Minute)
 	tunnel = h.waitTunnelReady(4 * time.Minute)
+	tunnelRoute = h.waitTunnelRouteReady(4 * time.Minute)
 	public = h.waitExposureReady(publicExposure, 4*time.Minute)
 	access = h.waitExposureReady(accessExposure, 4*time.Minute)
 
 	assertEqual(t, "Access policy ID", policyIDBefore, policy.Status.PolicyId)
 	assertEqual(t, "Access policy rules hash", policyHashBefore, policy.Status.ObservedRulesHash)
 	assertEqual(t, "tunnel ID", tunnelIDBefore, tunnel.Status.TunnelId)
+	assertEqual(t, "tunnel route ID", tunnelRouteIDBefore, tunnelRoute.Status.RouteId)
 	assertEqual(t, "public DNS record ID", publicDNSBefore, public.Status.Cloudflare.DnsRecordId)
 	assertEqual(t, "access DNS record ID", accessDNSBefore, access.Status.Cloudflare.DnsRecordId)
 	assertEqual(t, "Access application ID", accessAppBefore, access.Status.Cloudflare.AccessApplicationId)
@@ -193,6 +208,26 @@ func TestCloudflareLifecycle(t *testing.T) {
 	assertEqual(t, "foreign DNS content", "example.com", foreignRecords[0].Content)
 	assertEqual(t, "foreign DNS comment", "cfzt-live-smoke-foreign", foreignRecords[0].Comment)
 
+	t.Log("checking foreign tunnel route conflict safety")
+	foreignRoute, err := h.cf.TunnelRoutes().Create(ctx, cloudflare.TunnelRouteInput{
+		Network:  h.cfg.tunnelRouteConflictCIDR,
+		TunnelID: tunnelIDBefore,
+		Comment:  "cfzt-live-smoke-foreign-route",
+	})
+	if err != nil {
+		t.Fatalf("create foreign tunnel route: %v", err)
+	}
+	h.foreignRouteID = foreignRoute.ID
+	h.createConflictTunnelRoute()
+	routeReason := h.waitTunnelRouteForeignReason(4 * time.Minute)
+	t.Logf("conflict tunnel route reported %s", routeReason)
+	foreignRoutes := h.listTunnelRoutes(h.cfg.tunnelRouteConflictCIDR)
+	if len(foreignRoutes) != 1 {
+		t.Fatalf("expected one foreign tunnel route, got %d", len(foreignRoutes))
+	}
+	assertEqual(t, "foreign tunnel route ID", foreignRoute.ID, foreignRoutes[0].ID)
+	assertEqual(t, "foreign tunnel route comment", "cfzt-live-smoke-foreign-route", foreignRoutes[0].Comment)
+
 	t.Log("live Cloudflare smoke passed")
 }
 
@@ -207,24 +242,28 @@ func loadSmokeConfig(t *testing.T) smokeConfig {
 	runSuffix := runID + "-" + runAttempt
 
 	cfg := smokeConfig{
-		operatorNamespace: envDefault("OPERATOR_NAMESPACE", "cfzt-system"),
-		smokeNamespace:    envDefault("SMOKE_NAMESPACE", "cfzt-smoke"),
-		repoRoot:          repoRoot(t),
-		releaseTag:        releaseTag,
-		version:           version,
-		runSuffix:         runSuffix,
-		tunnelName:        "cfzt-smoke-" + runSuffix,
-		accessPolicy:      "cfzt-smoke-policy-" + runSuffix,
-		publicHostname:    "public-" + runSuffix + "." + testZone,
-		accessHostname:    "access-" + runSuffix + "." + testZone,
-		conflictHostname:  "conflict-" + runSuffix + "." + testZone,
-		chartRef:          envDefault("CHART_REF", "oci://ghcr.io/andrewreid/charts/cfzt-operator"),
-		imageRepository:   envDefault("IMAGE_REPOSITORY", "ghcr.io/andrewreid/cfzt-operator"),
-		imageTag:          envDefault("IMAGE_TAG", releaseTag),
-		accountID:         requiredEnv(t, "CF_ACCOUNT_ID"),
-		apiToken:          requiredEnv(t, "CF_API_TOKEN"),
-		testZone:          testZone,
-		zoneID:            os.Getenv("CF_ZONE_ID"),
+		operatorNamespace:       envDefault("OPERATOR_NAMESPACE", "cfzt-system"),
+		smokeNamespace:          envDefault("SMOKE_NAMESPACE", "cfzt-smoke"),
+		repoRoot:                repoRoot(t),
+		releaseTag:              releaseTag,
+		version:                 version,
+		runSuffix:               runSuffix,
+		tunnelName:              "cfzt-smoke-" + runSuffix,
+		accessPolicy:            "cfzt-smoke-policy-" + runSuffix,
+		tunnelRoute:             "cfzt-smoke-route-" + runSuffix,
+		tunnelRouteConflict:     "cfzt-smoke-route-conflict-" + runSuffix,
+		publicHostname:          "public-" + runSuffix + "." + testZone,
+		accessHostname:          "access-" + runSuffix + "." + testZone,
+		conflictHostname:        "conflict-" + runSuffix + "." + testZone,
+		tunnelRouteCIDR:         envDefault("CF_SMOKE_ROUTE_CIDR", "100.64.207.0/24"),
+		tunnelRouteConflictCIDR: envDefault("CF_SMOKE_ROUTE_CONFLICT_CIDR", "100.64.208.0/24"),
+		chartRef:                envDefault("CHART_REF", "oci://ghcr.io/andrewreid/charts/cfzt-operator"),
+		imageRepository:         envDefault("IMAGE_REPOSITORY", "ghcr.io/andrewreid/cfzt-operator"),
+		imageTag:                envDefault("IMAGE_TAG", releaseTag),
+		accountID:               requiredEnv(t, "CF_ACCOUNT_ID"),
+		apiToken:                requiredEnv(t, "CF_API_TOKEN"),
+		testZone:                testZone,
+		zoneID:                  os.Getenv("CF_ZONE_ID"),
 	}
 	maskSecret(cfg.accountID)
 	maskSecret(cfg.apiToken)
@@ -276,6 +315,7 @@ func (h *smokeHarness) installOperator() {
 	h.ensureNamespace(h.cfg.operatorNamespace)
 	h.ensureNamespace(h.cfg.smokeNamespace)
 	h.ensureCredentialsSecret()
+	h.applyLocalChartCRDs()
 	args := []string{"upgrade", "--install", operatorReleaseName, h.cfg.chartRef,
 		"--namespace", h.cfg.operatorNamespace,
 		"--create-namespace",
@@ -290,6 +330,36 @@ func (h *smokeHarness) installOperator() {
 	}
 	h.run("helm", args...)
 	h.restartOperator()
+}
+
+func (h *smokeHarness) applyLocalChartCRDs() {
+	chartDir, ok := h.localChartDir()
+	if !ok {
+		return
+	}
+	crdDir := filepath.Join(chartDir, "crds")
+	info, err := os.Stat(crdDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return
+		}
+		h.t.Fatalf("stat local chart CRD directory: %v", err)
+	}
+	if !info.IsDir() {
+		return
+	}
+	h.t.Logf("applying local chart CRDs from %s", crdDir)
+	h.run("kubectl", "apply", "-f", crdDir)
+}
+
+func (h *smokeHarness) localChartDir() (string, bool) {
+	if !isLocalChartRef(h.cfg.chartRef) {
+		return "", false
+	}
+	if filepath.IsAbs(h.cfg.chartRef) {
+		return h.cfg.chartRef, true
+	}
+	return filepath.Clean(filepath.Join(h.cfg.repoRoot, h.cfg.chartRef)), true
 }
 
 func (h *smokeHarness) deployEcho() {
@@ -392,6 +462,38 @@ func (h *smokeHarness) tunnelObject() *cfztv1alpha1.CloudflareTunnel {
 	}
 }
 
+func (h *smokeHarness) createTunnelRoute() {
+	route := h.tunnelRouteObject(h.cfg.tunnelRoute, h.cfg.tunnelRouteCIDR)
+	if err := h.k8s.Create(h.ctx, route); err != nil && !apierrors.IsAlreadyExists(err) {
+		h.t.Fatalf("create CloudflareTunnelRoute: %v", err)
+	}
+}
+
+func (h *smokeHarness) updateTunnelRouteNoop() {
+	var route cfztv1alpha1.CloudflareTunnelRoute
+	h.get(types.NamespacedName{Name: h.cfg.tunnelRoute}, &route)
+	route.Spec = h.tunnelRouteObject(h.cfg.tunnelRoute, h.cfg.tunnelRouteCIDR).Spec
+	must(h.t, h.k8s.Update(h.ctx, &route), "update CloudflareTunnelRoute")
+}
+
+func (h *smokeHarness) createConflictTunnelRoute() {
+	route := h.tunnelRouteObject(h.cfg.tunnelRouteConflict, h.cfg.tunnelRouteConflictCIDR)
+	if err := h.k8s.Create(h.ctx, route); err != nil && !apierrors.IsAlreadyExists(err) {
+		h.t.Fatalf("create conflict CloudflareTunnelRoute: %v", err)
+	}
+}
+
+func (h *smokeHarness) tunnelRouteObject(name, network string) *cfztv1alpha1.CloudflareTunnelRoute {
+	return &cfztv1alpha1.CloudflareTunnelRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec: cfztv1alpha1.CloudflareTunnelRouteSpec{
+			TunnelRef: cfztv1alpha1.TunnelRouteTunnelRef{Name: h.cfg.tunnelName},
+			Network:   network,
+			Comment:   "live smoke",
+		},
+	}
+}
+
 func (h *smokeHarness) createExposures() {
 	for _, exposure := range []*cfztv1alpha1.CloudflareExposure{h.publicExposureObject(), h.accessExposureObject()} {
 		if err := h.k8s.Create(h.ctx, exposure); err != nil && !apierrors.IsAlreadyExists(err) {
@@ -476,6 +578,35 @@ func (h *smokeHarness) waitExposureReady(name string, timeout time.Duration) cfz
 		return ready != nil && ready.Status == metav1.ConditionTrue && ready.ObservedGeneration == exposure.Generation, nil
 	})
 	return exposure
+}
+
+func (h *smokeHarness) waitTunnelRouteReady(timeout time.Duration) cfztv1alpha1.CloudflareTunnelRoute {
+	var route cfztv1alpha1.CloudflareTunnelRoute
+	h.waitFor("CloudflareTunnelRoute ready", timeout, func() (bool, error) {
+		if err := h.k8s.Get(h.ctx, types.NamespacedName{Name: h.cfg.tunnelRoute}, &route); err != nil {
+			return false, client.IgnoreNotFound(err)
+		}
+		ready := meta.FindStatusCondition(route.Status.Conditions, conditionReady)
+		return route.Status.RouteId != "" && ready != nil && ready.Status == metav1.ConditionTrue && ready.ObservedGeneration == route.Generation, nil
+	})
+	return route
+}
+
+func (h *smokeHarness) waitTunnelRouteForeignReason(timeout time.Duration) string {
+	var reason string
+	h.waitFor("CloudflareTunnelRoute foreign conflict", timeout, func() (bool, error) {
+		var route cfztv1alpha1.CloudflareTunnelRoute
+		if err := h.k8s.Get(h.ctx, types.NamespacedName{Name: h.cfg.tunnelRouteConflict}, &route); err != nil {
+			return false, client.IgnoreNotFound(err)
+		}
+		ready := meta.FindStatusCondition(route.Status.Conditions, conditionReady)
+		if ready == nil {
+			return false, nil
+		}
+		reason = ready.Reason
+		return reason == reasonForeignRoute, nil
+	})
+	return reason
 }
 
 func (h *smokeHarness) waitExposureConflictReason(name string, timeout time.Duration) string {
@@ -577,6 +708,31 @@ func (h *smokeHarness) assertOneAccessPolicy(policyID string) {
 	assertEqual(h.t, "managed Access policy ID", policyID, matches[0].ID)
 }
 
+func (h *smokeHarness) assertOneTunnelRoute(routeID, tunnelID, network string) {
+	routes := h.listTunnelRoutes(network)
+	var matches []cloudflare.TunnelRoute
+	for _, route := range routes {
+		if route.TunnelID == tunnelID {
+			matches = append(matches, route)
+		}
+	}
+	if len(matches) != 1 {
+		h.t.Fatalf("expected exactly one tunnel route for %s, got %d", network, len(matches))
+	}
+	assertEqual(h.t, "tunnel route ID", routeID, matches[0].ID)
+	if !strings.Contains(matches[0].Comment, "managed-by=cfzt source-uid=") {
+		h.t.Fatalf("tunnel route comment missing ownership tag: %q", matches[0].Comment)
+	}
+}
+
+func (h *smokeHarness) listTunnelRoutes(network string) []cloudflare.TunnelRoute {
+	routes, err := h.cf.TunnelRoutes().List(h.ctx, cloudflare.ListTunnelRoutesFilter{Network: network})
+	if err != nil {
+		h.t.Fatalf("list tunnel routes for %s: %v", network, err)
+	}
+	return routes
+}
+
 func (h *smokeHarness) restartOperator() {
 	var deploy appsv1.Deployment
 	h.get(types.NamespacedName{Namespace: h.cfg.operatorNamespace, Name: operatorReleaseName}, &deploy)
@@ -600,6 +756,12 @@ func (h *smokeHarness) cleanup() {
 	h.waitObjectAbsent(cleanupCtx, &cfztv1alpha1.CloudflareExposure{}, types.NamespacedName{Name: accessExposure, Namespace: h.cfg.smokeNamespace}, 5*time.Minute)
 	h.waitObjectAbsent(cleanupCtx, &cfztv1alpha1.CloudflareExposure{}, types.NamespacedName{Name: conflictExposure, Namespace: h.cfg.smokeNamespace}, 5*time.Minute)
 
+	h.t.Log("cleanup: deleting CloudflareTunnelRoute resources")
+	h.deleteObject(cleanupCtx, &cfztv1alpha1.CloudflareTunnelRoute{ObjectMeta: metav1.ObjectMeta{Name: h.cfg.tunnelRoute}})
+	h.deleteObject(cleanupCtx, &cfztv1alpha1.CloudflareTunnelRoute{ObjectMeta: metav1.ObjectMeta{Name: h.cfg.tunnelRouteConflict}})
+	h.waitObjectAbsent(cleanupCtx, &cfztv1alpha1.CloudflareTunnelRoute{}, types.NamespacedName{Name: h.cfg.tunnelRoute}, 5*time.Minute)
+	h.waitObjectAbsent(cleanupCtx, &cfztv1alpha1.CloudflareTunnelRoute{}, types.NamespacedName{Name: h.cfg.tunnelRouteConflict}, 5*time.Minute)
+
 	h.t.Log("cleanup: deleting CloudflareAccessPolicy")
 	h.deleteObject(cleanupCtx, &cfztv1alpha1.CloudflareAccessPolicy{ObjectMeta: metav1.ObjectMeta{Name: h.cfg.accessPolicy}})
 	h.waitObjectAbsent(cleanupCtx, &cfztv1alpha1.CloudflareAccessPolicy{}, types.NamespacedName{Name: h.cfg.accessPolicy}, 5*time.Minute)
@@ -614,11 +776,29 @@ func (h *smokeHarness) cleanup() {
 			h.t.Errorf("delete foreign DNS record: %v", err)
 		}
 	}
+	if h.foreignRouteID != "" {
+		h.t.Log("cleanup: deleting foreign conflict tunnel route")
+		if err := h.cf.TunnelRoutes().Delete(cleanupCtx, h.foreignRouteID); err != nil && !errors.Is(err, cloudflare.ErrNotFound) {
+			h.t.Errorf("delete foreign tunnel route: %v", err)
+		}
+	}
 	h.waitDNSAbsent(cleanupCtx, "public DNS record", h.cfg.publicHostname, 3*time.Minute)
 	h.waitDNSAbsent(cleanupCtx, "access DNS record", h.cfg.accessHostname, 3*time.Minute)
+	h.waitTunnelRouteAbsent(cleanupCtx, "tunnel route", h.cfg.tunnelRouteCIDR, 3*time.Minute)
 	h.waitAccessApplicationsAbsent(cleanupCtx, 3*time.Minute)
 	h.waitAccessPolicyAbsent(cleanupCtx, 3*time.Minute)
 	h.waitTunnelAbsent(cleanupCtx, 3*time.Minute)
+}
+
+func (h *smokeHarness) waitTunnelRouteAbsent(ctx context.Context, description, network string, timeout time.Duration) {
+	h.waitForContext(ctx, description+" absent", timeout, func() (bool, error) {
+		routes, err := h.cf.TunnelRoutes().List(ctx, cloudflare.ListTunnelRoutesFilter{Network: network})
+		if err != nil {
+			return false, err
+		}
+		return len(routes) == 0, nil
+	})
+	h.t.Log(description + " absent")
 }
 
 func (h *smokeHarness) waitDNSAbsent(ctx context.Context, description, hostname string, timeout time.Duration) {

@@ -15,6 +15,7 @@ const (
 	exposureIndexTunnelRefName = "spec.tunnelRef.name"
 	exposureIndexHostname      = "spec.hostname"
 	exposureIndexPolicyRefName = "spec.access.policyRef.name"
+	tunnelRouteIndexTunnelRef  = "spec.tunnelRef.name"
 )
 
 func indexCloudflareExposureFields(ctx context.Context, mgr ctrl.Manager) error {
@@ -44,6 +45,35 @@ func indexCloudflareExposureFields(ctx context.Context, mgr ctrl.Manager) error 
 		}
 		return []string{exposure.Spec.Access.PolicyRef.Name}
 	})
+}
+
+func indexCloudflareTunnelRouteFields(ctx context.Context, mgr ctrl.Manager) error {
+	return mgr.GetFieldIndexer().IndexField(ctx, &cfztv1alpha1.CloudflareTunnelRoute{}, tunnelRouteIndexTunnelRef, func(obj client.Object) []string {
+		route := obj.(*cfztv1alpha1.CloudflareTunnelRoute)
+		if route.Spec.TunnelRef.Name == "" {
+			return nil
+		}
+		return []string{route.Spec.TunnelRef.Name}
+	})
+}
+
+func listCloudflareTunnelRoutesByField(ctx context.Context, c client.Client, field, value string, keep func(cfztv1alpha1.CloudflareTunnelRoute) bool) ([]cfztv1alpha1.CloudflareTunnelRoute, error) {
+	var list cfztv1alpha1.CloudflareTunnelRouteList
+	if err := c.List(ctx, &list, client.MatchingFields{field: value}); err != nil {
+		if !isFieldIndexUnavailable(err) {
+			return nil, err
+		}
+		if err := c.List(ctx, &list); err != nil {
+			return nil, err
+		}
+	}
+	out := make([]cfztv1alpha1.CloudflareTunnelRoute, 0, len(list.Items))
+	for _, route := range list.Items {
+		if keep(route) {
+			out = append(out, route)
+		}
+	}
+	return out, nil
 }
 
 func listCloudflareExposuresByField(ctx context.Context, c client.Client, field, value string, keep func(cfztv1alpha1.CloudflareExposure) bool) ([]cfztv1alpha1.CloudflareExposure, error) {

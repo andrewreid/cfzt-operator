@@ -157,6 +157,19 @@ func (r *CloudflareTunnelReconciler) reconcileDelete(ctx context.Context, tunnel
 		r.event(tunnel, corev1.EventTypeWarning, EventBlockedByExposures, "Deletion blocked by %d CloudflareExposure resources", len(exposures))
 		return ctrl.Result{}, nil
 	}
+	routes, err := r.referencingRoutes(ctx, tunnel.Name)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if len(routes) > 0 {
+		setCondition(&tunnel.Status.Conditions, ConditionReady, metav1.ConditionFalse, ReasonBlockedByRoutes, "CloudflareTunnel still has referencing CloudflareTunnelRoutes", tunnel.Generation)
+		setCondition(&tunnel.Status.Conditions, ConditionProgressing, metav1.ConditionTrue, ReasonBlockedByRoutes, "waiting for CloudflareTunnelRoutes to be deleted", tunnel.Generation)
+		if err := r.Status().Update(ctx, tunnel); err != nil {
+			return ctrl.Result{}, err
+		}
+		r.event(tunnel, corev1.EventTypeWarning, EventBlockedByRoutes, "Deletion blocked by %d CloudflareTunnelRoute resources", len(routes))
+		return ctrl.Result{}, nil
+	}
 	waitingForWorkload, err := r.ensureCloudflaredStopped(ctx, tunnel)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -222,6 +235,12 @@ func (r *CloudflareTunnelReconciler) ensureCloudflaredStopped(ctx context.Contex
 func (r *CloudflareTunnelReconciler) referencingExposures(ctx context.Context, tunnelName string) ([]cfztv1alpha1.CloudflareExposure, error) {
 	return listCloudflareExposuresByField(ctx, r.Client, exposureIndexTunnelRefName, tunnelName, func(exposure cfztv1alpha1.CloudflareExposure) bool {
 		return exposure.Spec.TunnelRef.Name == tunnelName
+	})
+}
+
+func (r *CloudflareTunnelReconciler) referencingRoutes(ctx context.Context, tunnelName string) ([]cfztv1alpha1.CloudflareTunnelRoute, error) {
+	return listCloudflareTunnelRoutesByField(ctx, r.Client, tunnelRouteIndexTunnelRef, tunnelName, func(route cfztv1alpha1.CloudflareTunnelRoute) bool {
+		return route.Spec.TunnelRef.Name == tunnelName
 	})
 }
 
@@ -445,6 +464,7 @@ func (r *CloudflareTunnelReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Secret{}).
 		Owns(&appsv1.DaemonSet{}).
 		Watches(&cfztv1alpha1.CloudflareExposure{}, handler.EnqueueRequestsFromMapFunc(exposureToTunnel)).
+		Watches(&cfztv1alpha1.CloudflareTunnelRoute{}, handler.EnqueueRequestsFromMapFunc(routeToTunnel)).
 		Named("cloudflaretunnel").
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 		Complete(r)

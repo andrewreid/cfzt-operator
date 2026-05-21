@@ -80,6 +80,10 @@ func (c *RealClient) AccessPolicies() AccessPolicies {
 	return &realAccessPolicies{client: c}
 }
 
+func (c *RealClient) TunnelRoutes() TunnelRoutes {
+	return &realTunnelRoutes{client: c}
+}
+
 func (c *RealClient) DNSRecords() DNSRecords {
 	return &realDNSRecords{client: c}
 }
@@ -233,6 +237,146 @@ func (t *realTunnels) Token(ctx context.Context, id string) (string, error) {
 
 type realConfigurations struct {
 	client *RealClient
+}
+
+type realTunnelRoutes struct {
+	client *RealClient
+}
+
+func (r *realTunnelRoutes) List(ctx context.Context, filter ListTunnelRoutesFilter) ([]TunnelRoute, error) {
+	params := zero_trust.NetworkRouteListParams{
+		AccountID: cf.F(r.client.accountID),
+		IsDeleted: cf.F(false),
+		TunTypes: cf.F([]zero_trust.NetworkRouteListParamsTunType{
+			zero_trust.NetworkRouteListParamsTunTypeCfdTunnel,
+		}),
+	}
+	if filter.Network != "" {
+		params.NetworkSubset = cf.F(filter.Network)
+		params.NetworkSuperset = cf.F(filter.Network)
+	}
+	if filter.TunnelID != "" {
+		params.TunnelID = cf.F(filter.TunnelID)
+	}
+	if filter.VirtualNetworkID != "" {
+		params.VirtualNetworkID = cf.F(filter.VirtualNetworkID)
+	}
+
+	var results []TunnelRoute
+	err := r.client.withRetry(ctx, func() error {
+		pager := r.client.api.ZeroTrust.Networks.Routes.ListAutoPaging(ctx, params)
+		results = results[:0]
+		for pager.Next() {
+			item := pager.Current()
+			if filter.Network != "" && item.Network != filter.Network {
+				continue
+			}
+			results = append(results, TunnelRoute{
+				ID:               item.ID,
+				Network:          item.Network,
+				TunnelID:         item.TunnelID,
+				VirtualNetworkID: item.VirtualNetworkID,
+				Comment:          item.Comment,
+			})
+		}
+		return pager.Err()
+	})
+	return results, err
+}
+
+func (r *realTunnelRoutes) Create(ctx context.Context, in TunnelRouteInput) (*TunnelRoute, error) {
+	params := zero_trust.NetworkRouteNewParams{
+		AccountID: cf.F(r.client.accountID),
+		Network:   cf.F(in.Network),
+		TunnelID:  cf.F(in.TunnelID),
+		Comment:   cf.F(in.Comment),
+	}
+	if in.VirtualNetworkID != "" {
+		params.VirtualNetworkID = cf.F(in.VirtualNetworkID)
+	}
+	var result *TunnelRoute
+	err := r.client.withRetry(ctx, func() error {
+		resp, err := r.client.api.ZeroTrust.Networks.Routes.New(ctx, params)
+		if err != nil {
+			return err
+		}
+		result = routeFromSDK(resp)
+		return nil
+	})
+	return result, err
+}
+
+func (r *realTunnelRoutes) Get(ctx context.Context, id string) (*TunnelRoute, error) {
+	var result *TunnelRoute
+	err := r.client.withRetry(ctx, func() error {
+		resp, err := r.client.api.ZeroTrust.Networks.Routes.Get(ctx, id, zero_trust.NetworkRouteGetParams{
+			AccountID: cf.F(r.client.accountID),
+		})
+		if err != nil {
+			var apiErr *cf.Error
+			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+				return ErrNotFound
+			}
+			return err
+		}
+		result = routeFromSDK(resp)
+		return nil
+	})
+	return result, err
+}
+
+func (r *realTunnelRoutes) Edit(ctx context.Context, id string, in TunnelRouteInput) (*TunnelRoute, error) {
+	params := zero_trust.NetworkRouteEditParams{
+		AccountID: cf.F(r.client.accountID),
+		Network:   cf.F(in.Network),
+		TunnelID:  cf.F(in.TunnelID),
+		Comment:   cf.F(in.Comment),
+	}
+	if in.VirtualNetworkID != "" {
+		params.VirtualNetworkID = cf.F(in.VirtualNetworkID)
+	}
+	var result *TunnelRoute
+	err := r.client.withRetry(ctx, func() error {
+		resp, err := r.client.api.ZeroTrust.Networks.Routes.Edit(ctx, id, params)
+		if err != nil {
+			var apiErr *cf.Error
+			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+				return ErrNotFound
+			}
+			return err
+		}
+		result = routeFromSDK(resp)
+		return nil
+	})
+	return result, err
+}
+
+func (r *realTunnelRoutes) Delete(ctx context.Context, id string) error {
+	return r.client.withRetry(ctx, func() error {
+		_, err := r.client.api.ZeroTrust.Networks.Routes.Delete(ctx, id, zero_trust.NetworkRouteDeleteParams{
+			AccountID: cf.F(r.client.accountID),
+		})
+		if err != nil {
+			var apiErr *cf.Error
+			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+				return ErrNotFound
+			}
+		}
+		return err
+	})
+}
+
+func routeFromSDK(route *zero_trust.Route) *TunnelRoute {
+	if route == nil {
+		return nil
+	}
+	return &TunnelRoute{
+		ID:               route.ID,
+		Network:          route.Network,
+		TunnelID:         route.TunnelID,
+		VirtualNetworkID: route.VirtualNetworkID,
+		Comment:          route.Comment,
+	}
 }
 
 func (c *realConfigurations) Get(ctx context.Context, tunnelID string) (*TunnelConfiguration, error) {

@@ -634,7 +634,8 @@ func sourceUIDTags(uid types.UID) []string {
 }
 
 func ownedByComment(comment string, uid types.UID) bool {
-	found, ok := naming.ParseOwnershipTag(comment)
+	prefix, _, _ := strings.Cut(comment, " | ")
+	found, ok := naming.ParseOwnershipTag(prefix)
 	return ok && found == uid
 }
 

@@ -8,8 +8,9 @@ import (
 )
 
 const (
-	tagManagedBy = "managed-by=cfzt-operator"
-	tagSourceUID = "source-uid="
+	tagManagedBy        = "managed-by=cfzt-operator"
+	tagManagedByCompact = "managed-by=cfzt"
+	tagSourceUID        = "source-uid="
 )
 
 // OwnershipTag returns the canonical operator tag string for a CR UID.
@@ -17,6 +18,12 @@ const (
 // and is stable across versions so ParseOwnershipTag can always decode it.
 func OwnershipTag(uid types.UID) string {
 	return fmt.Sprintf("%s %s%s", tagManagedBy, tagSourceUID, uid)
+}
+
+// CompactOwnershipTag returns the short ownership text used where Cloudflare
+// enforces very small comment limits.
+func CompactOwnershipTag(uid types.UID) string {
+	return fmt.Sprintf("%s %s%s", tagManagedByCompact, tagSourceUID, uid)
 }
 
 // ParseOwnershipTag returns (uid, ok). ok=false when the string is not an
@@ -29,7 +36,7 @@ func ParseOwnershipTag(s string) (types.UID, bool) {
 	uid := ""
 
 	for _, f := range fields {
-		if f == tagManagedBy {
+		if f == tagManagedBy || f == tagManagedByCompact {
 			hasManagedBy = true
 			continue
 		}

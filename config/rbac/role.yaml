@@ -58,6 +58,7 @@ rules:
   resources:
   - cloudflareaccesspolicies
   - cloudflareexposures
+  - cloudflaretunnelroutes
   - cloudflaretunnels
   verbs:
   - create
@@ -72,6 +73,7 @@ rules:
   resources:
   - cloudflareaccesspolicies/finalizers
   - cloudflareexposures/finalizers
+  - cloudflaretunnelroutes/finalizers
   - cloudflaretunnels/finalizers
   verbs:
   - update
@@ -80,6 +82,7 @@ rules:
   resources:
   - cloudflareaccesspolicies/status
   - cloudflareexposures/status
+  - cloudflaretunnelroutes/status
   - cloudflaretunnels/status
   verbs:
   - get

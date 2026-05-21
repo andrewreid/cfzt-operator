@@ -23,6 +23,7 @@ type Client interface {
 	AccessApplications() AccessApplications
 	AccessTags() AccessTags
 	AccessPolicies() AccessPolicies
+	TunnelRoutes() TunnelRoutes
 	DNSRecords() DNSRecords
 	Zones() Zones
 }

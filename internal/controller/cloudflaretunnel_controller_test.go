@@ -220,6 +220,23 @@ var _ = Describe("CloudflareTunnel Controller", func() {
 		}).Should(Succeed())
 	})
 
+	It("TestTunnelBlockedByRoutes", func() {
+		tunnel := createTunnel(ctx, "route-blocked-tunnel", "route-blocked")
+		createCredentials(ctx)
+		reconcileTunnel(ctx, reconciler, tunnel.Name)
+		_ = createTunnelRoute(ctx, "route-blocking-delete", tunnel.Name, "172.16.200.0/24")
+		current := fetchTunnel(ctx, tunnel.Name)
+
+		Expect(k8sClient.Delete(ctx, current)).To(Succeed())
+		reconcileTunnel(ctx, reconciler, tunnel.Name)
+
+		blocked := fetchTunnel(ctx, tunnel.Name)
+		Expect(blocked.Finalizers).To(ContainElement(naming.Finalizer))
+		Expect(meta.FindStatusCondition(blocked.Status.Conditions, ConditionReady).Reason).To(Equal(ReasonBlockedByRoutes))
+		_, err := fakeCF.Tunnels().Get(ctx, blocked.Status.TunnelId)
+		Expect(err).NotTo(HaveOccurred())
+	})
+
 	It("TestTunnelConditionsTransition", func() {
 		tunnel := createTunnel(ctx, "condition-tunnel", "condition-me")
 		_ = k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "cloudflare-credentials", Namespace: namespace}})

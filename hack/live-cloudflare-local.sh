@@ -18,6 +18,10 @@ Docker runtime:
   LOCAL_DOCKER_RUNTIME=auto|colima|docker  default: auto
   COLIMA_PROFILE=default                   default: default
   COLIMA_START_ARGS="--cpu 4 --memory 8"   optional extra start args
+
+Route smoke overrides:
+  CF_SMOKE_ROUTE_CIDR=100.64.207.0/24
+  CF_SMOKE_ROUTE_CONFLICT_CIDR=100.64.208.0/24
 EOF
 }
 

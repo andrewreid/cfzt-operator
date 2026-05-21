@@ -23,6 +23,11 @@ const (
 	ReasonDNSWriteFailed     = "DNSWriteFailed"
 	ReasonBlockedByExposures = "BlockedByExposures"
 	ReasonForeignPolicy      = "ForeignPolicy"
+	ReasonTunnelNotReady     = "TunnelNotReady"
+	ReasonNetworkInvalid     = "NetworkInvalid"
+	ReasonForeignRoute       = "ForeignRoute"
+	ReasonRouteWriteFailed   = "RouteWriteFailed"
+	ReasonBlockedByRoutes    = "BlockedByRoutes"
 	ReasonUnsupportedDrift   = "UnsupportedDrift"
 	ReasonReconciled         = "Reconciled"
 
@@ -35,6 +40,10 @@ const (
 	EventReconcileFailed     = "ReconcileFailed"
 	EventTokenRotated        = "TokenRotated"
 	EventBlockedByExposures  = "BlockedByExposures"
+	EventCreatedRoute        = "CreatedRoute"
+	EventDeletedRoute        = "DeletedRoute"
+	EventForeignRoute        = "ForeignRoute"
+	EventBlockedByRoutes     = "BlockedByRoutes"
 )
 
 func setCondition(conditions *[]metav1.Condition, conditionType string, status metav1.ConditionStatus, reason, message string, observedGeneration int64) {

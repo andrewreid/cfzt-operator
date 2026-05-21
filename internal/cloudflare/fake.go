@@ -21,6 +21,7 @@ type FakeClient struct {
 	accessTags                map[string]bool
 	accessPolicies            map[string]*AccessPolicy
 	unsupportedAccessPolicies map[string]bool
+	tunnelRoutes              map[string]*TunnelRoute
 	dnsRecords                map[string]*DNSRecord
 	zones                     map[string]*Zone
 	zoneCache                 []Zone
@@ -38,6 +39,7 @@ func NewFake() *FakeClient {
 		accessTags:                make(map[string]bool),
 		accessPolicies:            make(map[string]*AccessPolicy),
 		unsupportedAccessPolicies: make(map[string]bool),
+		tunnelRoutes:              make(map[string]*TunnelRoute),
 		dnsRecords:                make(map[string]*DNSRecord),
 		zones:                     make(map[string]*Zone),
 	}
@@ -68,6 +70,10 @@ func (f *FakeClient) AccessTags() AccessTags {
 
 func (f *FakeClient) AccessPolicies() AccessPolicies {
 	return &fakeAccessPolicies{fc: f}
+}
+
+func (f *FakeClient) TunnelRoutes() TunnelRoutes {
+	return &fakeTunnelRoutes{fc: f}
 }
 
 func (f *FakeClient) DNSRecords() DNSRecords {
@@ -259,6 +265,81 @@ func (a *fakeAccessApplications) Delete(_ context.Context, id string) error {
 
 type fakeDNSRecords struct {
 	fc *FakeClient
+}
+
+type fakeTunnelRoutes struct {
+	fc *FakeClient
+}
+
+func (r *fakeTunnelRoutes) List(_ context.Context, filter ListTunnelRoutesFilter) ([]TunnelRoute, error) {
+	r.fc.mu.Lock()
+	defer r.fc.mu.Unlock()
+	var out []TunnelRoute
+	for _, route := range r.fc.tunnelRoutes {
+		if filter.Network != "" && route.Network != filter.Network {
+			continue
+		}
+		if filter.TunnelID != "" && route.TunnelID != filter.TunnelID {
+			continue
+		}
+		if filter.VirtualNetworkID != "" && route.VirtualNetworkID != filter.VirtualNetworkID {
+			continue
+		}
+		out = append(out, *route)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
+}
+
+func (r *fakeTunnelRoutes) Create(_ context.Context, in TunnelRouteInput) (*TunnelRoute, error) {
+	r.fc.mu.Lock()
+	defer r.fc.mu.Unlock()
+	id := uuid.New().String()
+	route := &TunnelRoute{ID: id}
+	applyTunnelRoute(route, in)
+	r.fc.tunnelRoutes[id] = route
+	copy := *route
+	return &copy, nil
+}
+
+func (r *fakeTunnelRoutes) Get(_ context.Context, id string) (*TunnelRoute, error) {
+	r.fc.mu.Lock()
+	defer r.fc.mu.Unlock()
+	route, ok := r.fc.tunnelRoutes[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	copy := *route
+	return &copy, nil
+}
+
+func (r *fakeTunnelRoutes) Edit(_ context.Context, id string, in TunnelRouteInput) (*TunnelRoute, error) {
+	r.fc.mu.Lock()
+	defer r.fc.mu.Unlock()
+	route, ok := r.fc.tunnelRoutes[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	applyTunnelRoute(route, in)
+	copy := *route
+	return &copy, nil
+}
+
+func (r *fakeTunnelRoutes) Delete(_ context.Context, id string) error {
+	r.fc.mu.Lock()
+	defer r.fc.mu.Unlock()
+	if _, ok := r.fc.tunnelRoutes[id]; !ok {
+		return ErrNotFound
+	}
+	delete(r.fc.tunnelRoutes, id)
+	return nil
+}
+
+func applyTunnelRoute(route *TunnelRoute, in TunnelRouteInput) {
+	route.Network = in.Network
+	route.TunnelID = in.TunnelID
+	route.VirtualNetworkID = in.VirtualNetworkID
+	route.Comment = in.Comment
 }
 
 func (d *fakeDNSRecords) List(_ context.Context, zoneID, name, recordType string) ([]DNSRecord, error) {

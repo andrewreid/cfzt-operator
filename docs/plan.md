@@ -2,9 +2,11 @@
 
 ## 1. Context
 
-Operational plan for shipping the cfzt-operator MVP in four slices (Tunnel/connector → Exposure → sourceRef derivation → managed Access policies). Source of truth for architecture, decisions D1–D24, CRD shapes, RBAC, and DoD lists is `spec.md`. Operating handbook (bootstrap, commands, RTK, delegation, code rules) is `AGENTS.md`. This plan turns those into ordered, single-session subtasks with cited spec sections and test names.
+Operational plan for shipping the cfzt-operator MVP in five slices (Tunnel/connector → Exposure → sourceRef derivation → managed Access policies → private network CIDR routes). Source of truth for architecture, decisions D1–D25, CRD shapes, RBAC, and DoD lists is `spec.md`. Operating handbook (bootstrap, commands, delegation, code rules) is `AGENTS.md`. This plan turns those into ordered, single-session subtasks with cited spec sections and test names.
 
 Slice 4 (`CloudflareAccessPolicy` CRD, D24) added under `## 3. Slice plan` after Slice 3 ships — managed Access policies are now in scope per `spec.md ## Decisions` D24.
+
+Slice 5 (`CloudflareTunnelRoute` CRD, D25) added under `## 3. Slice plan` after Slice 4 ships — private network CIDR routes are now in scope per `spec.md ## Decisions` D25.
 
 Not covered: post-MVP work (annotation UX, Ingress source, WARP, Gateway, OLM, multi-cluster, additional Access rule types beyond Slice 4 subset). Decisions are not re-derived here — see `spec.md ## Decisions`.
 
@@ -26,7 +28,7 @@ Completed on 2026-05-19:
   so credentials Secret namespace is derived from `spec.cloudflared.namespace`
   instead of duplicated under `credentialsSecretRef`; image `:latest`
   validation uses bounded `endsWith` CEL. The CRD post-processing helper was
-  removed. `rtk make test` is green.
+  removed. `make test` is green.
 - Subtask 2: `internal/cloudflare` interface + fake (client.go, tunnels.go,
   real.go, fake.go, fake_test.go). cloudflare-go/v4 v4.6.0 added. SDK does
   not surface tunnel `comment` field — D9 amended (see spec) to track
@@ -47,7 +49,7 @@ Completed on 2026-05-19:
 - Subtask 9: Helm CRDs synced from `config/crd/bases` into
   `charts/cfzt-operator/crds/`; chart lint and template render pass; NOTES
   credential example now includes both `accountId` and `apiToken`;
-  `rtk make test` is green.
+  `make test` is green.
 
 Completed on 2026-05-19:
 - Slice 2 subtasks 1-10: `CloudflareExposure` API + CRD validation, deterministic
@@ -89,7 +91,7 @@ Completed on 2026-05-20:
   spec.md:506). Tests `TestFakeAccessPolicyCreateGetDelete`,
   `TestFakeAccessPolicyListByName`,
   `TestFakeAccessPolicyUpdateRulesIdempotent` cover round-trip,
-  client-side name filtering, and update idempotence. `rtk make test`
+  client-side name filtering, and update idempotence. `make test`
   green.
 - Slice 4 subtask 2: `CloudflareExposure.spec.access.policyRef.name` added
   (RFC 1123 subdomain pattern, maxLength 253) and the access CEL rule
@@ -97,7 +99,7 @@ Completed on 2026-05-20:
   when `access.enabled: true`. `TestExposurePolicyRefOneOfValidation`
   covers uuid-alone, name-alone, both-set reject, neither-set-when-enabled
   reject. Existing "requires policy UUID" test message string updated to
-  match the new CEL message. `rtk make test` green.
+  match the new CEL message. `make test` green.
 - Slice 4 subtask 1: `CloudflareAccessPolicy` cluster-scoped types +
   CRD validation markers (`api/v1alpha1/cloudflareaccesspolicy_types.go`).
   CRD generated at `config/crd/bases/cfzt.reid.ee_cloudflareaccesspolicies.yaml`.
@@ -111,7 +113,7 @@ Completed on 2026-05-20:
   estimator budget. `TestCloudflareAccessPolicyCRDValidation` covers valid
   manifest, decision-enum reject, two-field-rule reject, zero-field-rule
   reject, empty-rules reject, bad `sessionDuration`, missing
-  `credentialsSecretRef.namespace`, missing `decision`. `rtk make test`
+  `credentialsSecretRef.namespace`, missing `decision`. `make test`
   green.
 - Slice 4 subtask 4: `CloudflareAccessPolicy` controller core added
   (`internal/controller/cloudflareaccesspolicy_controller.go`) and wired in
@@ -129,8 +131,8 @@ Completed on 2026-05-20:
   `TestAccessPolicyCreate`, `TestAccessPolicyCreateUsesSpecPolicyName`,
   `TestAccessPolicyForeignRefuses`, `TestAccessPolicyStaleStatusIDRecreates`,
   `TestAccessPolicyForeignStatusIDRefuses`,
-  `TestAccessPolicyFinalizerBlocksForeignStatusID`. `rtk make test`,
-  `rtk go test ./...`, and `rtk helm lint charts/cfzt-operator` are green.
+  `TestAccessPolicyFinalizerBlocksForeignStatusID`. `make test`,
+  `go test ./...`, and `helm lint charts/cfzt-operator` are green.
 - Slice 4 subtasks 5-9: Managed policy reconciliation is complete in
   controllers. `internal/controller/accesspolicy_hash.go` computes
   deterministic `sha256:` hashes over canonical Access rules, with rule lists
@@ -155,11 +157,38 @@ Completed on 2026-05-20:
   `TestExposurePolicyRefNameMissingPolicyCR`, and
   `TestPolicyStatusUpdatePropagatesToExposures`.
 - Slice 4 subtask 10: RBAC markers for CFAP and exposure policy reads were
-  regenerated with `rtk make manifests generate`. Helm CRDs and ClusterRole
-  were already synced in subtask 4 and remain current. `rtk make test`,
-  `rtk go test ./...`, and `rtk helm lint charts/cfzt-operator` are green.
+  regenerated with `make manifests generate`. Helm CRDs and ClusterRole
+  were already synced in subtask 4 and remain current. `make test`,
+  `go test ./...`, and `helm lint charts/cfzt-operator` are green.
 
-Next: manual live-cluster smoke for Slices 1-4 remains pending because it
+Completed on 2026-05-21:
+- Slice 5 subtasks 1-7 + 9: `CloudflareTunnelRoute` cluster-scoped API,
+  generated CRD/deepcopy/RBAC, Helm CRD sync, Cloudflare route wrapper
+  (`TunnelRoutes`) with fake + real SDK implementation, route controller
+  create/update/delete reconciliation, compact `managed-by=cfzt source-uid=...`
+  comment ownership guard, controller-side CIDR canonicalization, drift
+  correction, finalizer cleanup, Tunnel deletion blocking with
+  `Reason=BlockedByRoutes`, Route↔Tunnel cross-watches, and status/events
+  (`TunnelNotReady`, `NetworkInvalid`, `ForeignRoute`, `RouteWriteFailed`,
+  `Reconciled`, `CreatedRoute`, `DeletedRoute`, `BlockedByRoutes`). Tests added:
+  `TestCloudflareTunnelRouteCRDValidation`, `TestFakeRouteCreateGetDelete`,
+  `TestFakeRouteListByCanonicalCIDRAndVNet`,
+  `TestFakeRouteListOmitsVNetWhenUnset`, `TestFakeRouteEditIdempotent`,
+  `TestRouteCreate`, `TestRouteCreateIPv6`, `TestRouteInvalidNetwork`,
+  `TestRouteForeignRefuses`, `TestRouteTunnelNotReady`,
+  `TestRouteDriftCorrection`, `TestRouteVNetDriftCorrection`,
+  VNet-clear validation, `TestRouteEditPreflightForeignRefuses`, `TestRouteCommentDrift`,
+  `TestRouteFinalizerDeletes`, `TestRouteFinalizerLeavesForeign`,
+  `TestTunnelBlockedByRoutes`, `TestRouteConditionsTransition`, and
+  `TestRouteRetriesOnTunnelID`.
+- Slice 5 subtask 8: live Cloudflare smoke harness now creates a
+  `CloudflareTunnelRoute`, asserts CF-side route ownership, verifies
+  idempotency across operator restart, refuses a foreign route collision, and
+  cleans up both route CRs and CF routes. `hack/live-cloudflare-local.sh` and
+  `.env.live.example` document `CF_SMOKE_ROUTE_CIDR` /
+  `CF_SMOKE_ROUTE_CONFLICT_CIDR`.
+
+Next: manual live-cluster smoke for Slices 1-5 remains pending because it
 requires a Kubernetes cluster and Cloudflare credentials.
 
 ## 3. Slice plan
@@ -174,7 +203,7 @@ Per `spec.md ## Implementation slices` → Slice 1. Outcome: `CloudflareTunnel` 
    - Files: `api/v1alpha1/cloudflaretunnel_types.go`, `api/v1alpha1/groupversion_info.go`.
    - Implements: `spec.md ## CRD model` (CloudflareTunnel), `## CRD validation` (CloudflareTunnel rules including single namespace source via `spec.cloudflared.namespace`, image `:latest` reject), kubebuilder markers from spec.
    - Tests: `api/v1alpha1` round-trip deepcopy test; `TestCloudflareTunnelCRDValidation` (envtest applies bad manifests, expects rejection — covers `:latest` image case and defaulting).
-   - Run `rtk make manifests generate`; commit generated CRD + deepcopy.
+   - Run `make manifests generate`; commit generated CRD + deepcopy.
 
 2. **Scaffold `internal/cloudflare` interface + fake.**
    - Files: `internal/cloudflare/client.go` (interface), `internal/cloudflare/fake.go`, `internal/cloudflare/tunnels.go`, `internal/cloudflare/real.go` (Tunnels + Token methods only at this point).
@@ -212,9 +241,9 @@ Per `spec.md ## Implementation slices` → Slice 1. Outcome: `CloudflareTunnel` 
    - Tests: assertions woven into existing tunnel envtests; one focused `TestTunnelConditionsTransition`.
 
 9. **Helm chart sync + CI green.**
-   - Files: existing `charts/cfzt-operator/Chart.yaml`, `values.yaml`, `crds/{cloudflaretunnel,cloudflareexposure}.yaml` (copied from `config/crd` by `rtk make helm-sync-crds`), `templates/{deployment,serviceaccount,clusterrole,clusterrolebinding,role-leader-election,rolebinding-leader-election,NOTES.txt}`. `.github/workflows/ci.yaml` exercise.
+   - Files: existing `charts/cfzt-operator/Chart.yaml`, `values.yaml`, `crds/{cloudflaretunnel,cloudflareexposure}.yaml` (copied from `config/crd` by `make helm-sync-crds`), `templates/{deployment,serviceaccount,clusterrole,clusterrolebinding,role-leader-election,rolebinding-leader-election,NOTES.txt}`. `.github/workflows/ci.yaml` exercise.
    - Implements: D17 chart layout, `spec.md ## Helm chart layout`, `## RBAC` table (minus Service / HTTPRoute rows — those land in Slice 2/3), D23 NOTES.txt GitOps caveat.
-   - Tests: `rtk helm lint charts/cfzt-operator`; `rtk make manifests generate && rtk git diff --exit-code` clean in CI; `rtk make test` green.
+   - Tests: `helm lint charts/cfzt-operator`; `make manifests generate && git diff --exit-code` clean in CI; `make test` green.
 
 **Definition of done** (from `spec.md ## Implementation slices ### Slice 1`):
 
@@ -369,7 +398,7 @@ Per `spec.md ## Implementation slices ### Slice 4` (D24). Outcome: `CloudflareAc
    - Files: `api/v1alpha1/cloudflareaccesspolicy_types.go`, `api/v1alpha1/groupversion_info.go` (register).
    - Implements: `spec.md ## CRD model` (CloudflareAccessPolicy), `## CRD validation` (CloudflareAccessPolicy block — credentialsSecretRef + namespace required, policyName default, decision enum, discriminated-union rule items with CEL exactly-one-of, non-empty rules CEL, sessionDuration pattern, purposeJustification shape), kubebuilder markers from spec (cluster-scoped, shortName `cfap`).
    - Tests: `TestCloudflareAccessPolicyCRDValidation` (decision enum, rule discriminated-union, empty-rules rejection, sessionDuration pattern); `api/v1alpha1` deepcopy round-trip.
-   - Run `rtk make manifests generate`; commit generated CRD + deepcopy.
+   - Run `make manifests generate`; commit generated CRD + deepcopy.
 
 2. **Extend Exposure CRD: `policyRef.name` + relaxed CEL.**
    - Files: `api/v1alpha1/cloudflareexposure_types.go`.
@@ -413,9 +442,9 @@ Per `spec.md ## Implementation slices ### Slice 4` (D24). Outcome: `CloudflareAc
    - Tests: `TestAccessPolicyConditionsTransition`.
 
 10. **RBAC + Helm chart sync.**
-    - Files: kubebuilder RBAC markers for `cloudflareaccesspolicies{,/status,/finalizers}`; regenerate `charts/cfzt-operator/templates/clusterrole.yaml`; `rtk make helm-sync-crds` copies new CRD to `charts/cfzt-operator/crds/`.
+    - Files: kubebuilder RBAC markers for `cloudflareaccesspolicies{,/status,/finalizers}`; regenerate `charts/cfzt-operator/templates/clusterrole.yaml`; `make helm-sync-crds` copies new CRD to `charts/cfzt-operator/crds/`.
     - Implements: `spec.md ## RBAC` Slice 4 rows.
-    - Tests: `rtk make manifests generate && rtk git diff --exit-code` clean; `rtk helm lint charts/cfzt-operator` clean.
+    - Tests: `make manifests generate && git diff --exit-code` clean; `helm lint charts/cfzt-operator` clean.
 
 **Definition of done** (from `spec.md ## Implementation slices ### Slice 4`):
 
@@ -437,17 +466,106 @@ Subtask-derived additions: `TestCloudflareAccessPolicyCRDValidation`, `TestFakeA
 - Cross-watch fan-out: a single Policy CR rule edit enqueues every referencing Exposure. With `MaxConcurrentReconciles=1` on Exposure, large fan-out throttles. Acceptable in MVP; revisit if Slice 4 ships into a large fleet.
 - D24 policy deletion: tagged-but-foreign policies must never be deleted, even inside the finalizer. Mirror Slice 2 D9 finalizer test discipline — `TestAccessPolicyFinalizerUnblocks` must include a foreign-tag negative case.
 
+### Slice 5 — Tunnel private network routes
+
+Per `spec.md ## Implementation slices ### Slice 5` (D25). Outcome:
+`CloudflareTunnelRoute` CR creates and maintains a single Cloudflare Tunnel
+private-network route (CIDR → tunnel binding). Tunnel deletion is blocked while
+routes reference the tunnel (`Reason=BlockedByRoutes`).
+
+**Subtasks**
+
+1. **Define `CloudflareTunnelRoute` types + CRD validation.**
+   - Files: `api/v1alpha1/cloudflaretunnelroute_types.go`, `api/v1alpha1/groupversion_info.go` (register).
+   - Implements: `spec.md ## CRD model` (CloudflareTunnelRoute), `## CRD validation` (coarse IPv4 / IPv6 CIDR regex, controller-side `net/netip.ParsePrefix` for both families, general UUID VNet, explicit empty VNet as unset, immutable tunnelRef CEL, reject clearing VNet after set, `spec.comment` maxLength 34), kubebuilder markers (cluster-scoped, shortName `cftr`).
+   - Tests: `TestCloudflareTunnelRouteCRDValidation` (good IPv4, good IPv6, bad IPv4 octets, bad IPv6, immutable tunnelRef change rejected, explicit empty VNet, bad VNet UUID, clearing VNet after set, overlong comment); `api/v1alpha1` deepcopy round-trip.
+   - Run `make manifests generate`; commit generated CRD + deepcopy.
+
+2. **`internal/cloudflare/routes.go` interface + fake + real.**
+   - Files: `internal/cloudflare/routes.go`, extend `internal/cloudflare/client.go`, `fake.go`, `real.go`.
+   - Implements: SDK mapping rows for `ZeroTrust.Networks.Routes.{List,New,Get,Edit,Delete}` per `spec.md ## Cloudflare SDK method mapping`. Use the non-deprecated route-ID endpoints, route `comment`, and per-token rate-limit bucket from Slice 1 client. Do not use deprecated `Routes.Networks.*`.
+   - List implementation: expose wrapper filters for active `cfd_tunnel` routes, optional tunnel ID, optional VNet ID only when the CR sets `spec.virtualNetworkId`, and canonical exact CIDR matching in code via `network_subset` / `network_superset` where useful.
+   - Tests: `TestFakeRouteCreateGetDelete`, `TestFakeRouteListByCanonicalCIDRAndVNet`, `TestFakeRouteListOmitsVNetWhenUnset`, `TestFakeRouteEditIdempotent`.
+
+3. **Route controller core: credentials, tunnel-ID gate, ID-record reconcile, ForeignRoute guard.**
+   - Files: `internal/controller/cloudflaretunnelroute_controller.go`, wiring in `cmd/main.go` (`MaxConcurrentReconciles=1`).
+   - Implements: `spec.md ## CRD model` (CloudflareTunnelRoute responsibilities 1–5), `## Ownership and deletion semantics` (route ownership rule), `Reason=NetworkInvalid` on controller-side CIDR parse failure, `Reason=ForeignRoute` on collision without local ID/matching compact `source-uid`, `Reason=TunnelNotReady` while referenced Tunnel is absent/deleting or lacks `status.tunnelId`.
+   - Tests: `TestRouteCreate`, `TestRouteCreateIPv6`, `TestRouteInvalidNetwork`, `TestRouteForeignRefuses`, `TestRouteTunnelNotReady`.
+
+4. **Drift correction (Edit path).**
+   - Files: extend route controller.
+   - Implements: `spec.md ## CRD model` CloudflareTunnelRoute responsibility 4. On spec change or CF-side drift, preflight the target CIDR/VNet for foreign active routes before calling `Edit`. Network and non-empty VNet changes are allowed via update; clearing VNet after it has been set is blocked by CEL because Slice 5 omits `virtual_network_id` when unset. TunnelRef changes are blocked by CEL (subtask 1).
+   - Tests: `TestRouteDriftCorrection` (network change), `TestRouteVNetDriftCorrection`, `TestRouteEditPreflightForeignRefuses`, `TestRouteCommentDrift`.
+
+5. **Finalizer + foreign-route safety.**
+   - Files: extend route controller.
+   - Implements: D21 finalizer on `CloudflareTunnelRoute`; spec ownership/deletion rule. On delete: `Get(routeId)`, verify compact comment `source-uid`, then `Delete`. Foreign-tagged or missing-tag routes are left alone — finalizer removed without API delete.
+   - Tests: `TestRouteFinalizerDeletes`, `TestRouteFinalizerLeavesForeign`.
+
+6. **Tunnel finalizer extension + Route↔Tunnel cross-watches.**
+   - Files: extend `internal/controller/cloudflaretunnel_controller.go` (block deletion with `Reason=BlockedByRoutes` when ≥1 route references the tunnel); extend both controllers' `SetupWithManager` (`routeToTunnel`, `tunnelToRoutes` map funcs).
+   - Implements: `spec.md ## Ownership and deletion semantics` extended tunnel-deletion rule, `## Tunnel configuration concurrency`-style cross-watch additions. Route controller retries when the referenced Tunnel gains `status.tunnelId` or is deleted.
+   - Tests: `TestTunnelBlockedByRoutes`, `TestRouteRetriesOnTunnelID`.
+
+7. **Status conditions + events.**
+   - Files: extend route controller; reuse `internal/controller/conditions.go`.
+   - Implements: D8 conditions on `CloudflareTunnelRoute`; reasons `TunnelNotReady`, `NetworkInvalid`, `ForeignRoute`, `RouteWriteFailed`, `Reconciled`. Events: `CreatedRoute`, `DeletedRoute`, `ForeignRoute`, `BlockedByRoutes` (emitted from tunnel controller).
+   - Tests: `TestRouteConditionsTransition`.
+
+8. **Live Cloudflare smoke coverage.**
+   - Files: `test/live/cloudflare_smoke_test.go`, `hack/live-cloudflare-local.sh`, `.env.live.example` if present.
+   - Implements: `spec.md ## CI / CD` live-smoke addition for routes. Extends `TestCloudflareLifecycle` in place (no new top-level test function) so `release.yaml` and `hack/live-cloudflare-local.sh lifecycle` exercise the new phase automatically. Accepts that actual packet routing through the tunnel is NOT validated — smoke proves that `CloudflareTunnelRoute` reaches `Ready=True`, the CF route appears in `Routes.List`, is idempotent across operator restart, refuses a foreign-route collision, and is removed by `cleanup()`.
+   - Concrete edits to `test/live/cloudflare_smoke_test.go`:
+     - `smokeConfig` gains `tunnelRouteName string`, `tunnelRouteCIDR string`, `tunnelRouteConflictCIDR string`. `loadSmokeConfig` sets `tunnelRouteName = "cfzt-smoke-route-" + runSuffix`; defaults `tunnelRouteCIDR = envDefault("CF_SMOKE_ROUTE_CIDR", "100.64.207.0/24")` and `tunnelRouteConflictCIDR = envDefault("CF_SMOKE_ROUTE_CONFLICT_CIDR", "100.64.208.0/24")` (RFC 6598 CGNAT range, unlikely to clash with real customer routes).
+     - `TestCloudflareLifecycle` adds a new phase after `status.tunnelId` is available and before the existing idempotency phase: `h.createTunnelRoute()` → `h.waitTunnelRouteReady(7*time.Minute)` → capture `routeIDBefore`; `h.assertOneTunnelRoute(routeIDBefore)` (CF-side `Routes.List` filter by tunnel ID + canonical CIDR, expects exactly one match with compact `managed-by=cfzt source-uid=...` in the comment).
+     - Idempotency phase: add `h.updateTunnelRouteNoop()` next to the existing `updateTunnelNoop` / `updateAccessPolicyNoop`; after `restartOperator()` add `route = h.waitTunnelRouteReady(4*time.Minute)` and `assertEqual(t, "tunnel route ID", routeIDBefore, route.Status.RouteId)`.
+     - Foreign-route safety phase (parallel to existing foreign-DNS conflict block): create a CF route directly via `h.cf.Routes().Create(ctx, …)` with `cfg.tunnelRouteConflictCIDR` and the smoke tunnel ID, comment `cfzt-live-smoke-foreign-route`. Apply a matching `CloudflareTunnelRoute` CR; assert it reports `Reason=ForeignRoute` within 4 minutes via `h.waitTunnelRouteForeignReason`; assert the conflict route still exists with its original comment / ID.
+     - `cleanup()` extension: delete both Route CRs (happy path + foreign-collision); poll for the CF route at `tunnelRouteCIDR` to be gone; explicitly `h.cf.Routes().Delete(ctx, conflictRouteID)` so the test leaves no residue at `tunnelRouteConflictCIDR`.
+     - Wait helpers `waitTunnelRouteReady`, `waitTunnelRouteForeignReason` follow the shape of `waitTunnelReady` / `waitExposureConflictReason`.
+   - `hack/live-cloudflare-local.sh` edits: extend the env-var block in `usage()` to mention `CF_SMOKE_ROUTE_CIDR` and `CF_SMOKE_ROUTE_CONFLICT_CIDR` overrides. No new top-level subcommand — the new phase runs inside `TestCloudflareLifecycle` and so is exercised by `hack/live-cloudflare-local.sh lifecycle`.
+   - `.env.live.example`: append commented placeholders `# CF_SMOKE_ROUTE_CIDR=100.64.207.0/24` and `# CF_SMOKE_ROUTE_CONFLICT_CIDR=100.64.208.0/24` so operators know where to override (skip silently if the example file is not present in the worktree).
+   - Tests: `TestCloudflareLifecycle` (existing) extended in place — no new top-level test function. `TestCloudflarePreflight` unchanged (route credentials piggyback on the existing tunnel-edit API token scope).
+   - Acceptance: end-to-end packet routing through the route is explicitly out of scope for the smoke (no WARP client available in kind). Lifecycle (create, idempotent reconcile, foreign-collision refusal, clean teardown) is sufficient.
+
+9. **RBAC + Helm chart sync.**
+   - Files: kubebuilder RBAC markers for `cloudflaretunnelroutes{,/status,/finalizers}`; regenerate `charts/cfzt-operator/templates/clusterrole.yaml`; `make helm-sync-crds` copies new CRD to `charts/cfzt-operator/crds/`.
+   - Implements: `spec.md ## RBAC` Slice 5 rows.
+   - Tests: `make manifests generate && git diff --exit-code` clean; `helm lint charts/cfzt-operator` clean.
+
+**Definition of done** (from `spec.md ## Implementation slices ### Slice 5`):
+
+- `kubectl apply` of a `CloudflareTunnelRoute` against a tunnel with `status.tunnelId` creates the CF route, populates `status.routeId`, sets `Ready=True`.
+- `kubectl delete cloudflaretunnelroute <name>` removes the CF route.
+- Pre-existing CF route with same target CIDR/VNet and no local ID record or mismatching compact `source-uid` comment → `Ready=False, Reason=ForeignRoute`, no mutation.
+- `kubectl delete cloudflaretunnel <name>` while a route references it is blocked with `Reason=BlockedByRoutes`.
+- Editing `spec.network`, non-empty `spec.virtualNetworkId`, or `spec.comment` preflights target CIDR/VNet conflicts, then rewrites the CF route within one reconcile when no foreign route blocks the change. Clearing a previously set `spec.virtualNetworkId` is rejected; delete + recreate to return to the account default VNet.
+- envtest tests pass: `TestCloudflareTunnelRouteCRDValidation`, `TestRouteCreate`, `TestRouteCreateIPv6`, `TestRouteInvalidNetwork`, `TestRouteForeignRefuses`, `TestRouteDriftCorrection`, `TestRouteEditPreflightForeignRefuses`, `TestRouteFinalizerDeletes`, `TestRouteFinalizerLeavesForeign`, `TestRouteTunnelNotReady`, `TestTunnelBlockedByRoutes`, `TestRouteConditionsTransition`.
+- Live smoke (`hack/live-cloudflare-local.sh lifecycle`) creates, re-reconciles, refuses a foreign-route collision, and cleans up the `CloudflareTunnelRoute` in addition to the existing Slice 1–4 phases.
+- Manual: dashboard Networks → Routes shows the route with compact `managed-by=cfzt` source-uid in the comment.
+
+Subtask-derived additions: `TestFakeRouteCreateGetDelete`, `TestFakeRouteListByCanonicalCIDRAndVNet`, `TestFakeRouteListOmitsVNetWhenUnset`, `TestFakeRouteEditIdempotent`, `TestRouteVNetDriftCorrection`, `TestRouteCommentDrift`, `TestRouteRetriesOnTunnelID` also pass.
+
+**Risks**
+
+- SDK uncertainty (G1 / D13). Route methods exist in `cloudflare-go/v4` v4.6.0, but confirm request params via Cloudflare MCP before writing real client. Isolate inside `internal/cloudflare/routes.go`.
+- CIDR validation gap. CEL regex is intentionally coarse; controller-side `net/netip.ParsePrefix` for IPv4 and IPv6 is mandatory and covered by `TestRouteInvalidNetwork`.
+- CIDR overlap across VNets. CEL cannot enforce cross-CR CIDR uniqueness. Controller relies on active-route List plus canonical exact filtering and fails closed on ambiguous or foreign matches.
+- VNet omission semantics. When `spec.virtualNetworkId` is unset, do not resolve the account default VNet and do not send `virtual_network_id`; tests cover omitted VNet params and foreign exact-CIDR refusal. Clearing a previously set VNet is intentionally rejected rather than sending API null.
+- Tunnel-readiness coupling. Route registration gates on `status.tunnelId`, not full Tunnel `Ready=True`; cover with `TestRouteRetriesOnTunnelID`.
+- Live smoke CIDR collision — the chosen documentation/CGNAT CIDRs must not collide with any real route on the test account. Override via `CF_SMOKE_ROUTE_CIDR` / `CF_SMOKE_ROUTE_CONFLICT_CIDR` in `.env.live` if defaults conflict.
+- WARP scope creep. Route registration is the only intent of this slice. WARP client routing, Gateway policies, and split-tunnel config remain deferred.
+
 ## 4. Bootstrap subtasks (scaffold absent)
 
 Run before Slice 1 subtask 1. Per `AGENTS.md ## Bootstrap`.
 
-1. `rtk kubebuilder init --domain reid.ee --repo github.com/andrewreid/cfzt-operator`. Commit scaffold.
-2. `rtk kubebuilder create api --group cfzt --version v1alpha1 --kind CloudflareTunnel --resource --controller`. Commit.
-3. `rtk kubebuilder create api --group cfzt --version v1alpha1 --kind CloudflareExposure --resource --controller`. Commit.
+1. `kubebuilder init --domain reid.ee --repo github.com/andrewreid/cfzt-operator`. Commit scaffold.
+2. `kubebuilder create api --group cfzt --version v1alpha1 --kind CloudflareTunnel --resource --controller`. Commit.
+3. `kubebuilder create api --group cfzt --version v1alpha1 --kind CloudflareExposure --resource --controller`. Commit.
 4. Edit generated `cmd/main.go`: enable leader election (D12), register both controllers, set `MaxConcurrentReconciles=1` on both (D19), wire `--zap-log-level`. Add HTTPRoute discovery placeholder (used in Slice 3) — for MVP scaffold leave the discovery branch as a TODO behind a build-time `false`.
 5. Hand-write `charts/cfzt-operator/` per `spec.md ## Helm chart layout` (Chart.yaml, values.yaml, crds/ placeholder, templates per layout, NOTES.txt with D23 GitOps caveat).
 6. Hand-write `.github/workflows/ci.yaml` (`go vet`, `golangci-lint`, `make manifests generate`, `make helm-sync-crds`, `git diff --exit-code`, `make test`, `helm lint`) and `release.yaml` (image to `ghcr.io/andrewreid/cfzt-operator:<tag>`, chart to `oci://ghcr.io/andrewreid/charts/cfzt-operator`). Per `spec.md ## CI / CD`.
-7. Add envtest bootstrap to `Makefile` `test` target per `AGENTS.md ## envtest setup`. Confirm `rtk make test` works against the empty scaffold.
+7. Add envtest bootstrap to `Makefile` `test` target per `AGENTS.md ## envtest setup`. Confirm `make test` works against the empty scaffold.
 8. Commit. Open Slice 1 with a working green CI baseline.
 
 ## 5. Out-of-plan deferrals
@@ -458,37 +576,47 @@ None blocking.
 
 Per slice:
 
-- `rtk make manifests generate && rtk git diff --exit-code` — fail on uncommitted generated drift (CI mirrors this).
-- `rtk make test` — unit + envtest. Each new test name listed in the slice subtasks must appear in the run.
-- `rtk go test ./...` after any reconciliation-semantics change (per `AGENTS.md ## Verification`).
+- `make manifests generate && git diff --exit-code` — fail on uncommitted generated drift (CI mirrors this).
+- `make test` — unit + envtest. Each new test name listed in the slice subtasks must appear in the run.
+- `go test ./...` after any reconciliation-semantics change (per `AGENTS.md ## Verification`).
 
 Slice 1 smoke:
 
-- `rtk helm lint charts/cfzt-operator` clean.
-- `rtk helm install cfzt-operator charts/cfzt-operator -n cfzt-system --create-namespace` against a fresh kind cluster. Apply credentials Secret. Apply `CloudflareTunnel`. Confirm `status.tunnelId`, token Secret, DaemonSet, `Ready=True`.
+- `helm lint charts/cfzt-operator` clean.
+- `helm install cfzt-operator charts/cfzt-operator -n cfzt-system --create-namespace` against a fresh kind cluster. Apply credentials Secret. Apply `CloudflareTunnel`. Confirm `status.tunnelId`, token Secret, DaemonSet, `Ready=True`.
 
 Slice 2 end-to-end:
 
 - Slice 1 smoke remains green.
-- Apply a `CloudflareExposure` per `spec.md ## Primary user experience` minimal example. Wait for `Ready=True`. From outside the cluster: `rtk curl -v https://<hostname>` — expect Cloudflare Access challenge page. Authenticate, confirm origin response.
+- Apply a `CloudflareExposure` per `spec.md ## Primary user experience` minimal example. Wait for `Ready=True`. From outside the cluster: `curl -v https://<hostname>` — expect Cloudflare Access challenge page. Authenticate, confirm origin response.
 - External-origin variant (D16): apply Home Assistant example, run same curl, confirm reachability.
-- `rtk kubectl delete cloudflareexposure <name>` — confirm DNS record, Access app, ingress rule all gone.
-- `rtk kubectl delete cloudflaretunnel <name>` while another Exposure exists — confirm `Ready=False, Reason=BlockedByExposures` and the tunnel is not deleted.
+- `kubectl delete cloudflareexposure <name>` — confirm DNS record, Access app, ingress rule all gone.
+- `kubectl delete cloudflaretunnel <name>` while another Exposure exists — confirm `Ready=False, Reason=BlockedByExposures` and the tunnel is not deleted.
 
 Slice 3 end-to-end:
 
 - Apply Service + Exposure with `sourceRef` and no `origin`. Confirm reconcile uses derived `<svc>.<ns>.svc.cluster.local:<port>`.
-- `rtk kubectl delete service <name>` — confirm cascading Exposure deletion and CF cleanup.
+- `kubectl delete service <name>` — confirm cascading Exposure deletion and CF cleanup.
 - Restart operator on a cluster without `gateway.networking.k8s.io` CRD — confirm log line `HTTPRoute CRD not found, controller disabled` and no crash.
 
 Slice 4 end-to-end:
 
 - Slice 1–3 smoke remain green.
 - Apply a `CloudflareAccessPolicy` per `spec.md ## CRD model ### CloudflareAccessPolicy` (decision `allow`, include rule `emailDomain: <your-domain>`). Wait for `Ready=True`; confirm `status.policyId` set and the policy appears in the Cloudflare dashboard with `managed-by=cfzt-operator` tag (or, if the SDK has no tag field, confirm the ID matches `status.policyId`).
-- Apply a `CloudflareExposure` with `spec.access.policyRef.name: <policy-cr-name>`. Confirm `Ready=True` and the Access app binds the resolved UUID. `rtk curl -v https://<hostname>` → Access challenge; authenticate, confirm origin response.
-- `rtk kubectl edit cloudflareaccesspolicy <name>` — change an include rule. Within one reconcile, dashboard shows updated rule; all referencing Exposures re-bind cleanly.
-- `rtk kubectl delete cloudflareaccesspolicy <name>` while an Exposure references it — confirm `Ready=False, Reason=BlockedByExposures`, policy CR not deleted, CF policy still present. Remove the referencing Exposure; confirm policy CR + CF policy are then deleted.
+- Apply a `CloudflareExposure` with `spec.access.policyRef.name: <policy-cr-name>`. Confirm `Ready=True` and the Access app binds the resolved UUID. `curl -v https://<hostname>` → Access challenge; authenticate, confirm origin response.
+- `kubectl edit cloudflareaccesspolicy <name>` — change an include rule. Within one reconcile, dashboard shows updated rule; all referencing Exposures re-bind cleanly.
+- `kubectl delete cloudflareaccesspolicy <name>` while an Exposure references it — confirm `Ready=False, Reason=BlockedByExposures`, policy CR not deleted, CF policy still present. Remove the referencing Exposure; confirm policy CR + CF policy are then deleted.
 - Negative: create a CF Access policy by hand in the dashboard named `<policy-cr-name>-cfzt`, then apply the matching `CloudflareAccessPolicy` CR — confirm `Ready=False, Reason=ForeignPolicy`, dashboard policy untouched.
+
+Slice 5 end-to-end:
+
+- Slices 1–4 smoke remain green.
+- Apply a `CloudflareTunnelRoute` referencing a tunnel with `status.tunnelId` and `spec.network: 172.16.0.0/24` (or an IPv6 CIDR). Confirm `Ready=True`; dashboard Networks → Routes shows the route bound to the tunnel with compact `managed-by=cfzt` source-uid in the comment.
+- `kubectl edit cloudflaretunnelroute <name>` — change `spec.network` to a new CIDR; confirm the controller preflights for foreign target conflicts and then updates the CF route within one reconcile.
+- `kubectl delete cloudflaretunnelroute <name>` — confirm CF route is removed.
+- Negative: pre-create a CF route by hand for the same CIDR+VNet, then apply the matching `CloudflareTunnelRoute` CR — confirm `Ready=False, Reason=ForeignRoute`, dashboard route untouched.
+- `kubectl delete cloudflaretunnel <name>` while a route references it — confirm `Ready=False, Reason=BlockedByRoutes`, tunnel CR remains. Remove the route; confirm tunnel CR + CF tunnel are then deleted (subject to existing Exposure-reference rules).
+- `bash hack/live-cloudflare-local.sh lifecycle` (or `release.yaml` live job) — `TestCloudflareLifecycle` covers route create / idempotent reconcile across operator restart / foreign-route conflict refusal / cleanup, against real Cloudflare. Actual packet routing through the route is not asserted (no WARP client in kind); only the lifecycle on the Cloudflare side is verified.
 
 CI gate (D18, `.github/workflows/ci.yaml`):
 
