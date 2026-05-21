@@ -119,56 +119,14 @@ func (r *CloudflareExposureReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	status := exposure.Status.Cloudflare
-	if exposure.Spec.Access.Enabled {
-		app, created, err := r.reconcileAccess(ctx, &exposure, cfClient)
-		if err != nil {
-			if errors.Is(err, errHostnameConflict) {
-				r.event(&exposure, corev1.EventTypeWarning, EventHostnameConflict, "Access application hostname conflict for %s", exposure.Spec.Hostname)
-				return r.setExposureStatusAndBackoff(ctx, &exposure, status, ReasonHostnameConflict, err.Error())
-			}
-			if errors.Is(err, errForeignResource) {
-				return r.setExposureStatusAndBackoff(ctx, &exposure, status, ReasonForeignResource, err.Error())
-			}
-			if errors.Is(err, errPolicyNotFound) {
-				return ctrl.Result{}, r.setExposureStatus(ctx, &exposure, status, false, ReasonPolicyNotFound, err.Error())
-			}
-			if errors.Is(err, errPolicyNotReady) {
-				if statusErr := r.setExposureStatus(ctx, &exposure, status, false, ReasonPolicyNotReady, err.Error()); statusErr != nil {
-					return ctrl.Result{}, statusErr
-				}
-				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-			}
-			return ctrl.Result{}, err
-		}
-		status.AccessApplicationId = app.ID
-		if created {
-			r.event(&exposure, corev1.EventTypeNormal, EventCreatedAccessApp, "Created Cloudflare Access application %s", app.ID)
-		}
-	} else {
-		if err := r.deleteOwnedAccessIfPresent(ctx, &exposure, cfClient); err != nil {
-			return ctrl.Result{}, err
-		}
-		status.AccessApplicationId = ""
+	status, done, result, err := r.reconcileExposureAccess(ctx, &exposure, cfClient, status)
+	if done {
+		return result, err
 	}
 
-	if tunnel.Spec.Dns.Manage {
-		record, err := r.reconcileDNS(ctx, &exposure, &tunnel, cfClient)
-		if err != nil {
-			if errors.Is(err, errHostnameConflict) {
-				r.event(&exposure, corev1.EventTypeWarning, EventHostnameConflict, "DNS hostname conflict for %s", exposure.Spec.Hostname)
-				return r.setExposureStatusAndBackoff(ctx, &exposure, status, ReasonHostnameConflict, err.Error())
-			}
-			if errors.Is(err, errForeignResource) {
-				return r.setExposureStatusAndBackoff(ctx, &exposure, status, ReasonForeignResource, err.Error())
-			}
-			return ctrl.Result{}, r.setExposureStatus(ctx, &exposure, status, false, ReasonDNSWriteFailed, err.Error())
-		}
-		status.DnsRecordId = record.ID
-	} else {
-		if err := r.deleteOwnedDNSIfPresent(ctx, &exposure, cfClient); err != nil {
-			return ctrl.Result{}, err
-		}
-		status.DnsRecordId = ""
+	status, done, result, err = r.reconcileExposureDNS(ctx, &exposure, &tunnel, cfClient, status)
+	if done {
+		return result, err
 	}
 
 	status.PublicHostnameRouteHash = routeHashForExposure(&tunnel, &exposure)
@@ -201,6 +159,68 @@ func (r *CloudflareExposureReconciler) cloudflareClient(ctx context.Context, tun
 		}
 	}
 	return factory(accountID, apiToken)
+}
+
+func (r *CloudflareExposureReconciler) reconcileExposureAccess(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, cfClient cloudflare.Client, status cfztv1alpha1.ExposureCloudflareStatus) (cfztv1alpha1.ExposureCloudflareStatus, bool, ctrl.Result, error) {
+	if exposure.Spec.Access.Enabled {
+		app, created, err := r.reconcileAccess(ctx, exposure, cfClient)
+		if err != nil {
+			if errors.Is(err, errHostnameConflict) {
+				r.event(exposure, corev1.EventTypeWarning, EventHostnameConflict, "Access application hostname conflict for %s", exposure.Spec.Hostname)
+				result, statusErr := r.setExposureStatusAndBackoff(ctx, exposure, status, ReasonHostnameConflict, err.Error())
+				return status, true, result, statusErr
+			}
+			if errors.Is(err, errForeignResource) {
+				result, statusErr := r.setExposureStatusAndBackoff(ctx, exposure, status, ReasonForeignResource, err.Error())
+				return status, true, result, statusErr
+			}
+			if errors.Is(err, errPolicyNotFound) {
+				return status, true, ctrl.Result{}, r.setExposureStatus(ctx, exposure, status, false, ReasonPolicyNotFound, err.Error())
+			}
+			if errors.Is(err, errPolicyNotReady) {
+				if statusErr := r.setExposureStatus(ctx, exposure, status, false, ReasonPolicyNotReady, err.Error()); statusErr != nil {
+					return status, true, ctrl.Result{}, statusErr
+				}
+				return status, true, ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			}
+			return status, true, ctrl.Result{}, err
+		}
+		status.AccessApplicationId = app.ID
+		if created {
+			r.event(exposure, corev1.EventTypeNormal, EventCreatedAccessApp, "Created Cloudflare Access application %s", app.ID)
+		}
+		return status, false, ctrl.Result{}, nil
+	}
+	if err := r.deleteOwnedAccessIfPresent(ctx, exposure, cfClient); err != nil {
+		return status, true, ctrl.Result{}, err
+	}
+	status.AccessApplicationId = ""
+	return status, false, ctrl.Result{}, nil
+}
+
+func (r *CloudflareExposureReconciler) reconcileExposureDNS(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, tunnel *cfztv1alpha1.CloudflareTunnel, cfClient cloudflare.Client, status cfztv1alpha1.ExposureCloudflareStatus) (cfztv1alpha1.ExposureCloudflareStatus, bool, ctrl.Result, error) {
+	if tunnel.Spec.Dns.Manage {
+		record, err := r.reconcileDNS(ctx, exposure, tunnel, cfClient)
+		if err != nil {
+			if errors.Is(err, errHostnameConflict) {
+				r.event(exposure, corev1.EventTypeWarning, EventHostnameConflict, "DNS hostname conflict for %s", exposure.Spec.Hostname)
+				result, statusErr := r.setExposureStatusAndBackoff(ctx, exposure, status, ReasonHostnameConflict, err.Error())
+				return status, true, result, statusErr
+			}
+			if errors.Is(err, errForeignResource) {
+				result, statusErr := r.setExposureStatusAndBackoff(ctx, exposure, status, ReasonForeignResource, err.Error())
+				return status, true, result, statusErr
+			}
+			return status, true, ctrl.Result{}, r.setExposureStatus(ctx, exposure, status, false, ReasonDNSWriteFailed, err.Error())
+		}
+		status.DnsRecordId = record.ID
+		return status, false, ctrl.Result{}, nil
+	}
+	if err := r.deleteOwnedDNSIfPresent(ctx, exposure, cfClient); err != nil {
+		return status, true, ctrl.Result{}, err
+	}
+	status.DnsRecordId = ""
+	return status, false, ctrl.Result{}, nil
 }
 
 var (
