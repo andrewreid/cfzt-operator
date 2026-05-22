@@ -209,7 +209,7 @@ Out of scope until MVP ships. Work on `main` directly is acceptable until then. 
 - Every reconcile is idempotent. Pattern in `spec.md ## Reconcile idempotency`.
 - Ownership tracked via per-resource `source-uid` tag on persistent CF objects (Tunnel comment, Access app tags, DNS record comment). **Ingress rules inside the tunnel-config doc are NOT tagged** (D11) — doc is computed-from-K8s every reconcile.
 - **Verify before mutate.** Tagged resource without matching local UID → `Ready=False, Reason=ForeignResource`, no write, no delete.
-- Hostname conflict (existing Access app or DNS record for hostname has different `source-uid`) → `Ready=False, Reason=HostnameConflict`. Do not touch. Requeue with backoff. Ingress-rule conflict surfaces at builder time (two Exposures, same hostname → both go `HostnameConflict`).
+- Hostname conflict (existing Access app or DNS record for hostname has different `source-uid`) → `Ready=False, Reason=HostnameConflict`. Do not touch. Requeue after 30s. Ingress-rule conflict surfaces at builder time (two Exposures, same hostname → both go `HostnameConflict`).
 - Deletion only inside finalizers, only on resources the local CR demonstrably owns.
 - Tunnel finalizer blocks while any `CloudflareExposure` references the tunnel (`Reason=BlockedByExposures`).
 - Same-namespace `sourceRef` → add ownerReference Exposure→source. K8s GC cascades.
@@ -217,6 +217,11 @@ Out of scope until MVP ships. Work on `main` directly is acceptable until then. 
 - Drift on tagged CF resource → reconcile rewrites to desired. Untagged or foreign-tagged for the same hostname → leave alone, surface conflict.
 - Token rotation rolls cloudflared via pod-template checksum annotation. Never delete + recreate the DaemonSet.
 - Repeated reconciles MUST be safe. If you cannot prove a code path is idempotent, it is wrong.
+
+### Requeue policy
+
+- Waiting states requeue after 30s with no returned error: `CredentialsMissing`, `TunnelNotReady`, `PolicyNotReady`, `HostnameConflict`, `ForeignResource`, `BlockedByExposures`, `BlockedByRoutes`.
+- Transient Cloudflare API and write failures return errors after status is updated, so controller-runtime exponential backoff applies. This includes `*Failed` reasons.
 
 ---
 

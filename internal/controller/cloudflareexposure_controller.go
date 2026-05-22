@@ -81,7 +81,7 @@ func (r *CloudflareExposureReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	cfClient, err := r.CloudflareClient(ctx, credentialsRefFromTunnel(&tunnel))
 	if err != nil {
-		return ctrl.Result{}, r.setExposureStatus(ctx, &exposure, exposure.Status.Cloudflare, false, ReasonCredentialsMissing, err.Error())
+		return r.setExposureStatusAndRequeue(ctx, &exposure, exposure.Status.Cloudflare, ReasonCredentialsMissing, err.Error())
 	}
 
 	if controllerutil.AddFinalizer(&exposure, naming.Finalizer) {
@@ -108,7 +108,7 @@ func (r *CloudflareExposureReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, err
 	} else if conflict {
 		r.Recorder.Eventf(&exposure, corev1.EventTypeWarning, EventHostnameConflict, "Hostname %s is claimed by more than one CloudflareExposure", exposure.Spec.Hostname)
-		return r.setExposureStatusAndBackoff(ctx, &exposure, exposure.Status.Cloudflare, ReasonHostnameConflict, "hostname is claimed by more than one CloudflareExposure")
+		return r.setExposureStatusAndRequeue(ctx, &exposure, exposure.Status.Cloudflare, ReasonHostnameConflict, "hostname is claimed by more than one CloudflareExposure")
 	}
 
 	status := exposure.Status.Cloudflare
@@ -137,11 +137,11 @@ func (r *CloudflareExposureReconciler) reconcileExposureAccess(ctx context.Conte
 		if err != nil {
 			if errors.Is(err, errHostnameConflict) {
 				r.Recorder.Eventf(exposure, corev1.EventTypeWarning, EventHostnameConflict, "Access application hostname conflict for %s", exposure.Spec.Hostname)
-				result, statusErr := r.setExposureStatusAndBackoff(ctx, exposure, *status, ReasonHostnameConflict, err.Error())
+				result, statusErr := r.setExposureStatusAndRequeue(ctx, exposure, *status, ReasonHostnameConflict, err.Error())
 				return result, true, statusErr
 			}
 			if errors.Is(err, errForeignResource) {
-				result, statusErr := r.setExposureStatusAndBackoff(ctx, exposure, *status, ReasonForeignResource, err.Error())
+				result, statusErr := r.setExposureStatusAndRequeue(ctx, exposure, *status, ReasonForeignResource, err.Error())
 				return result, true, statusErr
 			}
 			if errors.Is(err, errPolicyNotFound) {
@@ -174,14 +174,15 @@ func (r *CloudflareExposureReconciler) reconcileExposureDNS(ctx context.Context,
 		if err != nil {
 			if errors.Is(err, errHostnameConflict) {
 				r.Recorder.Eventf(exposure, corev1.EventTypeWarning, EventHostnameConflict, "DNS hostname conflict for %s", exposure.Spec.Hostname)
-				result, statusErr := r.setExposureStatusAndBackoff(ctx, exposure, *status, ReasonHostnameConflict, err.Error())
+				result, statusErr := r.setExposureStatusAndRequeue(ctx, exposure, *status, ReasonHostnameConflict, err.Error())
 				return result, true, statusErr
 			}
 			if errors.Is(err, errForeignResource) {
-				result, statusErr := r.setExposureStatusAndBackoff(ctx, exposure, *status, ReasonForeignResource, err.Error())
+				result, statusErr := r.setExposureStatusAndRequeue(ctx, exposure, *status, ReasonForeignResource, err.Error())
 				return result, true, statusErr
 			}
-			return ctrl.Result{}, true, r.setExposureStatus(ctx, exposure, *status, false, ReasonDNSWriteFailed, err.Error())
+			result, statusErr := r.setExposureStatusAndBackoff(ctx, exposure, *status, ReasonDNSWriteFailed, err.Error())
+			return result, true, statusErr
 		}
 		status.DnsRecordId = record.ID
 		return ctrl.Result{}, false, nil
@@ -408,13 +409,13 @@ func (r *CloudflareExposureReconciler) reconcileDelete(ctx context.Context, expo
 	}
 	if err := r.deleteOwnedDNSIfPresent(ctx, exposure, cfClient); err != nil {
 		if errors.Is(err, errForeignResource) {
-			return ctrl.Result{}, r.setExposureStatus(ctx, exposure, exposure.Status.Cloudflare, false, ReasonForeignResource, "DNS record is not owned by this CloudflareExposure")
+			return r.setExposureStatusAndRequeue(ctx, exposure, exposure.Status.Cloudflare, ReasonForeignResource, "DNS record is not owned by this CloudflareExposure")
 		}
 		return ctrl.Result{}, err
 	}
 	if err := r.deleteOwnedAccessIfPresent(ctx, exposure, cfClient); err != nil {
 		if errors.Is(err, errForeignResource) {
-			return ctrl.Result{}, r.setExposureStatus(ctx, exposure, exposure.Status.Cloudflare, false, ReasonForeignResource, "Access application is not owned by this CloudflareExposure")
+			return r.setExposureStatusAndRequeue(ctx, exposure, exposure.Status.Cloudflare, ReasonForeignResource, "Access application is not owned by this CloudflareExposure")
 		}
 		return ctrl.Result{}, err
 	}

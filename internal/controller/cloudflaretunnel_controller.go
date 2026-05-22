@@ -78,7 +78,10 @@ func (r *CloudflareTunnelReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	cfClient, err := r.CloudflareClient(ctx, credentialsRefFromTunnel(&tunnel))
 	if err != nil {
-		return ctrl.Result{}, r.setTunnelStatus(ctx, &tunnel, tunnel.Status.TunnelId, naming.TokenSecretName(tunnel.Name), false, ReasonCredentialsMissing, err.Error())
+		if statusErr := r.setTunnelStatus(ctx, &tunnel, tunnel.Status.TunnelId, naming.TokenSecretName(tunnel.Name), false, ReasonCredentialsMissing, err.Error()); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
 	cfTunnel, created, err := r.reconcileCloudflareTunnel(ctx, &tunnel, cfClient)
@@ -100,7 +103,10 @@ func (r *CloudflareTunnelReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	token, err := cfClient.Tunnels().Token(ctx, cfTunnel.ID)
 	if err != nil {
-		return ctrl.Result{}, r.setTunnelStatus(ctx, &tunnel, cfTunnel.ID, naming.TokenSecretName(tunnel.Name), false, ReasonTokenFetchFailed, err.Error())
+		if statusErr := r.setTunnelStatus(ctx, &tunnel, cfTunnel.ID, naming.TokenSecretName(tunnel.Name), false, ReasonTokenFetchFailed, err.Error()); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
+		return ctrl.Result{}, fmt.Errorf("%s: %w", ReasonTokenFetchFailed, err)
 	}
 
 	if err := r.upsertTokenSecret(ctx, &tunnel, token); err != nil {
@@ -116,7 +122,10 @@ func (r *CloudflareTunnelReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	if err := r.reconcileTunnelConfig(ctx, &tunnel, cfClient, cfTunnel.ID); err != nil {
 		if _, ok := err.(*tunnelconfig.HostnameConflictError); ok {
-			return ctrl.Result{}, r.setTunnelStatus(ctx, &tunnel, cfTunnel.ID, naming.TokenSecretName(tunnel.Name), false, ReasonHostnameConflict, err.Error())
+			if statusErr := r.setTunnelStatus(ctx, &tunnel, cfTunnel.ID, naming.TokenSecretName(tunnel.Name), false, ReasonHostnameConflict, err.Error()); statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
 		return ctrl.Result{}, err
 	}
@@ -148,7 +157,7 @@ func (r *CloudflareTunnelReconciler) reconcileDelete(ctx context.Context, tunnel
 			return ctrl.Result{}, err
 		}
 		r.Recorder.Eventf(tunnel, corev1.EventTypeWarning, EventBlockedByExposures, "Deletion blocked by %d CloudflareExposure resources", len(exposures))
-		return ctrl.Result{}, nil
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 	routes, err := r.referencingRoutes(ctx, tunnel.Name)
 	if err != nil {
@@ -161,7 +170,7 @@ func (r *CloudflareTunnelReconciler) reconcileDelete(ctx context.Context, tunnel
 			return ctrl.Result{}, err
 		}
 		r.Recorder.Eventf(tunnel, corev1.EventTypeWarning, EventBlockedByRoutes, "Deletion blocked by %d CloudflareTunnelRoute resources", len(routes))
-		return ctrl.Result{}, nil
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 	waitingForWorkload, err := r.ensureCloudflaredStopped(ctx, tunnel)
 	if err != nil {

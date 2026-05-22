@@ -75,7 +75,10 @@ func (r *CloudflareAccessPolicyReconciler) Reconcile(ctx context.Context, req ct
 	}
 	cfClient, err := r.CloudflareClient(ctx, credentialsRefFromAccessPolicy(&policy))
 	if err != nil {
-		return ctrl.Result{}, r.setPolicyStatus(ctx, &policy, policy.Status.PolicyId, policy.Status.ObservedRulesHash, references, false, ReasonCredentialsMissing, err.Error())
+		if statusErr := r.setPolicyStatus(ctx, &policy, policy.Status.PolicyId, policy.Status.ObservedRulesHash, references, false, ReasonCredentialsMissing, err.Error()); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
 	policyName := desiredPolicyName(&policy)
@@ -152,7 +155,7 @@ func (r *CloudflareAccessPolicyReconciler) reconcileDelete(ctx context.Context, 
 			return ctrl.Result{}, err
 		}
 		r.Recorder.Eventf(policy, corev1.EventTypeWarning, EventBlockedByExposures, "Deletion blocked by %d CloudflareExposure resources", len(references))
-		return ctrl.Result{}, nil
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 	if policy.Status.PolicyId != "" {
 		cfClient, err := r.CloudflareClient(ctx, credentialsRefFromAccessPolicy(policy))

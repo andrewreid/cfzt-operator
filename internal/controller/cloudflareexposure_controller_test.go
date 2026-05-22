@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -226,16 +228,44 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		Expect(records).To(BeEmpty())
 	})
 
-	It("TestExposureHostnameConflict", func() {
+	It("TestExposureHostnameConflictRequeuesAt30s", func() {
 		tunnel := readyTunnel(ctx, tunnelReconciler, "conflict-tunnel", "conflict-tunnel")
 		first := createExposure(ctx, "one", tunnel.Name, "same.example.com", true)
 		second := createExposure(ctx, "two", tunnel.Name, "same.example.com", true)
 
-		reconcileExposureExpectBackoff(ctx, exposureReconciler, first)
-		reconcileExposureExpectBackoff(ctx, exposureReconciler, second)
+		reconcileExposureExpectRequeueAfter30(ctx, exposureReconciler, first)
+		reconcileExposureExpectRequeueAfter30(ctx, exposureReconciler, second)
 
 		Expect(meta.FindStatusCondition(fetchExposure(ctx, first.Name).Status.Conditions, ConditionReady).Reason).To(Equal(ReasonHostnameConflict))
 		Expect(meta.FindStatusCondition(fetchExposure(ctx, second.Name).Status.Conditions, ConditionReady).Reason).To(Equal(ReasonHostnameConflict))
+	})
+
+	It("TestExposureCloudflareWriteFailureBacksOff", func() {
+		tunnel := readyTunnel(ctx, tunnelReconciler, "dns-write-failure-tunnel", "dns-write-failure-tunnel")
+		exposure := createExposure(ctx, "dns-write-failure", tunnel.Name, "dns-write-failure.example.com", false)
+		writeErr := errors.New("dns create failed")
+		reconciler := &CloudflareExposureReconciler{
+			Base: Base{
+				Client: indexedClient,
+				Scheme: indexedClient.Scheme(),
+				NewCloudflareClient: func(ctx context.Context, ref CredentialsRef) (cloudflare.Client, error) {
+					client, err := newFakeCloudflareClient(indexedClient, fakeCF)(ctx, ref)
+					if err != nil {
+						return nil, err
+					}
+					return dnsCreateErrorClient{Client: client, err: writeErr}, nil
+				},
+				Recorder: newTestRecorder(),
+			},
+		}
+
+		result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: exposure.Namespace, Name: exposure.Name}})
+
+		Expect(result).To(Equal(reconcile.Result{}))
+		Expect(err).To(MatchError(ContainSubstring(ReasonDNSWriteFailed)))
+		Expect(err).To(MatchError(ContainSubstring(writeErr.Error())))
+		current := fetchExposure(ctx, exposure.Name)
+		Expect(meta.FindStatusCondition(current.Status.Conditions, ConditionReady).Reason).To(Equal(ReasonDNSWriteFailed))
 	})
 
 	It("TestExposureIndexedHostnameConflictLookup", func() {
@@ -290,7 +320,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		Expect(err).NotTo(HaveOccurred())
 		exposure := createExposure(ctx, "foreign", tunnel.Name, "foreign.example.com", true)
 
-		reconcileExposureExpectBackoff(ctx, exposureReconciler, exposure)
+		reconcileExposureExpectRequeueAfter30(ctx, exposureReconciler, exposure)
 
 		current := fetchExposure(ctx, exposure.Name)
 		Expect(meta.FindStatusCondition(current.Status.Conditions, ConditionReady).Reason).To(Equal(ReasonHostnameConflict))
@@ -309,7 +339,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		Expect(err).NotTo(HaveOccurred())
 		exposure := createExposure(ctx, "foreign-dns", tunnel.Name, "foreign-dns.example.com", false)
 
-		reconcileExposureExpectBackoff(ctx, exposureReconciler, exposure)
+		reconcileExposureExpectRequeueAfter30(ctx, exposureReconciler, exposure)
 
 		current := fetchExposure(ctx, exposure.Name)
 		Expect(meta.FindStatusCondition(current.Status.Conditions, ConditionReady).Reason).To(Equal(ReasonHostnameConflict))
@@ -769,10 +799,28 @@ func reconcileExposure(ctx context.Context, reconciler *CloudflareExposureReconc
 	Expect(err).NotTo(HaveOccurred())
 }
 
-func reconcileExposureExpectBackoff(ctx context.Context, reconciler *CloudflareExposureReconciler, exposure *cfztv1alpha1.CloudflareExposure) {
+func reconcileExposureExpectRequeueAfter30(ctx context.Context, reconciler *CloudflareExposureReconciler, exposure *cfztv1alpha1.CloudflareExposure) {
 	result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: exposure.Namespace, Name: exposure.Name}})
-	Expect(result).To(Equal(reconcile.Result{}))
-	Expect(err).To(HaveOccurred())
+	Expect(result).To(Equal(reconcile.Result{RequeueAfter: 30 * time.Second}))
+	Expect(err).NotTo(HaveOccurred())
+}
+
+type dnsCreateErrorClient struct {
+	cloudflare.Client
+	err error
+}
+
+func (c dnsCreateErrorClient) DNSRecords() cloudflare.DNSRecords {
+	return dnsCreateErrorRecords{DNSRecords: c.Client.DNSRecords(), err: c.err}
+}
+
+type dnsCreateErrorRecords struct {
+	cloudflare.DNSRecords
+	err error
+}
+
+func (r dnsCreateErrorRecords) Create(context.Context, cloudflare.DNSRecordInput) (*cloudflare.DNSRecord, error) {
+	return nil, r.err
 }
 
 func markTunnelDaemonSetReady(ctx context.Context, tunnelName string) {

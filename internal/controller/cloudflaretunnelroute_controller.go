@@ -75,7 +75,10 @@ func (r *CloudflareTunnelRouteReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, err
 	}
 	if !ok {
-		return ctrl.Result{}, r.setRouteStatus(ctx, &route, route.Status.RouteId, route.Status.VirtualNetworkId, false, ReasonTunnelNotReady, "referenced CloudflareTunnel is not ready")
+		if statusErr := r.setRouteStatus(ctx, &route, route.Status.RouteId, route.Status.VirtualNetworkId, false, ReasonTunnelNotReady, "referenced CloudflareTunnel is not ready"); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
 	network, err := canonicalNetwork(route.Spec.Network)
@@ -85,7 +88,10 @@ func (r *CloudflareTunnelRouteReconciler) Reconcile(ctx context.Context, req ctr
 
 	cfClient, err := r.CloudflareClient(ctx, credentialsRefFromTunnel(tunnel))
 	if err != nil {
-		return ctrl.Result{}, r.setRouteStatus(ctx, &route, route.Status.RouteId, route.Status.VirtualNetworkId, false, ReasonCredentialsMissing, err.Error())
+		if statusErr := r.setRouteStatus(ctx, &route, route.Status.RouteId, route.Status.VirtualNetworkId, false, ReasonCredentialsMissing, err.Error()); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
 	desired := cloudflare.TunnelRouteInput{
@@ -100,7 +106,10 @@ func (r *CloudflareTunnelRouteReconciler) Reconcile(ctx context.Context, req ctr
 			r.Recorder.Eventf(&route, corev1.EventTypeWarning, EventForeignRoute, "Cloudflare tunnel route already exists without local ownership record")
 			return ctrl.Result{}, r.setRouteStatus(ctx, &route, route.Status.RouteId, route.Status.VirtualNetworkId, false, ReasonForeignRoute, "Cloudflare tunnel route already exists without local ownership record")
 		}
-		return ctrl.Result{}, r.setRouteStatus(ctx, &route, route.Status.RouteId, route.Status.VirtualNetworkId, false, ReasonRouteWriteFailed, err.Error())
+		if statusErr := r.setRouteStatus(ctx, &route, route.Status.RouteId, route.Status.VirtualNetworkId, false, ReasonRouteWriteFailed, err.Error()); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
+		return ctrl.Result{}, fmt.Errorf("%s: %w", ReasonRouteWriteFailed, err)
 	}
 	if created {
 		r.Recorder.Eventf(&route, corev1.EventTypeNormal, EventCreatedRoute, "Created Cloudflare tunnel route %s", cfRoute.ID)

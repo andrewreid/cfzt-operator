@@ -246,8 +246,12 @@ Completed on 2026-05-22:
   use the shared Ready/Progressing status updater where practical, and Exposure
   access/DNS reconcile steps mutate in-scope status instead of returning the
   old four-value status tuple.
+- Slice 6 subtask 14: requeue/error policy standardisation completed. Waiting
+  reasons now use 30s explicit requeues, while transient Cloudflare write/API
+  failures update status and return errors for controller-runtime backoff.
+  `AGENTS.md` now documents the split.
 
-Next: Slice 6 subtask 14.
+Next: Slice 6 subtask 15.
 
 ## 3. Slice plan
 
