@@ -250,8 +250,12 @@ Completed on 2026-05-22:
   reasons now use 30s explicit requeues, while transient Cloudflare write/API
   failures update status and return errors for controller-runtime backoff.
   `AGENTS.md` now documents the split.
+- Slice 6 subtask 15: final naming/package shape verified. `internal/naming`
+  now retains only token Secret, DaemonSet, Access app naming, and the finalizer
+  constant; ownership marker docs point at `internal/ownership`. Moving
+  `internal/controller/conditions.go` to the API package remains post-MVP.
 
-Next: Slice 6 subtask 15.
+Next: Slice 6 subtask 16.
 
 ## 3. Slice plan
 

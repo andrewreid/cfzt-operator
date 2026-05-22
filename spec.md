@@ -811,7 +811,9 @@ internal/origin/
 
 internal/naming/
   names.go              # token Secret + DaemonSet + Access app naming
-  tags.go               # source-uid tag formatting + parsing
+
+internal/ownership/
+  owner.go              # source-uid comments and Access tag ownership
 
 internal/workload/
   daemonset.go          # cloudflared DaemonSet construction

@@ -25,7 +25,7 @@ go test ./...
 The important package-level split is:
 
 - `internal/cloudflare`: real-client mapping and fake-client behavior. Unit tests must not call the Cloudflare API.
-- `internal/tunnelconfig`, `internal/naming`, `internal/workload`, and `api/v1alpha1`: deterministic builders, naming/tag formatting, workload rendering, and API helpers.
+- `internal/tunnelconfig`, `internal/naming`, `internal/ownership`, `internal/workload`, and `api/v1alpha1`: deterministic builders, names, ownership markers, workload rendering, and API helpers.
 - `internal/controller`: controller and CRD validation tests backed by envtest.
 
 Controller tests use Ginkgo and controller-runtime envtest. The suite in `internal/controller/suite_test.go` starts a local API server and etcd, installs CRDs from `config/crd/bases`, registers the cfzt API scheme, and exposes a controller-runtime client to the tests. Individual controller tests use `internal/cloudflare.NewFake()` for Cloudflare state, then create Kubernetes resources and assert both Kubernetes status and fake Cloudflare side effects.
