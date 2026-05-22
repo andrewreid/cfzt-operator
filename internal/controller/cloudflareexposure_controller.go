@@ -181,8 +181,7 @@ func (r *CloudflareExposureReconciler) reconcileExposureDNS(ctx context.Context,
 				result, statusErr := r.setExposureStatusAndRequeue(ctx, exposure, *status, ReasonForeignResource, err.Error())
 				return result, true, statusErr
 			}
-			result, statusErr := r.setExposureStatusAndBackoff(ctx, exposure, *status, ReasonDNSWriteFailed, err.Error())
-			return result, true, statusErr
+			return ctrl.Result{}, true, r.setExposureStatusAndBackoff(ctx, exposure, *status, ReasonDNSWriteFailed, err.Error())
 		}
 		status.DnsRecordId = record.ID
 		return ctrl.Result{}, false, nil
@@ -492,11 +491,11 @@ func (r *CloudflareExposureReconciler) setExposureStatus(ctx context.Context, ex
 	})
 }
 
-func (r *CloudflareExposureReconciler) setExposureStatusAndBackoff(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, cfStatus cfztv1alpha1.ExposureCloudflareStatus, reason, message string) (ctrl.Result, error) {
+func (r *CloudflareExposureReconciler) setExposureStatusAndBackoff(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, cfStatus cfztv1alpha1.ExposureCloudflareStatus, reason, message string) error {
 	if err := r.setExposureStatus(ctx, exposure, cfStatus, false, reason, message); err != nil {
-		return ctrl.Result{}, err
+		return err
 	}
-	return ctrl.Result{}, fmt.Errorf("%s: %s", reason, message)
+	return fmt.Errorf("%s: %s", reason, message)
 }
 
 func (r *CloudflareExposureReconciler) setExposureStatusAndRequeue(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, cfStatus cfztv1alpha1.ExposureCloudflareStatus, reason, message string) (ctrl.Result, error) {

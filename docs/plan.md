@@ -254,8 +254,13 @@ Completed on 2026-05-22:
   now retains only token Secret, DaemonSet, Access app naming, and the finalizer
   constant; ownership marker docs point at `internal/ownership`. Moving
   `internal/controller/conditions.go` to the API package remains post-MVP.
+- Slice 6 subtask 16: test reshape and linter cleanup completed. CRD
+  admission coverage is consolidated in one table-driven envtest file, the live
+  smoke harness moved to `test/live/harness.go`, `dupl` is re-enabled for
+  `internal/*`, and HTTPRoute optionality is documented in controller and Helm
+  RBAC comments.
 
-Next: Slice 6 subtask 16.
+Next: Slice 6 subtask 17.
 
 ## 3. Slice plan
 

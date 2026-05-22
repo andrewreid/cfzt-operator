@@ -42,6 +42,9 @@ rules:
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["get", "list", "watch"]
+  # HTTPRoute is optional at runtime. This grant is unconditional because RBAC
+  # rules can safely reference resources whose CRDs are absent, while templating
+  # it conditionally would make install behaviour depend on cluster discovery.
   - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["httproutes"]
     verbs: ["get", "list", "watch"]

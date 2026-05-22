@@ -11,6 +11,10 @@ import (
 
 const httpRouteCRDName = "httproutes.gateway.networking.k8s.io"
 
+// HTTPRoute discovery deliberately uses unstructured CRD reads instead of
+// gateway-api typed clients. Gateway API is optional for this operator, and
+// importing typed HTTPRoute packages would make the optional source path look
+// mandatory to future maintainers.
 func HTTPRouteCRDPresent(ctx context.Context, reader client.Reader) (bool, error) {
 	crd := &unstructured.Unstructured{}
 	crd.SetAPIVersion("apiextensions.k8s.io/v1")
