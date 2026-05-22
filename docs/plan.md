@@ -197,8 +197,11 @@ Completed on 2026-05-22:
 - Slice 6 subtask 2: index fallback removal + mapper helper landed. The
   client-side index fallback is gone, watch mappers now route through the
   generic `enqueueNamed` helper, and the old mapper functions were deleted.
+- Slice 6 subtask 3: real Cloudflare client + zone caches now live at package
+  scope keyed by account ID and API-token hash, so SDK clients, connection
+  pools, rate limiters, and zone lookups are reused across reconciles.
 
-Next: Slice 6 subtask 3.
+Next: Slice 6 subtask 4.
 
 ## 3. Slice plan
 

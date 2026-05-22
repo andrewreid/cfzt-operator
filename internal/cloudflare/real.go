@@ -24,17 +24,30 @@ const (
 	maxRetries       = 5
 )
 
-var limiterByToken sync.Map
+var (
+	limiterByToken    sync.Map
+	zoneCacheByCred   sync.Map
+	clientCacheByCred sync.Map
+)
+
+type cacheKey struct {
+	accountID string
+	tokenHash [32]byte
+}
+
+type zoneCache struct {
+	mu    sync.Mutex
+	zones []Zone
+	ready bool
+}
 
 // RealClient wraps the cloudflare-go/v4 SDK behind the Client interface.
 // All SDK imports are confined to this file; controllers never see cloudflare-go.
 type RealClient struct {
-	api            *cf.Client
-	accountID      string
-	limiter        *rate.Limiter
-	mu             sync.Mutex
-	zoneCache      []Zone
-	zoneCacheReady bool
+	api       *cf.Client
+	accountID string
+	limiter   *rate.Limiter
+	cacheKey  cacheKey
 }
 
 // New constructs a RealClient authenticated with apiToken for accountID.
@@ -45,19 +58,38 @@ func New(accountID, apiToken string) (*RealClient, error) {
 	if apiToken == "" {
 		return nil, errors.New("cloudflare: apiToken required")
 	}
+	key := newCacheKey(accountID, apiToken)
+	if cached, ok := clientCacheByCred.Load(key); ok {
+		return cached.(*RealClient), nil
+	}
 	api := cf.NewClient(option.WithAPIToken(apiToken))
-	return &RealClient{
+	client := &RealClient{
 		api:       api,
 		accountID: accountID,
-		limiter:   limiterForToken(apiToken),
-	}, nil
+		limiter:   limiterForTokenHash(key.tokenHash),
+		cacheKey:  key,
+	}
+	actual, _ := clientCacheByCred.LoadOrStore(key, client)
+	return actual.(*RealClient), nil
+}
+
+func newCacheKey(accountID, apiToken string) cacheKey {
+	return cacheKey{accountID: accountID, tokenHash: sha256.Sum256([]byte(apiToken))}
 }
 
 func limiterForToken(apiToken string) *rate.Limiter {
-	sum := sha256.Sum256([]byte(apiToken))
-	key := fmt.Sprintf("%x", sum)
+	return limiterForTokenHash(sha256.Sum256([]byte(apiToken)))
+}
+
+func limiterForTokenHash(tokenHash [32]byte) *rate.Limiter {
+	key := fmt.Sprintf("%x", tokenHash)
 	actual, _ := limiterByToken.LoadOrStore(key, rate.NewLimiter(defaultRateLimit, defaultBurst))
 	return actual.(*rate.Limiter)
+}
+
+func zoneCacheForCred(key cacheKey) *zoneCache {
+	actual, _ := zoneCacheByCred.LoadOrStore(key, &zoneCache{})
+	return actual.(*zoneCache)
 }
 
 func (c *RealClient) Tunnels() Tunnels {
@@ -667,23 +699,24 @@ func (z *realZones) List(ctx context.Context) ([]Zone, error) {
 }
 
 func (z *realZones) Resolve(ctx context.Context, hostname string) (*Zone, error) {
-	z.client.mu.Lock()
-	if z.client.zoneCacheReady {
-		if zone, ok := LongestMatchingZone(z.client.zoneCache, hostname); ok {
-			z.client.mu.Unlock()
+	cache := zoneCacheForCred(z.client.cacheKey)
+	cache.mu.Lock()
+	if cache.ready {
+		if zone, ok := LongestMatchingZone(cache.zones, hostname); ok {
+			cache.mu.Unlock()
 			return zone, nil
 		}
 	}
-	z.client.mu.Unlock()
+	cache.mu.Unlock()
 
 	zones, err := z.List(ctx)
 	if err != nil {
 		return nil, err
 	}
-	z.client.mu.Lock()
-	z.client.zoneCache = append([]Zone(nil), zones...)
-	z.client.zoneCacheReady = true
-	z.client.mu.Unlock()
+	cache.mu.Lock()
+	cache.zones = append([]Zone(nil), zones...)
+	cache.ready = true
+	cache.mu.Unlock()
 
 	zone, ok := LongestMatchingZone(zones, hostname)
 	if !ok {

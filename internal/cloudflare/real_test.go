@@ -1,9 +1,11 @@
 package cloudflare
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"reflect"
+	"sync"
 	"testing"
 
 	"github.com/cloudflare/cloudflare-go/v4/zero_trust"
@@ -18,6 +20,49 @@ func TestLimiterForTokenShared(t *testing.T) {
 	}
 	if first == other {
 		t.Fatalf("different API tokens reused limiter")
+	}
+}
+
+func TestRealClientReuse(t *testing.T) {
+	clientCacheByCred = sync.Map{}
+
+	first, err := New("account-1", "token-1")
+	if err != nil {
+		t.Fatalf("New first: %v", err)
+	}
+	second, err := New("account-1", "token-1")
+	if err != nil {
+		t.Fatalf("New second: %v", err)
+	}
+	other, err := New("account-1", "token-2")
+	if err != nil {
+		t.Fatalf("New other: %v", err)
+	}
+
+	if first != second {
+		t.Fatalf("same credentials did not reuse RealClient")
+	}
+	if first == other {
+		t.Fatalf("different credentials reused RealClient")
+	}
+}
+
+func TestRealClientZoneCacheServesAcrossInstances(t *testing.T) {
+	zoneCacheByCred = sync.Map{}
+	key := newCacheKey("account-1", "token-1")
+	cache := zoneCacheForCred(key)
+	cache.mu.Lock()
+	cache.zones = []Zone{{ID: "zone-1", Name: "example.com"}}
+	cache.ready = true
+	cache.mu.Unlock()
+
+	first := &RealClient{cacheKey: key}
+	second := &RealClient{cacheKey: key}
+	if zone, err := first.Zones().Resolve(context.Background(), "app.example.com"); err != nil || zone.ID != "zone-1" {
+		t.Fatalf("first Resolve = (%+v, %v), want zone-1", zone, err)
+	}
+	if zone, err := second.Zones().Resolve(context.Background(), "other.example.com"); err != nil || zone.ID != "zone-1" {
+		t.Fatalf("second Resolve = (%+v, %v), want cached zone-1", zone, err)
 	}
 }
 
