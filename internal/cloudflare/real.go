@@ -158,6 +158,17 @@ func (c *RealClient) withRetry(ctx context.Context, fn func() error) error {
 	return nil // unreachable
 }
 
+func mapAPIError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var apiErr *cf.Error
+	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+		return ErrNotFound
+	}
+	return err
+}
+
 // realTunnels implements the Tunnels sub-interface against the SDK.
 type realTunnels struct {
 	client *RealClient
@@ -183,12 +194,12 @@ func (t *realTunnels) Create(ctx context.Context, in CreateTunnelInput) (*Tunnel
 	return result, err
 }
 
-func (t *realTunnels) List(ctx context.Context, filter ListTunnelsFilter) ([]Tunnel, error) {
+func (t *realTunnels) List(ctx context.Context, name string) ([]Tunnel, error) {
 	params := zero_trust.TunnelCloudflaredListParams{
 		AccountID: cf.F(t.client.accountID),
 	}
-	if filter.Name != "" {
-		params.Name = cf.F(filter.Name)
+	if name != "" {
+		params.Name = cf.F(name)
 	}
 
 	var results []Tunnel
@@ -216,11 +227,7 @@ func (t *realTunnels) Get(ctx context.Context, id string) (*Tunnel, error) {
 			},
 		)
 		if err != nil {
-			var apiErr *cf.Error
-			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
-				return ErrNotFound
-			}
-			return err
+			return mapAPIError(err)
 		}
 		result = &Tunnel{
 			ID:   resp.ID,
@@ -239,12 +246,9 @@ func (t *realTunnels) Delete(ctx context.Context, id string) error {
 			},
 		)
 		if err != nil {
-			var apiErr *cf.Error
-			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
-				return ErrNotFound
-			}
+			return mapAPIError(err)
 		}
-		return err
+		return nil
 	})
 }
 
@@ -257,7 +261,7 @@ func (t *realTunnels) Token(ctx context.Context, id string) (string, error) {
 			},
 		)
 		if err != nil {
-			return err
+			return mapAPIError(err)
 		}
 		if resp != nil {
 			tok = *resp
@@ -284,6 +288,9 @@ func (r *realTunnelRoutes) List(ctx context.Context, filter ListTunnelRoutesFilt
 		}),
 	}
 	if filter.Network != "" {
+		// The SDK exposes subset/superset CIDR filters, not exact matching.
+		// This wrapper asks for both candidate sets and enforces exact Network
+		// equality below so callers get one stable filter semantic.
 		params.NetworkSubset = cf.F(filter.Network)
 		params.NetworkSuperset = cf.F(filter.Network)
 	}
@@ -345,11 +352,7 @@ func (r *realTunnelRoutes) Get(ctx context.Context, id string) (*TunnelRoute, er
 			AccountID: cf.F(r.client.accountID),
 		})
 		if err != nil {
-			var apiErr *cf.Error
-			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
-				return ErrNotFound
-			}
-			return err
+			return mapAPIError(err)
 		}
 		result = routeFromSDK(resp)
 		return nil
@@ -371,11 +374,7 @@ func (r *realTunnelRoutes) Edit(ctx context.Context, id string, in TunnelRouteIn
 	err := r.client.withRetry(ctx, func() error {
 		resp, err := r.client.api.ZeroTrust.Networks.Routes.Edit(ctx, id, params)
 		if err != nil {
-			var apiErr *cf.Error
-			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
-				return ErrNotFound
-			}
-			return err
+			return mapAPIError(err)
 		}
 		result = routeFromSDK(resp)
 		return nil
@@ -389,12 +388,9 @@ func (r *realTunnelRoutes) Delete(ctx context.Context, id string) error {
 			AccountID: cf.F(r.client.accountID),
 		})
 		if err != nil {
-			var apiErr *cf.Error
-			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
-				return ErrNotFound
-			}
+			return mapAPIError(err)
 		}
-		return err
+		return nil
 	})
 }
 
@@ -432,12 +428,9 @@ func (c *realConfigurations) Update(ctx context.Context, tunnelID string, config
 			},
 		)
 		if err != nil {
-			var apiErr *cf.Error
-			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
-				return ErrNotFound
-			}
+			return mapAPIError(err)
 		}
-		return err
+		return nil
 	})
 }
 
@@ -455,11 +448,7 @@ func (t *realAccessTags) Ensure(ctx context.Context, name string) error {
 			AccountID: cf.F(t.client.accountID),
 		})
 		if err != nil {
-			var apiErr *cf.Error
-			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
-				return ErrNotFound
-			}
-			return err
+			return mapAPIError(err)
 		}
 		return nil
 	})
@@ -484,12 +473,9 @@ func (t *realAccessTags) Delete(ctx context.Context, name string) error {
 			AccountID: cf.F(t.client.accountID),
 		})
 		if err != nil {
-			var apiErr *cf.Error
-			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
-				return ErrNotFound
-			}
+			return mapAPIError(err)
 		}
-		return err
+		return nil
 	})
 }
 
@@ -513,6 +499,9 @@ func (a *realAccessApplications) List(ctx context.Context, domain string) ([]Acc
 }
 
 func (a *realAccessApplications) Create(ctx context.Context, in AccessApplicationInput) (*AccessApplication, error) {
+	if err := a.ensureTags(ctx, in.Tags); err != nil {
+		return nil, err
+	}
 	var result *AccessApplication
 	err := a.client.withRetry(ctx, func() error {
 		resp, err := a.client.api.ZeroTrust.Access.Applications.New(ctx, zero_trust.AccessApplicationNewParams{
@@ -529,6 +518,9 @@ func (a *realAccessApplications) Create(ctx context.Context, in AccessApplicatio
 }
 
 func (a *realAccessApplications) Update(ctx context.Context, id string, in AccessApplicationInput) (*AccessApplication, error) {
+	if err := a.ensureTags(ctx, in.Tags); err != nil {
+		return nil, err
+	}
 	var result *AccessApplication
 	err := a.client.withRetry(ctx, func() error {
 		resp, err := a.client.api.ZeroTrust.Access.Applications.Update(ctx, id, zero_trust.AccessApplicationUpdateParams{
@@ -536,11 +528,7 @@ func (a *realAccessApplications) Update(ctx context.Context, id string, in Acces
 			Body:      accessUpdateBody(in),
 		})
 		if err != nil {
-			var apiErr *cf.Error
-			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
-				return ErrNotFound
-			}
-			return err
+			return mapAPIError(err)
 		}
 		result = accessAppFromUpdateResponse(resp, in.PolicyUUID)
 		return nil
@@ -554,13 +542,19 @@ func (a *realAccessApplications) Delete(ctx context.Context, id string) error {
 			zero_trust.AccessApplicationDeleteParams{AccountID: cf.F(a.client.accountID)},
 		)
 		if err != nil {
-			var apiErr *cf.Error
-			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
-				return ErrNotFound
-			}
+			return mapAPIError(err)
 		}
-		return err
+		return nil
 	})
+}
+
+func (a *realAccessApplications) ensureTags(ctx context.Context, tags []string) error {
+	for _, tag := range tags {
+		if err := a.client.AccessTags().Ensure(ctx, tag); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type realDNSRecords struct {
@@ -632,11 +626,7 @@ func (d *realDNSRecords) Update(ctx context.Context, id string, in DNSRecordInpu
 			},
 		})
 		if err != nil {
-			var apiErr *cf.Error
-			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
-				return ErrNotFound
-			}
-			return err
+			return mapAPIError(err)
 		}
 		result = dnsRecordFromResponse(in.ZoneID, resp)
 		return nil
@@ -648,12 +638,9 @@ func (d *realDNSRecords) Delete(ctx context.Context, zoneID, id string) error {
 	return d.client.withRetry(ctx, func() error {
 		_, err := d.client.api.DNS.Records.Delete(ctx, id, cfdns.RecordDeleteParams{ZoneID: cf.F(zoneID)})
 		if err != nil {
-			var apiErr *cf.Error
-			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
-				return ErrNotFound
-			}
+			return mapAPIError(err)
 		}
-		return err
+		return nil
 	})
 }
 
@@ -703,34 +690,54 @@ func (z *realZones) Resolve(ctx context.Context, hostname string) (*Zone, error)
 }
 
 func accessNewBody(in AccessApplicationInput) zero_trust.AccessApplicationNewParamsBodyUnion {
+	fields := commonAccessFields(in)
 	return zero_trust.AccessApplicationNewParamsBodySelfHostedApplication{
-		Domain: cf.F(in.Domain),
+		Domain: cf.F(fields.domain),
 		Type:   cf.F(zero_trust.ApplicationTypeSelfHosted),
-		Name:   cf.F(in.Name),
+		Name:   cf.F(fields.name),
 		Policies: cf.F([]zero_trust.AccessApplicationNewParamsBodySelfHostedApplicationPolicyUnion{
 			zero_trust.AccessApplicationNewParamsBodySelfHostedApplicationPoliciesAccessAppPolicyLink{
-				ID:         cf.F(in.PolicyUUID),
+				ID:         cf.F(fields.policyUUID),
 				Precedence: cf.F(int64(0)),
 			},
 		}),
-		SelfHostedDomains: cf.F([]zero_trust.SelfHostedDomainsParam{in.Domain}),
-		Tags:              cf.F(in.Tags),
+		SelfHostedDomains: cf.F(fields.selfHostedDomains),
+		Tags:              cf.F(fields.tags),
 	}
 }
 
 func accessUpdateBody(in AccessApplicationInput) zero_trust.AccessApplicationUpdateParamsBodyUnion {
+	fields := commonAccessFields(in)
 	return zero_trust.AccessApplicationUpdateParamsBodySelfHostedApplication{
-		Domain: cf.F(in.Domain),
+		Domain: cf.F(fields.domain),
 		Type:   cf.F(zero_trust.ApplicationTypeSelfHosted),
-		Name:   cf.F(in.Name),
+		Name:   cf.F(fields.name),
 		Policies: cf.F([]zero_trust.AccessApplicationUpdateParamsBodySelfHostedApplicationPolicyUnion{
 			zero_trust.AccessApplicationUpdateParamsBodySelfHostedApplicationPoliciesAccessAppPolicyLink{
-				ID:         cf.F(in.PolicyUUID),
+				ID:         cf.F(fields.policyUUID),
 				Precedence: cf.F(int64(0)),
 			},
 		}),
-		SelfHostedDomains: cf.F([]zero_trust.SelfHostedDomainsParam{in.Domain}),
-		Tags:              cf.F(in.Tags),
+		SelfHostedDomains: cf.F(fields.selfHostedDomains),
+		Tags:              cf.F(fields.tags),
+	}
+}
+
+type accessCommonFields struct {
+	domain            string
+	name              string
+	policyUUID        string
+	selfHostedDomains []zero_trust.SelfHostedDomainsParam
+	tags              []string
+}
+
+func commonAccessFields(in AccessApplicationInput) accessCommonFields {
+	return accessCommonFields{
+		domain:            in.Domain,
+		name:              in.Name,
+		policyUUID:        in.PolicyUUID,
+		selfHostedDomains: []zero_trust.SelfHostedDomainsParam{in.Domain},
+		tags:              in.Tags,
 	}
 }
 
@@ -896,11 +903,7 @@ func (p *realAccessPolicies) GetMetadata(ctx context.Context, id string) (*Acces
 			zero_trust.AccessPolicyGetParams{AccountID: cf.F(p.client.accountID)},
 		)
 		if err != nil {
-			var apiErr *cf.Error
-			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
-				return ErrNotFound
-			}
-			return err
+			return mapAPIError(err)
 		}
 		result = &AccessPolicy{
 			ID:                           resp.ID,
@@ -922,11 +925,7 @@ func (p *realAccessPolicies) Get(ctx context.Context, id string) (*AccessPolicy,
 			zero_trust.AccessPolicyGetParams{AccountID: cf.F(p.client.accountID)},
 		)
 		if err != nil {
-			var apiErr *cf.Error
-			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
-				return ErrNotFound
-			}
-			return err
+			return mapAPIError(err)
 		}
 		include, err := fromAccessRules(resp.Include)
 		if err != nil {
@@ -1024,11 +1023,7 @@ func (p *realAccessPolicies) Update(ctx context.Context, id string, in AccessPol
 			PurposeJustificationPrompt:   cf.F(in.PurposeJustificationPrompt),
 		})
 		if err != nil {
-			var apiErr *cf.Error
-			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
-				return ErrNotFound
-			}
-			return err
+			return mapAPIError(err)
 		}
 		include, err := fromAccessRules(resp.Include)
 		if err != nil {
@@ -1064,12 +1059,9 @@ func (p *realAccessPolicies) Delete(ctx context.Context, id string) error {
 			zero_trust.AccessPolicyDeleteParams{AccountID: cf.F(p.client.accountID)},
 		)
 		if err != nil {
-			var apiErr *cf.Error
-			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
-				return ErrNotFound
-			}
+			return mapAPIError(err)
 		}
-		return err
+		return nil
 	})
 }
 

@@ -244,9 +244,6 @@ func (r *CloudflareExposureReconciler) reconcileAccess(ctx context.Context, expo
 		PolicyUUID: policyUUID,
 		Tags:       ownershipTags(exposure.UID),
 	}
-	if err := ensureAccessTags(ctx, cfClient, want.Tags); err != nil {
-		return nil, false, err
-	}
 	var owned *cloudflare.AccessApplication
 	for _, app := range apps {
 		if owner, ok := ownershipUIDFromTags(app.Tags); ok && owner != exposure.UID {
@@ -567,15 +564,6 @@ const (
 	accessSourceUIDChunkPrefix = "source-uid-"
 	accessTagMaxLength         = 35
 )
-
-func ensureAccessTags(ctx context.Context, cfClient cloudflare.Client, tags []string) error {
-	for _, tag := range tags {
-		if err := cfClient.AccessTags().Ensure(ctx, tag); err != nil {
-			return err
-		}
-	}
-	return nil
-}
 
 func ownedByTags(tags []string, uid types.UID) bool {
 	found, ok := ownershipUIDFromTags(tags)

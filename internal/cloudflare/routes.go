@@ -19,8 +19,7 @@ type TunnelRouteInput struct {
 	Comment          string
 }
 
-// ListTunnelRoutesFilter narrows active cfd_tunnel routes. Network is matched
-// exactly by the wrapper after the SDK returns superset/subset candidates.
+// ListTunnelRoutesFilter narrows active cfd_tunnel routes.
 type ListTunnelRoutesFilter struct {
 	Network          string
 	TunnelID         string

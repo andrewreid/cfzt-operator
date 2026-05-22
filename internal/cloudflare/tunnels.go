@@ -15,15 +15,10 @@ type CreateTunnelInput struct {
 	ConfigSrc string // "cloudflare" for remotely-managed tunnels (D1)
 }
 
-// ListTunnelsFilter narrows the List query. Zero value = no filter.
-type ListTunnelsFilter struct {
-	Name string
-}
-
 // Tunnels is the sub-interface for tunnel lifecycle operations.
 type Tunnels interface {
 	Create(ctx context.Context, in CreateTunnelInput) (*Tunnel, error)
-	List(ctx context.Context, filter ListTunnelsFilter) ([]Tunnel, error)
+	List(ctx context.Context, name string) ([]Tunnel, error)
 	Get(ctx context.Context, id string) (*Tunnel, error)
 	Delete(ctx context.Context, id string) error
 	Token(ctx context.Context, id string) (string, error)

@@ -204,8 +204,13 @@ Completed on 2026-05-22:
   ingress document hash and route status already match. `status.ingressDocHash`
   records the last written document, and the unused configurations `Get`
   wrapper was removed.
+- Slice 6 subtask 5: Cloudflare client surface cleanup completed. Real client
+  404 mapping now runs through `mapAPIError`, Access application create/update
+  ensure tags at the wrapper boundary, tunnel listing now takes a plain name
+  string, and the route-list SDK subset/superset quirk is documented at the
+  wrapper boundary.
 
-Next: Slice 6 subtask 5.
+Next: Slice 6 subtask 6.
 
 ## 3. Slice plan
 
@@ -665,7 +670,7 @@ cleanups first so the bigger reshapes don't fight rebases.
      divergence becomes visible (review §1.14); push tag-ensure inside
      `realAccessApplications.Create` and `.Update` so the controller drops
      its tag-ensure loop at `cloudflareexposure_controller.go:248` (review
-     §5.1); change `Tunnels.List(ctx, accountID, name string)` (drop
+     §5.1); change `Tunnels.List(ctx, name string)` (drop
      `ListTunnelsFilter` struct, review §5.3); add wrapper-boundary comment
      on `ListTunnelRoutesFilter.Network` workaround at line ~254 documenting
      the SDK subset/superset quirk (review §5.4).

@@ -135,12 +135,12 @@ func (t *fakeTunnels) Create(_ context.Context, in CreateTunnelInput) (*Tunnel, 
 	return &copy, nil
 }
 
-func (t *fakeTunnels) List(_ context.Context, filter ListTunnelsFilter) ([]Tunnel, error) {
+func (t *fakeTunnels) List(_ context.Context, name string) ([]Tunnel, error) {
 	t.fc.mu.Lock()
 	defer t.fc.mu.Unlock()
 	var out []Tunnel
 	for _, tun := range t.fc.tunnels {
-		if filter.Name != "" && tun.Name != filter.Name {
+		if name != "" && tun.Name != name {
 			continue
 		}
 		out = append(out, *tun)
@@ -244,6 +244,7 @@ func (a *fakeAccessApplications) Create(_ context.Context, in AccessApplicationI
 	defer a.fc.mu.Unlock()
 	id := uuid.New().String()
 	app := &AccessApplication{ID: id}
+	ensureFakeAccessTagsLocked(a.fc, in.Tags)
 	applyAccessApplication(app, in)
 	a.fc.accessApps[id] = app
 	copy := copyAccessApplication(app)
@@ -257,6 +258,7 @@ func (a *fakeAccessApplications) Update(_ context.Context, id string, in AccessA
 	if !ok {
 		return nil, ErrNotFound
 	}
+	ensureFakeAccessTagsLocked(a.fc, in.Tags)
 	applyAccessApplication(app, in)
 	copy := copyAccessApplication(app)
 	return &copy, nil
@@ -462,6 +464,12 @@ func applyAccessApplication(app *AccessApplication, in AccessApplicationInput) {
 		app.PolicyUUIDs = []string{in.PolicyUUID}
 	}
 	app.Tags = append([]string(nil), in.Tags...)
+}
+
+func ensureFakeAccessTagsLocked(fc *FakeClient, tags []string) {
+	for _, tag := range tags {
+		fc.accessTags[tag] = true
+	}
 }
 
 func copyAccessApplication(app *AccessApplication) AccessApplication {

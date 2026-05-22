@@ -42,6 +42,37 @@ func TestFakeTunnelsCreateGetDelete(t *testing.T) {
 	}
 }
 
+func TestTunnelsListString(t *testing.T) {
+	ctx := context.Background()
+	fc := cloudflare.NewFake()
+	tuns := fc.Tunnels()
+
+	_, err := tuns.Create(ctx, cloudflare.CreateTunnelInput{Name: "homelab", ConfigSrc: "cloudflare"})
+	if err != nil {
+		t.Fatalf("Create homelab: %v", err)
+	}
+	_, err = tuns.Create(ctx, cloudflare.CreateTunnelInput{Name: "other", ConfigSrc: "cloudflare"})
+	if err != nil {
+		t.Fatalf("Create other: %v", err)
+	}
+
+	got, err := tuns.List(ctx, "homelab")
+	if err != nil {
+		t.Fatalf("List by name: %v", err)
+	}
+	if len(got) != 1 || got[0].Name != "homelab" {
+		t.Fatalf("List by name = %#v, want only homelab", got)
+	}
+
+	all, err := tuns.List(ctx, "")
+	if err != nil {
+		t.Fatalf("List all: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("List all length = %d, want 2", len(all))
+	}
+}
+
 func TestFakeTokenIdempotent(t *testing.T) {
 	ctx := context.Background()
 	fc := cloudflare.NewFake()
@@ -102,6 +133,42 @@ func TestFakeAccessAppRoundTrip(t *testing.T) {
 	}
 	if len(apps) != 1 || apps[0].ID != app.ID {
 		t.Fatalf("apps = %#v, want created app", apps)
+	}
+}
+
+func TestFakeAccessApplicationsEnsuresTagsImplicitly(t *testing.T) {
+	ctx := context.Background()
+	fake := cloudflare.NewFake()
+	app, err := fake.AccessApplications().Create(ctx, cloudflare.AccessApplicationInput{
+		Name:       "jellyfin-cfzt",
+		Domain:     "jellyfin.example.com",
+		PolicyUUID: "00000000-0000-4000-8000-000000000001",
+		Tags:       []string{"managed-by=cfzt-operator", "source-uid-0=uid-1"},
+	})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	if err := fake.AccessTags().Delete(ctx, "managed-by=cfzt-operator"); err != nil {
+		t.Fatalf("Create did not implicitly ensure managed-by tag: %v", err)
+	}
+	if err := fake.AccessTags().Delete(ctx, "source-uid-0=uid-1"); err != nil {
+		t.Fatalf("Create did not implicitly ensure source UID tag: %v", err)
+	}
+
+	_, err = fake.AccessApplications().Update(ctx, app.ID, cloudflare.AccessApplicationInput{
+		Name:       "jellyfin-cfzt",
+		Domain:     "jellyfin.example.com",
+		PolicyUUID: "00000000-0000-4000-8000-000000000001",
+		Tags:       []string{"managed-by=cfzt-operator", "source-uid-0=uid-2"},
+	})
+	if err != nil {
+		t.Fatalf("Update returned error: %v", err)
+	}
+	if err := fake.AccessTags().Delete(ctx, "managed-by=cfzt-operator"); err != nil {
+		t.Fatalf("Update did not implicitly ensure managed-by tag: %v", err)
+	}
+	if err := fake.AccessTags().Delete(ctx, "source-uid-0=uid-2"); err != nil {
+		t.Fatalf("Update did not implicitly ensure source UID tag: %v", err)
 	}
 }
 

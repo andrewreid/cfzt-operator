@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"reflect"
 	"sync"
 	"testing"
 
+	cf "github.com/cloudflare/cloudflare-go/v4"
 	"github.com/cloudflare/cloudflare-go/v4/zero_trust"
 )
 
@@ -63,6 +65,19 @@ func TestRealClientZoneCacheServesAcrossInstances(t *testing.T) {
 	}
 	if zone, err := second.Zones().Resolve(context.Background(), "other.example.com"); err != nil || zone.ID != "zone-1" {
 		t.Fatalf("second Resolve = (%+v, %v), want cached zone-1", zone, err)
+	}
+}
+
+func TestMapAPIErrorNotFound(t *testing.T) {
+	if err := mapAPIError(&cf.Error{StatusCode: http.StatusNotFound}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("mapAPIError(404) = %v, want ErrNotFound", err)
+	}
+	sentinel := errors.New("boom")
+	if err := mapAPIError(sentinel); !errors.Is(err, sentinel) {
+		t.Fatalf("mapAPIError(non-API) = %v, want sentinel", err)
+	}
+	if err := mapAPIError(nil); err != nil {
+		t.Fatalf("mapAPIError(nil) = %v, want nil", err)
 	}
 }
 

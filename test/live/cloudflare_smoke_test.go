@@ -111,7 +111,7 @@ func TestCloudflarePreflight(t *testing.T) {
 	if _, err := cfClient.AccessApplications().List(ctx, "__cfzt-smoke-preflight-"+cfg.runSuffix+"."+cfg.testZone); err != nil {
 		t.Fatalf("list Cloudflare Access applications: %v", err)
 	}
-	if _, err := cfClient.Tunnels().List(ctx, cloudflare.ListTunnelsFilter{Name: "__cfzt-smoke-preflight-" + cfg.runSuffix}); err != nil {
+	if _, err := cfClient.Tunnels().List(ctx, "__cfzt-smoke-preflight-"+cfg.runSuffix); err != nil {
 		t.Fatalf("list Cloudflare tunnels: %v", err)
 	}
 	for _, network := range []string{cfg.tunnelRouteCIDR} {
@@ -944,7 +944,7 @@ func (h *smokeHarness) deleteAccessPoliciesByName(ctx context.Context, name stri
 
 func (h *smokeHarness) waitTunnelAbsent(ctx context.Context, timeout time.Duration) {
 	h.waitForContext(ctx, "Cloudflare tunnel absent", timeout, func() (bool, error) {
-		tunnels, err := h.cf.Tunnels().List(ctx, cloudflare.ListTunnelsFilter{Name: h.cfg.tunnelName})
+		tunnels, err := h.cf.Tunnels().List(ctx, h.cfg.tunnelName)
 		if err != nil {
 			return false, err
 		}

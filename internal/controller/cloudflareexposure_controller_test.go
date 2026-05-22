@@ -105,6 +105,12 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		Expect(records[0].Type).To(Equal("CNAME"))
 		Expect(records[0].Content).To(Equal(cfTunnel.Status.TunnelId + ".cfargotunnel.com"))
 		Expect(records[0].Proxied).To(BeTrue())
+		apps, err := fakeCF.AccessApplications().List(ctx, "jellyfin.example.com")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(apps).To(HaveLen(1))
+		for _, tag := range apps[0].Tags {
+			Expect(fakeCF.AccessTags().Delete(ctx, tag)).To(Succeed())
+		}
 	})
 
 	It("TestTunnelConfigUpdateSkippedWhenUnchanged", func() {

@@ -310,7 +310,7 @@ func (r *CloudflareTunnelReconciler) reconcileCloudflareTunnel(ctx context.Conte
 		}
 	}
 
-	existing, err := cfClient.Tunnels().List(ctx, cloudflare.ListTunnelsFilter{Name: tunnel.Spec.TunnelName})
+	existing, err := cfClient.Tunnels().List(ctx, tunnel.Spec.TunnelName)
 	if err != nil {
 		return nil, false, err
 	}
