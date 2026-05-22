@@ -36,7 +36,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	cfztv1alpha1 "github.com/andrewreid/cfzt-operator/api/v1alpha1"
 	"github.com/andrewreid/cfzt-operator/internal/cloudflare"
@@ -304,40 +303,24 @@ func (r *CloudflareTunnelRouteReconciler) SetupWithManager(mgr ctrl.Manager) err
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&cfztv1alpha1.CloudflareTunnelRoute{}).
-		Watches(&cfztv1alpha1.CloudflareTunnel{}, handler.EnqueueRequestsFromMapFunc(r.tunnelToRoutes)).
+		Watches(&cfztv1alpha1.CloudflareTunnel{}, handler.EnqueueRequestsFromMapFunc(enqueueNamed(func(tunnel *cfztv1alpha1.CloudflareTunnel) []types.NamespacedName {
+			routes, err := r.routesForTunnel(context.Background(), tunnel.Name)
+			if err != nil {
+				return nil
+			}
+			requests := make([]types.NamespacedName, 0, len(routes))
+			for _, route := range routes {
+				requests = append(requests, types.NamespacedName{Name: route.Name})
+			}
+			return requests
+		}))).
 		Named("cloudflaretunnelroute").
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 		Complete(r)
 }
 
-func (r *CloudflareTunnelRouteReconciler) tunnelToRoutes(ctx context.Context, obj client.Object) []reconcile.Request {
-	tunnel, ok := obj.(*cfztv1alpha1.CloudflareTunnel)
-	if !ok {
-		return nil
-	}
-	routes, err := r.routesForTunnel(ctx, tunnel.Name)
-	if err != nil {
-		return nil
-	}
-	requests := make([]reconcile.Request, 0, len(routes))
-	for _, route := range routes {
-		requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{Name: route.Name}})
-	}
-	return requests
-}
-
 func (r *CloudflareTunnelRouteReconciler) routesForTunnel(ctx context.Context, tunnelName string) ([]cfztv1alpha1.CloudflareTunnelRoute, error) {
-	return listCloudflareTunnelRoutesByField(ctx, r.Client, tunnelRouteIndexTunnelRef, tunnelName, func(route cfztv1alpha1.CloudflareTunnelRoute) bool {
-		return route.Spec.TunnelRef.Name == tunnelName
-	})
-}
-
-func routeToTunnel(_ context.Context, obj client.Object) []reconcile.Request {
-	route, ok := obj.(*cfztv1alpha1.CloudflareTunnelRoute)
-	if !ok || route.Spec.TunnelRef.Name == "" {
-		return nil
-	}
-	return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: route.Spec.TunnelRef.Name}}}
+	return listRoutesByTunnel(ctx, r.Client, tunnelName)
 }
 
 func canonicalNetwork(network string) (string, error) {

@@ -187,15 +187,18 @@ Completed on 2026-05-21:
   cleans up both route CRs and CF routes. `hack/live-cloudflare-local.sh` and
   `.env.live.example` document `CF_SMOKE_ROUTE_CIDR` /
   `CF_SMOKE_ROUTE_CONFLICT_CIDR`.
-- Completed on 2026-05-22:
-  - Slice 6 subtask 1: dead-code + dead-branch purge completed. Removed the
-    unused Cloudflare error/event constants, `ObservedTunnelUid`, the dead
-    Access tag direct branch, the tunnel-route NotFound recursion and foreign
-    preflight branch, the stale tunnel SDK caveat, and the committed
-    `cover.out`. Chart metadata now calls out the placeholder appVersion/tag
-    values.
+Completed on 2026-05-22:
+- Slice 6 subtask 1: dead-code + dead-branch purge completed. Removed the
+  unused Cloudflare error/event constants, `ObservedTunnelUid`, the dead
+  Access tag direct branch, the tunnel-route NotFound recursion and foreign
+  preflight branch, the stale tunnel SDK caveat, and the committed
+  `cover.out`. Chart metadata now calls out the placeholder appVersion/tag
+  values.
+- Slice 6 subtask 2: index fallback removal + mapper helper landed. The
+  client-side index fallback is gone, watch mappers now route through the
+  generic `enqueueNamed` helper, and the old mapper functions were deleted.
 
-Next: Slice 6 subtask 2.
+Next: Slice 6 subtask 3.
 
 ## 3. Slice plan
 

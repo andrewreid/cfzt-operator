@@ -34,8 +34,8 @@ var _ = Describe("CloudflareTunnel Controller", func() {
 		ensureNamespace(ctx, namespace)
 		fakeCF = cloudflare.NewFake()
 		reconciler = &CloudflareTunnelReconciler{
-			Client: k8sClient,
-			Scheme: k8sClient.Scheme(),
+			Client: indexedClient,
+			Scheme: indexedClient.Scheme(),
 			CloudflareClientFactory: func(accountID, apiToken string) (cloudflare.Client, error) {
 				Expect(accountID).To(Equal("account-1"))
 				Expect(apiToken).To(Equal("token-1"))

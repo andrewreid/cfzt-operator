@@ -36,7 +36,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	cfztv1alpha1 "github.com/andrewreid/cfzt-operator/api/v1alpha1"
 	"github.com/andrewreid/cfzt-operator/internal/cloudflare"
@@ -233,15 +232,11 @@ func (r *CloudflareTunnelReconciler) ensureCloudflaredStopped(ctx context.Contex
 }
 
 func (r *CloudflareTunnelReconciler) referencingExposures(ctx context.Context, tunnelName string) ([]cfztv1alpha1.CloudflareExposure, error) {
-	return listCloudflareExposuresByField(ctx, r.Client, exposureIndexTunnelRefName, tunnelName, func(exposure cfztv1alpha1.CloudflareExposure) bool {
-		return exposure.Spec.TunnelRef.Name == tunnelName
-	})
+	return listExposuresByTunnel(ctx, r.Client, tunnelName)
 }
 
 func (r *CloudflareTunnelReconciler) referencingRoutes(ctx context.Context, tunnelName string) ([]cfztv1alpha1.CloudflareTunnelRoute, error) {
-	return listCloudflareTunnelRoutesByField(ctx, r.Client, tunnelRouteIndexTunnelRef, tunnelName, func(route cfztv1alpha1.CloudflareTunnelRoute) bool {
-		return route.Spec.TunnelRef.Name == tunnelName
-	})
+	return listRoutesByTunnel(ctx, r.Client, tunnelName)
 }
 
 func (r *CloudflareTunnelReconciler) reconcileTunnelConfig(ctx context.Context, tunnel *cfztv1alpha1.CloudflareTunnel, cfClient cloudflare.Client, tunnelID string) error {
@@ -463,17 +458,19 @@ func (r *CloudflareTunnelReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&cfztv1alpha1.CloudflareTunnel{}).
 		Owns(&corev1.Secret{}).
 		Owns(&appsv1.DaemonSet{}).
-		Watches(&cfztv1alpha1.CloudflareExposure{}, handler.EnqueueRequestsFromMapFunc(exposureToTunnel)).
-		Watches(&cfztv1alpha1.CloudflareTunnelRoute{}, handler.EnqueueRequestsFromMapFunc(routeToTunnel)).
+		Watches(&cfztv1alpha1.CloudflareExposure{}, handler.EnqueueRequestsFromMapFunc(enqueueNamed(func(exposure *cfztv1alpha1.CloudflareExposure) []types.NamespacedName {
+			if exposure.Spec.TunnelRef.Name == "" {
+				return nil
+			}
+			return []types.NamespacedName{{Name: exposure.Spec.TunnelRef.Name}}
+		}))).
+		Watches(&cfztv1alpha1.CloudflareTunnelRoute{}, handler.EnqueueRequestsFromMapFunc(enqueueNamed(func(route *cfztv1alpha1.CloudflareTunnelRoute) []types.NamespacedName {
+			if route.Spec.TunnelRef.Name == "" {
+				return nil
+			}
+			return []types.NamespacedName{{Name: route.Spec.TunnelRef.Name}}
+		}))).
 		Named("cloudflaretunnel").
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 		Complete(r)
-}
-
-func exposureToTunnel(_ context.Context, obj client.Object) []reconcile.Request {
-	exposure, ok := obj.(*cfztv1alpha1.CloudflareExposure)
-	if !ok || exposure.Spec.TunnelRef.Name == "" {
-		return nil
-	}
-	return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: exposure.Spec.TunnelRef.Name}}}
 }

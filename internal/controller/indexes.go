@@ -2,9 +2,7 @@ package controller
 
 import (
 	"context"
-	"strings"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -57,50 +55,34 @@ func indexCloudflareTunnelRouteFields(ctx context.Context, mgr ctrl.Manager) err
 	})
 }
 
-func listCloudflareTunnelRoutesByField(ctx context.Context, c client.Client, field, value string, keep func(cfztv1alpha1.CloudflareTunnelRoute) bool) ([]cfztv1alpha1.CloudflareTunnelRoute, error) {
+func listCloudflareTunnelRoutesByField(ctx context.Context, c client.Client, field, value string) ([]cfztv1alpha1.CloudflareTunnelRoute, error) {
 	var list cfztv1alpha1.CloudflareTunnelRouteList
 	if err := c.List(ctx, &list, client.MatchingFields{field: value}); err != nil {
-		if !isFieldIndexUnavailable(err) {
-			return nil, err
-		}
-		if err := c.List(ctx, &list); err != nil {
-			return nil, err
-		}
+		return nil, err
 	}
-	out := make([]cfztv1alpha1.CloudflareTunnelRoute, 0, len(list.Items))
-	for _, route := range list.Items {
-		if keep(route) {
-			out = append(out, route)
-		}
-	}
-	return out, nil
+	return list.Items, nil
 }
 
-func listCloudflareExposuresByField(ctx context.Context, c client.Client, field, value string, keep func(cfztv1alpha1.CloudflareExposure) bool) ([]cfztv1alpha1.CloudflareExposure, error) {
+func listCloudflareExposuresByField(ctx context.Context, c client.Client, field, value string) ([]cfztv1alpha1.CloudflareExposure, error) {
 	var list cfztv1alpha1.CloudflareExposureList
 	if err := c.List(ctx, &list, client.MatchingFields{field: value}); err != nil {
-		if !isFieldIndexUnavailable(err) {
-			return nil, err
-		}
-		if err := c.List(ctx, &list); err != nil {
-			return nil, err
-		}
+		return nil, err
 	}
-	out := make([]cfztv1alpha1.CloudflareExposure, 0, len(list.Items))
-	for _, exposure := range list.Items {
-		if keep(exposure) {
-			out = append(out, exposure)
-		}
-	}
-	return out, nil
+	return list.Items, nil
 }
 
-func isFieldIndexUnavailable(err error) bool {
-	if apierrors.IsBadRequest(err) {
-		return true
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "field label not supported") ||
-		strings.Contains(msg, "Index with name") ||
-		strings.Contains(msg, "does not exist")
+func listExposuresByTunnel(ctx context.Context, c client.Client, tunnelName string) ([]cfztv1alpha1.CloudflareExposure, error) {
+	return listCloudflareExposuresByField(ctx, c, exposureIndexTunnelRefName, tunnelName)
+}
+
+func listExposuresByHostname(ctx context.Context, c client.Client, hostname string) ([]cfztv1alpha1.CloudflareExposure, error) {
+	return listCloudflareExposuresByField(ctx, c, exposureIndexHostname, hostname)
+}
+
+func listExposuresByPolicy(ctx context.Context, c client.Client, policyName string) ([]cfztv1alpha1.CloudflareExposure, error) {
+	return listCloudflareExposuresByField(ctx, c, exposureIndexPolicyRefName, policyName)
+}
+
+func listRoutesByTunnel(ctx context.Context, c client.Client, tunnelName string) ([]cfztv1alpha1.CloudflareTunnelRoute, error) {
+	return listCloudflareTunnelRoutesByField(ctx, c, tunnelRouteIndexTunnelRef, tunnelName)
 }

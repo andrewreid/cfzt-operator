@@ -28,10 +28,12 @@ import (
 
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	cfztv1alpha1 "github.com/andrewreid/cfzt-operator/api/v1alpha1"
 	// +kubebuilder:scaffold:imports
@@ -41,11 +43,12 @@ import (
 // http://onsi.github.io/ginkgo/ to learn more about Ginkgo.
 
 var (
-	ctx       context.Context
-	cancel    context.CancelFunc
-	testEnv   *envtest.Environment
-	cfg       *rest.Config
-	k8sClient client.Client
+	ctx           context.Context
+	cancel        context.CancelFunc
+	testEnv       *envtest.Environment
+	cfg           *rest.Config
+	k8sClient     client.Client
+	indexedClient client.Client
 )
 
 func TestControllers(t *testing.T) {
@@ -81,10 +84,44 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 	Expect(cfg).NotTo(BeNil())
 
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+		Scheme:                 scheme.Scheme,
+		Metrics:                metricsserver.Options{BindAddress: ":0"},
+		HealthProbeBindAddress: ":0",
+	})
+	Expect(err).NotTo(HaveOccurred())
+	Expect(indexCloudflareExposureFields(context.Background(), mgr)).To(Succeed())
+	Expect(indexCloudflareTunnelRouteFields(context.Background(), mgr)).To(Succeed())
+	go func() {
+		defer GinkgoRecover()
+		Expect(mgr.Start(ctx)).To(Succeed())
+	}()
+	Eventually(func() bool {
+		return mgr.GetCache().WaitForCacheSync(ctx)
+	}, time.Minute, time.Second).Should(BeTrue())
+
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(k8sClient).NotTo(BeNil())
+	indexedClient = indexedListClient{Client: k8sClient, indexed: mgr.GetClient()}
+	Expect(indexedClient).NotTo(BeNil())
 })
+
+type indexedListClient struct {
+	client.Client
+	indexed client.Client
+}
+
+func (c indexedListClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	options := &client.ListOptions{}
+	for _, opt := range opts {
+		opt.ApplyToList(options)
+	}
+	if options.FieldSelector != nil && !options.FieldSelector.Empty() {
+		return c.indexed.List(ctx, list, opts...)
+	}
+	return c.Client.List(ctx, list, opts...)
+}
 
 var _ = AfterSuite(func() {
 	By("tearing down the test environment")

@@ -40,7 +40,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	cfztv1alpha1 "github.com/andrewreid/cfzt-operator/api/v1alpha1"
 	"github.com/andrewreid/cfzt-operator/internal/cloudflare"
@@ -298,9 +297,7 @@ func (r *CloudflareExposureReconciler) resolveAccessPolicyUUID(ctx context.Conte
 }
 
 func (r *CloudflareExposureReconciler) hasDuplicateHostname(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure) (bool, error) {
-	others, err := listCloudflareExposuresByField(ctx, r.Client, exposureIndexHostname, exposure.Spec.Hostname, func(other cfztv1alpha1.CloudflareExposure) bool {
-		return other.Spec.Hostname == exposure.Spec.Hostname
-	})
+	others, err := listExposuresByHostname(ctx, r.Client, exposure.Spec.Hostname)
 	if err != nil {
 		return false, err
 	}
@@ -684,53 +681,37 @@ func (r *CloudflareExposureReconciler) SetupWithManager(mgr ctrl.Manager) error 
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&cfztv1alpha1.CloudflareExposure{}).
-		Watches(&cfztv1alpha1.CloudflareTunnel{}, handler.EnqueueRequestsFromMapFunc(r.tunnelToExposures)).
-		Watches(&cfztv1alpha1.CloudflareAccessPolicy{}, handler.EnqueueRequestsFromMapFunc(r.policyToExposures)).
+		Watches(&cfztv1alpha1.CloudflareTunnel{}, handler.EnqueueRequestsFromMapFunc(enqueueNamed(func(tunnel *cfztv1alpha1.CloudflareTunnel) []types.NamespacedName {
+			exposures, err := r.exposuresForTunnel(context.Background(), tunnel.Name)
+			if err != nil {
+				return nil
+			}
+			requests := make([]types.NamespacedName, 0, len(exposures))
+			for _, exposure := range exposures {
+				requests = append(requests, types.NamespacedName{Namespace: exposure.Namespace, Name: exposure.Name})
+			}
+			return requests
+		}))).
+		Watches(&cfztv1alpha1.CloudflareAccessPolicy{}, handler.EnqueueRequestsFromMapFunc(enqueueNamed(func(policy *cfztv1alpha1.CloudflareAccessPolicy) []types.NamespacedName {
+			exposures, err := r.exposuresForPolicy(context.Background(), policy.Name)
+			if err != nil {
+				return nil
+			}
+			requests := make([]types.NamespacedName, 0, len(exposures))
+			for _, exposure := range exposures {
+				requests = append(requests, types.NamespacedName{Namespace: exposure.Namespace, Name: exposure.Name})
+			}
+			return requests
+		}))).
 		Named("cloudflareexposure").
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 		Complete(r)
 }
 
-func (r *CloudflareExposureReconciler) tunnelToExposures(ctx context.Context, obj client.Object) []reconcile.Request {
-	tunnel, ok := obj.(*cfztv1alpha1.CloudflareTunnel)
-	if !ok {
-		return nil
-	}
-	exposures, err := r.exposuresForTunnel(ctx, tunnel.Name)
-	if err != nil {
-		return nil
-	}
-	requests := make([]reconcile.Request, 0, len(exposures))
-	for _, exposure := range exposures {
-		requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: exposure.Namespace, Name: exposure.Name}})
-	}
-	return requests
-}
-
 func (r *CloudflareExposureReconciler) exposuresForTunnel(ctx context.Context, tunnelName string) ([]cfztv1alpha1.CloudflareExposure, error) {
-	return listCloudflareExposuresByField(ctx, r.Client, exposureIndexTunnelRefName, tunnelName, func(exposure cfztv1alpha1.CloudflareExposure) bool {
-		return exposure.Spec.TunnelRef.Name == tunnelName
-	})
-}
-
-func (r *CloudflareExposureReconciler) policyToExposures(ctx context.Context, obj client.Object) []reconcile.Request {
-	policy, ok := obj.(*cfztv1alpha1.CloudflareAccessPolicy)
-	if !ok {
-		return nil
-	}
-	exposures, err := r.exposuresForPolicy(ctx, policy.Name)
-	if err != nil {
-		return nil
-	}
-	requests := make([]reconcile.Request, 0, len(exposures))
-	for _, exposure := range exposures {
-		requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: exposure.Namespace, Name: exposure.Name}})
-	}
-	return requests
+	return listExposuresByTunnel(ctx, r.Client, tunnelName)
 }
 
 func (r *CloudflareExposureReconciler) exposuresForPolicy(ctx context.Context, policyName string) ([]cfztv1alpha1.CloudflareExposure, error) {
-	return listCloudflareExposuresByField(ctx, r.Client, exposureIndexPolicyRefName, policyName, func(exposure cfztv1alpha1.CloudflareExposure) bool {
-		return exposure.Spec.Access.PolicyRef.Name == policyName
-	})
+	return listExposuresByPolicy(ctx, r.Client, policyName)
 }

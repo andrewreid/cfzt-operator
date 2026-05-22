@@ -52,18 +52,18 @@ var _ = Describe("CloudflareExposure Controller", func() {
 			return fakeCF, nil
 		}
 		tunnelReconciler = &CloudflareTunnelReconciler{
-			Client:                  k8sClient,
-			Scheme:                  k8sClient.Scheme(),
+			Client:                  indexedClient,
+			Scheme:                  indexedClient.Scheme(),
 			CloudflareClientFactory: cloudflareFactory,
 		}
 		exposureReconciler = &CloudflareExposureReconciler{
-			Client:                  k8sClient,
-			Scheme:                  k8sClient.Scheme(),
+			Client:                  indexedClient,
+			Scheme:                  indexedClient.Scheme(),
 			CloudflareClientFactory: cloudflareFactory,
 		}
 		policyReconciler = &CloudflareAccessPolicyReconciler{
-			Client:                  k8sClient,
-			Scheme:                  k8sClient.Scheme(),
+			Client:                  indexedClient,
+			Scheme:                  indexedClient.Scheme(),
 			CloudflareClientFactory: cloudflareFactory,
 		}
 	})
@@ -347,7 +347,12 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		exposure := &cfztv1alpha1.CloudflareExposure{
 			Spec: cfztv1alpha1.CloudflareExposureSpec{TunnelRef: cfztv1alpha1.TunnelRef{Name: "mapped-tunnel"}},
 		}
-		requests := exposureToTunnel(ctx, exposure)
+		requests := enqueueNamed(func(exposure *cfztv1alpha1.CloudflareExposure) []types.NamespacedName {
+			if exposure.Spec.TunnelRef.Name == "" {
+				return nil
+			}
+			return []types.NamespacedName{{Name: exposure.Spec.TunnelRef.Name}}
+		})(ctx, exposure)
 		Expect(requests).To(HaveLen(1))
 		Expect(requests[0].Name).To(Equal("mapped-tunnel"))
 	})
@@ -357,9 +362,19 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		first := createExposure(ctx, "watch-one", tunnel.Name, "watch-one.example.com", false)
 		second := createExposure(ctx, "watch-two", tunnel.Name, "watch-two.example.com", false)
 
-		requests := exposureReconciler.tunnelToExposures(ctx, tunnel)
-
-		Expect(requests).To(ConsistOf(
+		Eventually(func() []reconcile.Request {
+			return enqueueNamed(func(tunnel *cfztv1alpha1.CloudflareTunnel) []types.NamespacedName {
+				exposures, err := exposureReconciler.exposuresForTunnel(context.Background(), tunnel.Name)
+				if err != nil {
+					return nil
+				}
+				requests := make([]types.NamespacedName, 0, len(exposures))
+				for _, exposure := range exposures {
+					requests = append(requests, types.NamespacedName{Namespace: exposure.Namespace, Name: exposure.Name})
+				}
+				return requests
+			})(ctx, tunnel)
+		}).Should(ConsistOf(
 			reconcile.Request{NamespacedName: types.NamespacedName{Namespace: first.Namespace, Name: first.Name}},
 			reconcile.Request{NamespacedName: types.NamespacedName{Namespace: second.Namespace, Name: second.Name}},
 		))
@@ -469,9 +484,19 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		first := createPolicyRefExposure(ctx, "policy-watch-one", policy.Name)
 		second := createPolicyRefExposure(ctx, "policy-watch-two", policy.Name)
 
-		requests := exposureReconciler.policyToExposures(ctx, policy)
-
-		Expect(requests).To(ConsistOf(
+		Eventually(func() []reconcile.Request {
+			return enqueueNamed(func(policy *cfztv1alpha1.CloudflareAccessPolicy) []types.NamespacedName {
+				exposures, err := exposureReconciler.exposuresForPolicy(context.Background(), policy.Name)
+				if err != nil {
+					return nil
+				}
+				requests := make([]types.NamespacedName, 0, len(exposures))
+				for _, exposure := range exposures {
+					requests = append(requests, types.NamespacedName{Namespace: exposure.Namespace, Name: exposure.Name})
+				}
+				return requests
+			})(ctx, policy)
+		}).Should(ConsistOf(
 			reconcile.Request{NamespacedName: types.NamespacedName{Namespace: first.Namespace, Name: first.Name}},
 			reconcile.Request{NamespacedName: types.NamespacedName{Namespace: second.Namespace, Name: second.Name}},
 		))

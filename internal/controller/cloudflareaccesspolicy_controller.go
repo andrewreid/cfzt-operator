@@ -35,7 +35,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	cfztv1alpha1 "github.com/andrewreid/cfzt-operator/api/v1alpha1"
 	"github.com/andrewreid/cfzt-operator/internal/cloudflare"
@@ -253,7 +252,12 @@ func (r *CloudflareAccessPolicyReconciler) SetupWithManager(mgr ctrl.Manager) er
 	// MaxConcurrentReconciles=1 per AGENTS.md ## Code Rules (mirror Tunnel + Exposure).
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&cfztv1alpha1.CloudflareAccessPolicy{}).
-		Watches(&cfztv1alpha1.CloudflareExposure{}, handler.EnqueueRequestsFromMapFunc(exposureToPolicy)).
+		Watches(&cfztv1alpha1.CloudflareExposure{}, handler.EnqueueRequestsFromMapFunc(enqueueNamed(func(exposure *cfztv1alpha1.CloudflareExposure) []types.NamespacedName {
+			if exposure.Spec.Access.PolicyRef.Name == "" {
+				return nil
+			}
+			return []types.NamespacedName{{Name: exposure.Spec.Access.PolicyRef.Name}}
+		}))).
 		Named("cloudflareaccesspolicy").
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 		Complete(r)
@@ -339,9 +343,7 @@ func canonicalizeCloudflareRules(in []cloudflare.AccessRule) []canonicalAccessRu
 }
 
 func (r *CloudflareAccessPolicyReconciler) referencedBy(ctx context.Context, policyName string) ([]cfztv1alpha1.ReferencedExposure, error) {
-	exposures, err := listCloudflareExposuresByField(ctx, r.Client, exposureIndexPolicyRefName, policyName, func(exposure cfztv1alpha1.CloudflareExposure) bool {
-		return exposure.Spec.Access.PolicyRef.Name == policyName
-	})
+	exposures, err := listExposuresByPolicy(ctx, r.Client, policyName)
 	if err != nil {
 		return nil, err
 	}
@@ -360,12 +362,4 @@ func (r *CloudflareAccessPolicyReconciler) referencedBy(ctx context.Context, pol
 		return refs[i].Name < refs[j].Name
 	})
 	return refs, nil
-}
-
-func exposureToPolicy(_ context.Context, obj client.Object) []reconcile.Request {
-	exposure, ok := obj.(*cfztv1alpha1.CloudflareExposure)
-	if !ok || exposure.Spec.Access.PolicyRef.Name == "" {
-		return nil
-	}
-	return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: exposure.Spec.Access.PolicyRef.Name}}}
 }

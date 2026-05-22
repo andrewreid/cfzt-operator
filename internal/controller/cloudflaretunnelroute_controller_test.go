@@ -29,8 +29,8 @@ var _ = Describe("CloudflareTunnelRoute Controller", func() {
 		createCredentials(ctx)
 		fakeCF = cloudflare.NewFake()
 		reconciler = &CloudflareTunnelRouteReconciler{
-			Client: k8sClient,
-			Scheme: k8sClient.Scheme(),
+			Client: indexedClient,
+			Scheme: indexedClient.Scheme(),
 			CloudflareClientFactory: func(accountID, apiToken string) (cloudflare.Client, error) {
 				Expect(accountID).To(Equal("account-1"))
 				Expect(apiToken).To(Equal("token-1"))
@@ -234,9 +234,19 @@ var _ = Describe("CloudflareTunnelRoute Controller", func() {
 		tunnel := createTunnel(ctx, "route-watch-tunnel", "cf-tunnel-watch")
 		route := createTunnelRoute(ctx, "route-watch", tunnel.Name, "172.16.13.0/24")
 
-		requests := reconciler.tunnelToRoutes(ctx, tunnel)
-
-		Expect(requests).To(ContainElement(reconcile.Request{NamespacedName: types.NamespacedName{Name: route.Name}}))
+		Eventually(func() []reconcile.Request {
+			return enqueueNamed(func(tunnel *cfztv1alpha1.CloudflareTunnel) []types.NamespacedName {
+				routes, err := reconciler.routesForTunnel(context.Background(), tunnel.Name)
+				if err != nil {
+					return nil
+				}
+				requests := make([]types.NamespacedName, 0, len(routes))
+				for _, route := range routes {
+					requests = append(requests, types.NamespacedName{Name: route.Name})
+				}
+				return requests
+			})(ctx, tunnel)
+		}).Should(ContainElement(reconcile.Request{NamespacedName: types.NamespacedName{Name: route.Name}}))
 	})
 })
 
