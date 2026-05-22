@@ -227,10 +227,21 @@ func (h *smokeHarness) localChartDir() (string, bool) {
 	if !isLocalChartRef(h.cfg.chartRef) {
 		return "", false
 	}
-	if filepath.IsAbs(h.cfg.chartRef) {
-		return h.cfg.chartRef, true
+	chartPath := h.cfg.chartRef
+	if !filepath.IsAbs(chartPath) {
+		chartPath = filepath.Clean(filepath.Join(h.cfg.repoRoot, chartPath))
 	}
-	return filepath.Clean(filepath.Join(h.cfg.repoRoot, h.cfg.chartRef)), true
+	info, err := os.Stat(chartPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false
+		}
+		h.t.Fatalf("stat local chart reference: %v", err)
+	}
+	if !info.IsDir() {
+		return "", false
+	}
+	return chartPath, true
 }
 
 func (h *smokeHarness) deployEcho() {
