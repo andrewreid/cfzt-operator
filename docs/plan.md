@@ -230,8 +230,14 @@ Completed on 2026-05-22:
   including when `spec.policyName` is set; spec/API docs were updated to make
   `policyName` a base name. Cloudflared image validation now accepts registry
   hosts with ports while still rejecting `:latest`.
+- Slice 6 subtask 11: config tree and Makefile prune completed. Removed
+  unused Kubebuilder network-policy, Prometheus, samples, manager deployment,
+  metrics Service/patches, and scaffolded admin/editor/viewer RBAC helpers;
+  collapsed `config/default/kustomization.yaml`; deleted unsupported
+  Makefile deploy/install/installer/buildx targets and unused Kustomize/Kubectl
+  plumbing.
 
-Next: Slice 6 subtask 11.
+Next: Slice 6 subtask 12.
 
 ## 3. Slice plan
 
