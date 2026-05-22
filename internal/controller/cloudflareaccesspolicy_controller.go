@@ -28,7 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/events"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -46,7 +46,7 @@ type CloudflareAccessPolicyReconciler struct {
 	client.Client
 	Scheme                  *runtime.Scheme
 	CloudflareClientFactory CloudflareClientFactory
-	Recorder                events.EventRecorder
+	Recorder                record.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=cfzt.reid.ee,resources=cloudflareaccesspolicies,verbs=get;list;watch;create;update;patch;delete
@@ -103,7 +103,7 @@ func (r *CloudflareAccessPolicyReconciler) Reconcile(ctx context.Context, req ct
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-		r.event(&policy, corev1.EventTypeNormal, EventCreatedAccessPolicy, "Created Cloudflare Access policy %s", created.ID)
+		r.Recorder.Eventf(&policy, corev1.EventTypeNormal, EventCreatedAccessPolicy, "Created Cloudflare Access policy %s", created.ID)
 		log.V(1).Info("CloudflareAccessPolicy created", "policyID", created.ID)
 		return ctrl.Result{}, r.setPolicyStatus(ctx, &policy, created.ID, desiredHash, references, true, ReasonReconciled, "Cloudflare Access policy reconciled")
 	}
@@ -131,7 +131,7 @@ func (r *CloudflareAccessPolicyReconciler) Reconcile(ctx context.Context, req ct
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-		r.event(&policy, corev1.EventTypeNormal, EventUpdatedAccessPolicy, "Updated Cloudflare Access policy %s", updated.ID)
+		r.Recorder.Eventf(&policy, corev1.EventTypeNormal, EventUpdatedAccessPolicy, "Updated Cloudflare Access policy %s", updated.ID)
 		log.V(1).Info("CloudflareAccessPolicy updated", "policyID", updated.ID)
 		return ctrl.Result{}, r.setPolicyStatus(ctx, &policy, policy.Status.PolicyId, desiredHash, references, true, ReasonReconciled, "Cloudflare Access policy reconciled")
 	}
@@ -156,7 +156,7 @@ func (r *CloudflareAccessPolicyReconciler) reconcileDelete(ctx context.Context, 
 		if err := r.Status().Update(ctx, policy); err != nil {
 			return ctrl.Result{}, err
 		}
-		r.event(policy, corev1.EventTypeWarning, EventBlockedByExposures, "Deletion blocked by %d CloudflareExposure resources", len(references))
+		r.Recorder.Eventf(policy, corev1.EventTypeWarning, EventBlockedByExposures, "Deletion blocked by %d CloudflareExposure resources", len(references))
 		return ctrl.Result{}, nil
 	}
 	if policy.Status.PolicyId != "" {
@@ -238,13 +238,6 @@ func (r *CloudflareAccessPolicyReconciler) setPolicyStatus(ctx context.Context, 
 		return nil
 	}
 	return r.Status().Update(ctx, latest)
-}
-
-func (r *CloudflareAccessPolicyReconciler) event(policy *cfztv1alpha1.CloudflareAccessPolicy, eventType, reason, messageFmt string, args ...any) {
-	if r.Recorder == nil {
-		return
-	}
-	r.Recorder.Eventf(policy, nil, eventType, reason, reason, messageFmt, args...)
 }
 
 // SetupWithManager wires the controller.

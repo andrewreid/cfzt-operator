@@ -31,7 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/events"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -54,7 +54,7 @@ type CloudflareTunnelReconciler struct {
 	client.Client
 	Scheme                  *runtime.Scheme
 	CloudflareClientFactory CloudflareClientFactory
-	Recorder                events.EventRecorder
+	Recorder                record.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=cfzt.reid.ee,resources=cloudflaretunnels,verbs=get;list;watch;create;update;patch;delete
@@ -103,7 +103,7 @@ func (r *CloudflareTunnelReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		tunnel.Status.TunnelId = cfTunnel.ID
 	}
 	if created {
-		r.event(&tunnel, corev1.EventTypeNormal, EventCreatedTunnel, "Created Cloudflare tunnel %s", cfTunnel.ID)
+		r.Recorder.Eventf(&tunnel, corev1.EventTypeNormal, EventCreatedTunnel, "Created Cloudflare tunnel %s", cfTunnel.ID)
 	}
 
 	token, err := cfClient.Tunnels().Token(ctx, cfTunnel.ID)
@@ -119,7 +119,7 @@ func (r *CloudflareTunnelReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, err
 	}
 	if rotated {
-		r.event(&tunnel, corev1.EventTypeNormal, EventTokenRotated, "Token checksum changed for tunnel %s", tunnel.Name)
+		r.Recorder.Eventf(&tunnel, corev1.EventTypeNormal, EventTokenRotated, "Token checksum changed for tunnel %s", tunnel.Name)
 	}
 
 	if err := r.reconcileTunnelConfig(ctx, &tunnel, cfClient, cfTunnel.ID); err != nil {
@@ -155,7 +155,7 @@ func (r *CloudflareTunnelReconciler) reconcileDelete(ctx context.Context, tunnel
 		if err := r.Status().Update(ctx, tunnel); err != nil {
 			return ctrl.Result{}, err
 		}
-		r.event(tunnel, corev1.EventTypeWarning, EventBlockedByExposures, "Deletion blocked by %d CloudflareExposure resources", len(exposures))
+		r.Recorder.Eventf(tunnel, corev1.EventTypeWarning, EventBlockedByExposures, "Deletion blocked by %d CloudflareExposure resources", len(exposures))
 		return ctrl.Result{}, nil
 	}
 	routes, err := r.referencingRoutes(ctx, tunnel.Name)
@@ -168,7 +168,7 @@ func (r *CloudflareTunnelReconciler) reconcileDelete(ctx context.Context, tunnel
 		if err := r.Status().Update(ctx, tunnel); err != nil {
 			return ctrl.Result{}, err
 		}
-		r.event(tunnel, corev1.EventTypeWarning, EventBlockedByRoutes, "Deletion blocked by %d CloudflareTunnelRoute resources", len(routes))
+		r.Recorder.Eventf(tunnel, corev1.EventTypeWarning, EventBlockedByRoutes, "Deletion blocked by %d CloudflareTunnelRoute resources", len(routes))
 		return ctrl.Result{}, nil
 	}
 	waitingForWorkload, err := r.ensureCloudflaredStopped(ctx, tunnel)
@@ -475,13 +475,6 @@ func tunnelRoutesStatusMatches(status []cfztv1alpha1.RouteStatus, routes []tunne
 		}
 	}
 	return true
-}
-
-func (r *CloudflareTunnelReconciler) event(tunnel *cfztv1alpha1.CloudflareTunnel, eventType, reason, messageFmt string, args ...any) {
-	if r.Recorder == nil {
-		return
-	}
-	r.Recorder.Eventf(tunnel, nil, eventType, reason, reason, messageFmt, args...)
 }
 
 // SetupWithManager sets up the controller with the Manager.

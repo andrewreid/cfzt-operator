@@ -29,7 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/events"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -47,7 +47,7 @@ type CloudflareTunnelRouteReconciler struct {
 	client.Client
 	Scheme                  *runtime.Scheme
 	CloudflareClientFactory CloudflareClientFactory
-	Recorder                events.EventRecorder
+	Recorder                record.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=cfzt.reid.ee,resources=cloudflaretunnelroutes,verbs=get;list;watch;create;update;patch;delete
@@ -103,13 +103,13 @@ func (r *CloudflareTunnelRouteReconciler) Reconcile(ctx context.Context, req ctr
 	cfRoute, created, err := r.reconcileCloudflareRoute(ctx, &route, cfClient, desired)
 	if err != nil {
 		if errors.Is(err, errForeignRoute) {
-			r.event(&route, corev1.EventTypeWarning, EventForeignRoute, "Cloudflare tunnel route already exists without local ownership record")
+			r.Recorder.Eventf(&route, corev1.EventTypeWarning, EventForeignRoute, "Cloudflare tunnel route already exists without local ownership record")
 			return ctrl.Result{}, r.setRouteStatus(ctx, &route, route.Status.RouteId, route.Status.VirtualNetworkId, false, ReasonForeignRoute, "Cloudflare tunnel route already exists without local ownership record")
 		}
 		return ctrl.Result{}, r.setRouteStatus(ctx, &route, route.Status.RouteId, route.Status.VirtualNetworkId, false, ReasonRouteWriteFailed, err.Error())
 	}
 	if created {
-		r.event(&route, corev1.EventTypeNormal, EventCreatedRoute, "Created Cloudflare tunnel route %s", cfRoute.ID)
+		r.Recorder.Eventf(&route, corev1.EventTypeNormal, EventCreatedRoute, "Created Cloudflare tunnel route %s", cfRoute.ID)
 	}
 
 	log.V(1).Info("CloudflareTunnelRoute reconciled", "routeID", cfRoute.ID)
@@ -146,7 +146,7 @@ func (r *CloudflareTunnelRouteReconciler) reconcileDelete(ctx context.Context, r
 			if err := cfClient.TunnelRoutes().Delete(ctx, route.Status.RouteId); err != nil && !errors.Is(err, cloudflare.ErrNotFound) {
 				return ctrl.Result{}, err
 			}
-			r.event(route, corev1.EventTypeNormal, EventDeletedRoute, "Deleted Cloudflare tunnel route %s", route.Status.RouteId)
+			r.Recorder.Eventf(route, corev1.EventTypeNormal, EventDeletedRoute, "Deleted Cloudflare tunnel route %s", route.Status.RouteId)
 		}
 	}
 	controllerutil.RemoveFinalizer(route, naming.Finalizer)
@@ -287,13 +287,6 @@ func (r *CloudflareTunnelRouteReconciler) setRouteStatus(ctx context.Context, ro
 		return nil
 	}
 	return r.Status().Update(ctx, latest)
-}
-
-func (r *CloudflareTunnelRouteReconciler) event(route *cfztv1alpha1.CloudflareTunnelRoute, eventType, reason, messageFmt string, args ...any) {
-	if r.Recorder == nil {
-		return
-	}
-	r.Recorder.Eventf(route, nil, eventType, reason, reason, messageFmt, args...)
 }
 
 // SetupWithManager wires the controller.

@@ -33,7 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/events"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -52,7 +52,7 @@ type CloudflareExposureReconciler struct {
 	client.Client
 	Scheme                  *runtime.Scheme
 	CloudflareClientFactory CloudflareClientFactory
-	Recorder                events.EventRecorder
+	Recorder                record.EventRecorder
 	HTTPRouteSourceEnabled  bool
 }
 
@@ -113,7 +113,7 @@ func (r *CloudflareExposureReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if conflict, err := r.hasDuplicateHostname(ctx, &exposure); err != nil {
 		return ctrl.Result{}, err
 	} else if conflict {
-		r.event(&exposure, corev1.EventTypeWarning, EventHostnameConflict, "Hostname %s is claimed by more than one CloudflareExposure", exposure.Spec.Hostname)
+		r.Recorder.Eventf(&exposure, corev1.EventTypeWarning, EventHostnameConflict, "Hostname %s is claimed by more than one CloudflareExposure", exposure.Spec.Hostname)
 		return r.setExposureStatusAndBackoff(ctx, &exposure, exposure.Status.Cloudflare, ReasonHostnameConflict, "hostname is claimed by more than one CloudflareExposure")
 	}
 
@@ -165,7 +165,7 @@ func (r *CloudflareExposureReconciler) reconcileExposureAccess(ctx context.Conte
 		app, created, err := r.reconcileAccess(ctx, exposure, cfClient)
 		if err != nil {
 			if errors.Is(err, errHostnameConflict) {
-				r.event(exposure, corev1.EventTypeWarning, EventHostnameConflict, "Access application hostname conflict for %s", exposure.Spec.Hostname)
+				r.Recorder.Eventf(exposure, corev1.EventTypeWarning, EventHostnameConflict, "Access application hostname conflict for %s", exposure.Spec.Hostname)
 				result, statusErr := r.setExposureStatusAndBackoff(ctx, exposure, status, ReasonHostnameConflict, err.Error())
 				return status, true, result, statusErr
 			}
@@ -186,7 +186,7 @@ func (r *CloudflareExposureReconciler) reconcileExposureAccess(ctx context.Conte
 		}
 		status.AccessApplicationId = app.ID
 		if created {
-			r.event(exposure, corev1.EventTypeNormal, EventCreatedAccessApp, "Created Cloudflare Access application %s", app.ID)
+			r.Recorder.Eventf(exposure, corev1.EventTypeNormal, EventCreatedAccessApp, "Created Cloudflare Access application %s", app.ID)
 		}
 		return status, false, ctrl.Result{}, nil
 	}
@@ -202,7 +202,7 @@ func (r *CloudflareExposureReconciler) reconcileExposureDNS(ctx context.Context,
 		record, err := r.reconcileDNS(ctx, exposure, tunnel, cfClient)
 		if err != nil {
 			if errors.Is(err, errHostnameConflict) {
-				r.event(exposure, corev1.EventTypeWarning, EventHostnameConflict, "DNS hostname conflict for %s", exposure.Spec.Hostname)
+				r.Recorder.Eventf(exposure, corev1.EventTypeWarning, EventHostnameConflict, "DNS hostname conflict for %s", exposure.Spec.Hostname)
 				result, statusErr := r.setExposureStatusAndBackoff(ctx, exposure, status, ReasonHostnameConflict, err.Error())
 				return status, true, result, statusErr
 			}
@@ -653,13 +653,6 @@ func accessApplicationPoliciesMatch(app cloudflare.AccessApplication, wantPolicy
 		return sameStringSet(app.PolicyUUIDs, []string{wantPolicyUUID})
 	}
 	return app.PolicyUUID == wantPolicyUUID
-}
-
-func (r *CloudflareExposureReconciler) event(exposure *cfztv1alpha1.CloudflareExposure, eventType, reason, messageFmt string, args ...any) {
-	if r.Recorder == nil {
-		return
-	}
-	r.Recorder.Eventf(exposure, nil, eventType, reason, reason, messageFmt, args...)
 }
 
 // SetupWithManager sets up the controller with the Manager.

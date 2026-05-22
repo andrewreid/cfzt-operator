@@ -209,8 +209,13 @@ Completed on 2026-05-22:
   ensure tags at the wrapper boundary, tunnel listing now takes a plain name
   string, and the route-list SDK subset/superset quirk is documented at the
   wrapper boundary.
+- Slice 6 subtask 6: Event recorder wiring now uses controller-runtime v1
+  recorders from `mgr.GetEventRecorderFor(...)`. The four reconcilers use
+  `k8s.io/client-go/tools/record.EventRecorder` directly, local event helpers
+  and nil-recorder guards were removed, and event call sites now call
+  `Recorder.Eventf(obj, type, reason, message, args...)`.
 
-Next: Slice 6 subtask 6.
+Next: Slice 6 subtask 7.
 
 ## 3. Slice plan
 

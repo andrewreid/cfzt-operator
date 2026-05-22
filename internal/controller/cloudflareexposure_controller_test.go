@@ -55,16 +55,19 @@ var _ = Describe("CloudflareExposure Controller", func() {
 			Client:                  indexedClient,
 			Scheme:                  indexedClient.Scheme(),
 			CloudflareClientFactory: cloudflareFactory,
+			Recorder:                newTestRecorder(),
 		}
 		exposureReconciler = &CloudflareExposureReconciler{
 			Client:                  indexedClient,
 			Scheme:                  indexedClient.Scheme(),
 			CloudflareClientFactory: cloudflareFactory,
+			Recorder:                newTestRecorder(),
 		}
 		policyReconciler = &CloudflareAccessPolicyReconciler{
 			Client:                  indexedClient,
 			Scheme:                  indexedClient.Scheme(),
 			CloudflareClientFactory: cloudflareFactory,
+			Recorder:                newTestRecorder(),
 		}
 	})
 

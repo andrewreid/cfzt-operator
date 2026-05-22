@@ -41,6 +41,7 @@ var _ = Describe("CloudflareTunnel Controller", func() {
 				Expect(apiToken).To(Equal("token-1"))
 				return fakeCF, nil
 			},
+			Recorder: newTestRecorder(),
 		}
 	})
 
