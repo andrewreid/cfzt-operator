@@ -186,31 +186,37 @@ For direct lifecycle runs, the current kubeconfig must point at the target clust
 
 ### Release Workflow
 
-`.github/workflows/release.yaml` runs two smoke layers on tag pushes:
+`.github/workflows/release.yaml` is manually triggered with a version input such as `0.2.3`. It does not publish from tag pushes. The workflow validates the requested version, then runs all release gates before creating the git tag, pushing GHCR artifacts, or creating the GitHub Release:
 
-- The `release` job builds a local smoke image, creates a kind cluster, installs the chart from the working tree, and verifies the controller Deployment and CRDs.
-- The `live-cloudflare-smoke` job runs after release publication. It runs `TestCloudflarePreflight`, creates a fresh kind cluster, pulls and loads the released image, then runs `TestCloudflareLifecycle` against the published OCI Helm chart and real Cloudflare.
+- `go vet`, `make lint`, generated drift check, `make test`, and `helm lint`.
+- Package the candidate Helm chart with the requested version.
+- Build a local candidate image and install the packaged candidate chart into kind.
+- Run `TestCloudflarePreflight`.
+- Create a fresh kind cluster, load the local candidate image, and run `TestCloudflareLifecycle` against the packaged candidate chart and real Cloudflare.
+- Only after those gates pass, create the `v<version>` git tag, push the final image tags, push the Helm chart, verify both published artifacts, and create the GitHub Release.
 
-The live job reads Cloudflare values from the `live-cloudflare-smoke` GitHub environment:
-
-```text
-CF_ACCOUNT_ID
-CF_API_TOKEN
-CF_TEST_ZONE
-CF_ZONE_ID
-CF_SMOKE_ROUTE_CIDR
-CF_SMOKE_ROUTE_CONFLICT_CIDR
-```
-
-`CF_ZONE_ID` is optional only when the token can list zones. The route CIDR values are optional and default to the CGNAT ranges documented above. If preflight fails while resolving the zone or checking route collisions, fix the environment secret or variable before changing the harness.
-
-The workflow sets:
+The release workflow and the ad-hoc `.github/workflows/live-smoke.yaml` workflow read Cloudflare values from repository secrets and variables:
 
 ```text
-CHART_REF=oci://ghcr.io/andrewreid/charts/cfzt-operator
-IMAGE_REPOSITORY=ghcr.io/andrewreid/cfzt-operator
-IMAGE_TAG=<tag name>
+secrets.CF_ACCOUNT_ID
+secrets.CF_API_TOKEN
+secrets.CF_TEST_ZONE or vars.CF_TEST_ZONE
+secrets.CF_ZONE_ID or vars.CF_ZONE_ID
+vars.CF_SMOKE_ROUTE_CIDR
+vars.CF_SMOKE_ROUTE_CONFLICT_CIDR
 ```
+
+`CF_ZONE_ID` is optional only when the token can list zones. The route CIDR values are optional and default to the CGNAT ranges documented above. If preflight fails while resolving the zone or checking route collisions, fix the repository secret or variable before changing the harness.
+
+The release workflow tests these candidate settings before publication:
+
+```text
+CHART_REF=./dist/cfzt-operator-<version>.tgz
+IMAGE_REPOSITORY=cfzt-operator
+IMAGE_TAG=release-candidate
+```
+
+Use the separate `live smoke` workflow when you want to exercise the live harness without creating a release. It builds and loads a local image, installs `charts/cfzt-operator`, and never pushes tags, packages, images, or GitHub Releases.
 
 ### Cleanup and Failure Notes
 
@@ -223,6 +229,6 @@ Common failure causes:
 - missing or insufficient Cloudflare token scopes;
 - missing `CF_ZONE_ID` when the token cannot list zones;
 - private-route CIDR collision with existing Cloudflare routes;
-- released image or chart not yet available to the test cluster;
+- candidate image or chart not available to the test cluster;
 - DNS or Access propagation taking longer than the harness timeout; and
 - operator finalizer failures that leave Kubernetes resources deleting.

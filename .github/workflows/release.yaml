@@ -1,9 +1,12 @@
 name: release
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version, without a leading v, for example 0.2.3
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -13,31 +16,193 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: andrewreid/cfzt-operator
   CHART_REPO: oci://ghcr.io/andrewreid/charts
-  SMOKE_IMAGE: cfzt-operator:release-smoke
+  CANDIDATE_IMAGE_REPOSITORY: cfzt-operator
+  CANDIDATE_IMAGE_TAG: release-candidate
   KIND_CLUSTER: cfzt-release-smoke
   LIVE_KIND_CLUSTER: cfzt-live-smoke
+  HELM_VERSION: v3.16.0
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    concurrency: live-cloudflare-smoke
+    env:
+      CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+      CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+      CF_TEST_ZONE: ${{ secrets.CF_TEST_ZONE || vars.CF_TEST_ZONE }}
+      CF_ZONE_ID: ${{ secrets.CF_ZONE_ID || vars.CF_ZONE_ID }}
+      CF_SMOKE_ROUTE_CIDR: ${{ vars.CF_SMOKE_ROUTE_CIDR }}
+      CF_SMOKE_ROUTE_CONFLICT_CIDR: ${{ vars.CF_SMOKE_ROUTE_CONFLICT_CIDR }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: derive version
         id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          TAG="${GITHUB_REF_NAME}"
-          VERSION="${TAG#v}"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          if [[ "${TAG}" =~ - ]]; then
-            echo "prerelease=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo "Releases must be run from main; got ${GITHUB_REF}" >&2
+            exit 1
           fi
 
+          VERSION="${INPUT_VERSION#v}"
+          TAG="v${VERSION}"
+
+          if ! [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+            echo "Version must look like 0.2.3 or 0.2.3-alpha.1; got ${INPUT_VERSION}" >&2
+            exit 1
+          fi
+
+          git fetch --tags origin
+
+          TAG_EXISTS=false
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            TAG_EXISTS=true
+            TAG_SHA="$(git rev-list -n 1 "${TAG}")"
+            HEAD_SHA="$(git rev-parse HEAD)"
+            if [[ "${TAG_SHA}" != "${HEAD_SHA}" ]]; then
+              echo "Tag ${TAG} already exists at ${TAG_SHA}, not current HEAD ${HEAD_SHA}" >&2
+              exit 1
+            fi
+          fi
+
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "GitHub Release ${TAG} already exists" >&2
+            exit 1
+          fi
+
+          PRERELEASE=false
+          if [[ "${VERSION}" == *-* ]]; then
+            PRERELEASE=true
+          fi
+
+          IMAGE_TAGS="${REGISTRY}/${IMAGE_NAME}:${TAG}"
+          if [[ "${PRERELEASE}" == "false" ]]; then
+            IMAGE_TAGS="${IMAGE_TAGS},${REGISTRY}/${IMAGE_NAME}:latest"
+          fi
+
+          {
+            echo "version=${VERSION}"
+            echo "tag=${TAG}"
+            echo "prerelease=${PRERELEASE}"
+            echo "tag_exists=${TAG_EXISTS}"
+            echo "image_tags=${IMAGE_TAGS}"
+            echo "chart_package=dist/cfzt-operator-${VERSION}.tgz"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: azure/setup-helm@v5
+        with:
+          version: ${{ env.HELM_VERSION }}
+
       - uses: docker/setup-qemu-action@v4
+
       - uses: docker/setup-buildx-action@v4
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: golangci-lint
+        run: make lint
+
+      - name: generated drift check
+        run: |
+          make manifests generate
+          make helm-sync-crds
+          git diff --exit-code
+
+      - name: unit + envtest
+        run: make test
+
+      - name: helm lint
+        run: helm lint charts/cfzt-operator
+
+      - name: package candidate chart
+        run: |
+          helm package charts/cfzt-operator \
+            --version "${{ steps.version.outputs.version }}" \
+            --app-version "${{ steps.version.outputs.tag }}" \
+            --destination dist
+
+      - name: build candidate image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: ${{ env.CANDIDATE_IMAGE_REPOSITORY }}:${{ env.CANDIDATE_IMAGE_TAG }}
+          cache-from: type=gha,scope=operator-image
+          cache-to: type=gha,mode=max,scope=operator-image
+
+      - name: create chart smoke kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: ${{ env.KIND_CLUSTER }}
+          wait: 120s
+
+      - name: load candidate image for chart smoke
+        run: kind load docker-image "${CANDIDATE_IMAGE_REPOSITORY}:${CANDIDATE_IMAGE_TAG}" --name "${KIND_CLUSTER}"
+
+      - name: smoke test candidate chart on kind
+        run: |
+          helm install cfzt-operator "${{ steps.version.outputs.chart_package }}" \
+            --namespace cfzt-system \
+            --create-namespace \
+            --set image.repository="${CANDIDATE_IMAGE_REPOSITORY}" \
+            --set image.tag="${CANDIDATE_IMAGE_TAG}" \
+            --set image.pullPolicy=Never \
+            --set replicaCount=1
+          kubectl -n cfzt-system rollout status deploy/cfzt-operator --timeout=180s
+          kubectl get crd cloudflaretunnels.cfzt.reid.ee
+          kubectl get crd cloudflareexposures.cfzt.reid.ee
+          kubectl get crd cloudflareaccesspolicies.cfzt.reid.ee
+          kubectl get crd cloudflaretunnelroutes.cfzt.reid.ee
+          kubectl -n cfzt-system get pods -l app.kubernetes.io/name=cfzt-operator
+
+      - name: delete chart smoke kind cluster
+        run: kind delete cluster --name "${KIND_CLUSTER}"
+
+      - name: validate Cloudflare smoke environment
+        run: go test -tags=live ./test/live -run '^TestCloudflarePreflight$' -count=1 -timeout=5m -v
+
+      - name: create live smoke kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: ${{ env.LIVE_KIND_CLUSTER }}
+          wait: 120s
+
+      - name: load candidate image for live smoke
+        run: kind load docker-image "${CANDIDATE_IMAGE_REPOSITORY}:${CANDIDATE_IMAGE_TAG}" --name "${LIVE_KIND_CLUSTER}"
+
+      - name: live smoke candidate against Cloudflare
+        env:
+          CHART_REF: ./${{ steps.version.outputs.chart_package }}
+          IMAGE_REPOSITORY: ${{ env.CANDIDATE_IMAGE_REPOSITORY }}
+          IMAGE_TAG: ${{ env.CANDIDATE_IMAGE_TAG }}
+        run: go test -tags=live ./test/live -run '^TestCloudflareLifecycle$' -count=1 -timeout=30m -v
+
+      - name: create git tag
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          TAG_EXISTS: ${{ steps.version.outputs.tag_exists }}
+        run: |
+          if [[ "${TAG_EXISTS}" == "true" ]]; then
+            echo "Tag ${TAG} already exists at this commit; reusing it"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${TAG}" -m "${TAG}"
+          git push origin "${TAG}"
 
       - name: log in to ghcr
         uses: docker/login-action@v4
@@ -46,137 +211,32 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: image tags
-        id: tags
-        run: |
-          TAGS="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.tag }}"
-          if [[ "${{ steps.version.outputs.prerelease }}" == "false" ]]; then
-            TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
-          fi
-          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
-
-      - uses: azure/setup-helm@v5
-        with:
-          version: v3.16.0
-
-      - name: build smoke image
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          platforms: linux/amd64
-          load: true
-          tags: ${{ env.SMOKE_IMAGE }}
-          cache-from: type=gha,scope=operator-image
-          cache-to: type=gha,mode=max,scope=operator-image
-
-      - name: create kind cluster
-        uses: helm/kind-action@v1
-        with:
-          cluster_name: ${{ env.KIND_CLUSTER }}
-          wait: 120s
-
-      - name: load smoke image
-        run: kind load docker-image "${SMOKE_IMAGE}" --name "${KIND_CLUSTER}"
-
-      - name: smoke test chart on kind
-        run: |
-          helm install cfzt-operator charts/cfzt-operator \
-            --namespace cfzt-system \
-            --create-namespace \
-            --set image.repository=cfzt-operator \
-            --set image.tag=release-smoke \
-            --set image.pullPolicy=Never \
-            --set replicaCount=1
-          kubectl -n cfzt-system rollout status deploy/cfzt-operator --timeout=180s
-          kubectl get crd cloudflaretunnels.cfzt.reid.ee
-          kubectl get crd cloudflareexposures.cfzt.reid.ee
-          kubectl get crd cloudflareaccesspolicies.cfzt.reid.ee
-          kubectl -n cfzt-system get pods -l app.kubernetes.io/name=cfzt-operator
-
-      - name: build + push image
+      - name: build + push release image
         uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.tags.outputs.tags }}
+          tags: ${{ steps.version.outputs.image_tags }}
           cache-from: type=gha,scope=operator-image
           cache-to: type=gha,mode=max,scope=operator-image
 
-      - name: package + push chart
+      - name: verify release image
+        run: docker buildx imagetools inspect "${REGISTRY}/${IMAGE_NAME}:${{ steps.version.outputs.tag }}"
+
+      - name: push release chart
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          TAG="${{ steps.version.outputs.tag }}"
-          helm package charts/cfzt-operator \
-            --version "${VERSION}" \
-            --app-version "${TAG}" \
-            --destination dist
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login \
-            -u "${{ github.actor }}" --password-stdin "${{ env.REGISTRY }}"
-          helm push "dist/cfzt-operator-${VERSION}.tgz" "${{ env.CHART_REPO }}"
+            -u "${{ github.actor }}" --password-stdin "${REGISTRY}"
+          helm push "${{ steps.version.outputs.chart_package }}" "${CHART_REPO}"
+
+      - name: verify release chart
+        run: helm show chart "${CHART_REPO}/cfzt-operator" --version "${{ steps.version.outputs.version }}"
 
       - name: github release
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           generate_release_notes: true
           prerelease: ${{ steps.version.outputs.prerelease == 'true' }}
-
-  live-cloudflare-smoke:
-    needs: release
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    environment: live-cloudflare-smoke
-    concurrency: live-cloudflare-smoke
-    permissions:
-      contents: read
-      packages: read
-    env:
-      CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-      CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-      CF_TEST_ZONE: ${{ secrets.CF_TEST_ZONE || vars.CF_TEST_ZONE }}
-      CF_ZONE_ID: ${{ secrets.CF_ZONE_ID || vars.CF_ZONE_ID }}
-      CF_SMOKE_ROUTE_CIDR: ${{ vars.CF_SMOKE_ROUTE_CIDR }}
-      CF_SMOKE_ROUTE_CONFLICT_CIDR: ${{ vars.CF_SMOKE_ROUTE_CONFLICT_CIDR }}
-      CHART_REF: oci://ghcr.io/andrewreid/charts/cfzt-operator
-      IMAGE_REPOSITORY: ghcr.io/andrewreid/cfzt-operator
-      IMAGE_TAG: ${{ github.ref_name }}
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: validate Cloudflare smoke environment
-        run: go test -tags=live ./test/live -run '^TestCloudflarePreflight$' -count=1 -timeout=5m -v
-
-      - uses: azure/setup-helm@v5
-        with:
-          version: v3.16.0
-
-      - name: log in to ghcr for helm
-        run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login \
-            -u "${{ github.actor }}" --password-stdin "${{ env.REGISTRY }}"
-
-      - name: log in to ghcr for image pull
-        uses: docker/login-action@v4
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: create kind cluster
-        uses: helm/kind-action@v1
-        with:
-          cluster_name: ${{ env.LIVE_KIND_CLUSTER }}
-          wait: 120s
-
-      - name: load released image
-        run: |
-          docker pull "${IMAGE_REPOSITORY}:${IMAGE_TAG}"
-          kind load docker-image "${IMAGE_REPOSITORY}:${IMAGE_TAG}" --name "${{ env.LIVE_KIND_CLUSTER }}"
-
-      - name: live smoke against Cloudflare
-        run: go test -tags=live ./test/live -run '^TestCloudflareLifecycle$' -count=1 -timeout=30m -v
