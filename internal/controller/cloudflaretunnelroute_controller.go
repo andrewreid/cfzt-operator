@@ -24,12 +24,8 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -45,10 +41,7 @@ import (
 
 // CloudflareTunnelRouteReconciler reconciles a CloudflareTunnelRoute object.
 type CloudflareTunnelRouteReconciler struct {
-	client.Client
-	Scheme                  *runtime.Scheme
-	CloudflareClientFactory CloudflareClientFactory
-	Recorder                record.EventRecorder
+	Base
 }
 
 // +kubebuilder:rbac:groups=cfzt.reid.ee,resources=cloudflaretunnelroutes,verbs=get;list;watch;create;update;patch;delete
@@ -90,7 +83,7 @@ func (r *CloudflareTunnelRouteReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, r.setRouteStatus(ctx, &route, route.Status.RouteId, route.Status.VirtualNetworkId, false, ReasonNetworkInvalid, err.Error())
 	}
 
-	cfClient, err := r.cloudflareClient(ctx, tunnel)
+	cfClient, err := r.CloudflareClient(ctx, credentialsRefFromTunnel(tunnel))
 	if err != nil {
 		return ctrl.Result{}, r.setRouteStatus(ctx, &route, route.Status.RouteId, route.Status.VirtualNetworkId, false, ReasonCredentialsMissing, err.Error())
 	}
@@ -132,7 +125,7 @@ func (r *CloudflareTunnelRouteReconciler) reconcileDelete(ctx context.Context, r
 			}
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
-		cfClient, err := r.cloudflareClient(ctx, tunnel)
+		cfClient, err := r.CloudflareClient(ctx, credentialsRefFromTunnel(tunnel))
 		if err != nil {
 			if statusErr := r.setRouteStatus(ctx, route, route.Status.RouteId, route.Status.VirtualNetworkId, false, ReasonCredentialsMissing, err.Error()); statusErr != nil {
 				return ctrl.Result{}, statusErr
@@ -169,37 +162,6 @@ func (r *CloudflareTunnelRouteReconciler) referencedTunnel(ctx context.Context, 
 		return &tunnel, false, nil
 	}
 	return &tunnel, true, nil
-}
-
-func (r *CloudflareTunnelRouteReconciler) cloudflareClient(ctx context.Context, tunnel *cfztv1alpha1.CloudflareTunnel) (cloudflare.Client, error) {
-	var secret corev1.Secret
-	key := types.NamespacedName{Namespace: tunnel.Spec.Cloudflared.Namespace, Name: tunnel.Spec.CredentialsSecretRef.Name}
-	if err := r.Get(ctx, key, &secret); err != nil {
-		return nil, fmt.Errorf("credentials Secret %s/%s not readable: %w", key.Namespace, key.Name, err)
-	}
-	accountKey := tunnel.Spec.CredentialsSecretRef.Keys.AccountId
-	if accountKey == "" {
-		accountKey = "accountId"
-	}
-	tokenKey := tunnel.Spec.CredentialsSecretRef.Keys.ApiToken
-	if tokenKey == "" {
-		tokenKey = "apiToken"
-	}
-	accountID := string(secret.Data[accountKey])
-	apiToken := string(secret.Data[tokenKey])
-	if accountID == "" {
-		return nil, fmt.Errorf("credentials Secret %s/%s missing key %q", key.Namespace, key.Name, accountKey)
-	}
-	if apiToken == "" {
-		return nil, fmt.Errorf("credentials Secret %s/%s missing key %q", key.Namespace, key.Name, tokenKey)
-	}
-	factory := r.CloudflareClientFactory
-	if factory == nil {
-		factory = func(accountID, apiToken string) (cloudflare.Client, error) {
-			return cloudflare.New(accountID, apiToken)
-		}
-	}
-	return factory(accountID, apiToken)
 }
 
 var errForeignRoute = errors.New("foreign route")
@@ -274,20 +236,10 @@ func (r *CloudflareTunnelRouteReconciler) setRouteStatus(ctx context.Context, ro
 	if err := r.Get(ctx, types.NamespacedName{Name: route.Name}, latest); err != nil {
 		return err
 	}
-	before := latest.DeepCopy()
-	latest.Status.RouteId = routeID
-	latest.Status.VirtualNetworkId = virtualNetworkID
-	if ready {
-		setCondition(&latest.Status.Conditions, ConditionReady, metav1.ConditionTrue, reason, message, latest.Generation)
-		setCondition(&latest.Status.Conditions, ConditionProgressing, metav1.ConditionFalse, reason, message, latest.Generation)
-	} else {
-		setCondition(&latest.Status.Conditions, ConditionReady, metav1.ConditionFalse, reason, message, latest.Generation)
-		setCondition(&latest.Status.Conditions, ConditionProgressing, metav1.ConditionTrue, reason, message, latest.Generation)
-	}
-	if equality.Semantic.DeepEqual(before.Status, latest.Status) {
-		return nil
-	}
-	return r.Status().Update(ctx, latest)
+	return r.setReady(ctx, latest, &latest.Status.Conditions, latest.Generation, ready, reason, message, func() {
+		latest.Status.RouteId = routeID
+		latest.Status.VirtualNetworkId = virtualNetworkID
+	})
 }
 
 // SetupWithManager wires the controller.

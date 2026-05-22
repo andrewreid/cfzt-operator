@@ -117,9 +117,11 @@ func main() {
 	}
 
 	if err := (&controller.CloudflareTunnelReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("cloudflaretunnel-controller"),
+		Base: controller.Base{
+			Client:   mgr.GetClient(),
+			Scheme:   mgr.GetScheme(),
+			Recorder: mgr.GetEventRecorderFor("cloudflaretunnel-controller"),
+		},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "cloudflaretunnel")
 		os.Exit(1)
@@ -134,9 +136,11 @@ func main() {
 	}
 
 	if err := (&controller.CloudflareExposureReconciler{
-		Client:                 mgr.GetClient(),
-		Scheme:                 mgr.GetScheme(),
-		Recorder:               mgr.GetEventRecorderFor("cloudflareexposure-controller"),
+		Base: controller.Base{
+			Client:   mgr.GetClient(),
+			Scheme:   mgr.GetScheme(),
+			Recorder: mgr.GetEventRecorderFor("cloudflareexposure-controller"),
+		},
 		HTTPRouteSourceEnabled: httpRouteSourceEnabled,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "cloudflareexposure")
@@ -144,17 +148,21 @@ func main() {
 	}
 
 	if err := (&controller.CloudflareAccessPolicyReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("cloudflareaccesspolicy-controller"),
+		Base: controller.Base{
+			Client:   mgr.GetClient(),
+			Scheme:   mgr.GetScheme(),
+			Recorder: mgr.GetEventRecorderFor("cloudflareaccesspolicy-controller"),
+		},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "cloudflareaccesspolicy")
 		os.Exit(1)
 	}
 	if err := (&controller.CloudflareTunnelRouteReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("cloudflaretunnelroute-controller"),
+		Base: controller.Base{
+			Client:   mgr.GetClient(),
+			Scheme:   mgr.GetScheme(),
+			Recorder: mgr.GetEventRecorderFor("cloudflaretunnelroute-controller"),
+		},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "cloudflaretunnelroute")
 		os.Exit(1)

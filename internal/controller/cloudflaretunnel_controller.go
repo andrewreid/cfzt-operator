@@ -29,9 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -46,15 +44,9 @@ import (
 	"github.com/andrewreid/cfzt-operator/internal/workload"
 )
 
-// CloudflareClientFactory builds a Cloudflare client from credentials.
-type CloudflareClientFactory func(accountID, apiToken string) (cloudflare.Client, error)
-
 // CloudflareTunnelReconciler reconciles a CloudflareTunnel object
 type CloudflareTunnelReconciler struct {
-	client.Client
-	Scheme                  *runtime.Scheme
-	CloudflareClientFactory CloudflareClientFactory
-	Recorder                record.EventRecorder
+	Base
 }
 
 // +kubebuilder:rbac:groups=cfzt.reid.ee,resources=cloudflaretunnels,verbs=get;list;watch;create;update;patch;delete
@@ -84,7 +76,7 @@ func (r *CloudflareTunnelReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 	}
 
-	cfClient, err := r.cloudflareClient(ctx, &tunnel)
+	cfClient, err := r.CloudflareClient(ctx, credentialsRefFromTunnel(&tunnel))
 	if err != nil {
 		return ctrl.Result{}, r.setTunnelStatus(ctx, &tunnel, tunnel.Status.TunnelId, naming.TokenSecretName(tunnel.Name), false, ReasonCredentialsMissing, err.Error())
 	}
@@ -176,15 +168,13 @@ func (r *CloudflareTunnelReconciler) reconcileDelete(ctx context.Context, tunnel
 		return ctrl.Result{}, err
 	}
 	if waitingForWorkload {
-		setCondition(&tunnel.Status.Conditions, ConditionReady, metav1.ConditionFalse, ReasonWorkloadNotReady, "waiting for cloudflared DaemonSet to terminate before deleting Cloudflare tunnel", tunnel.Generation)
-		setCondition(&tunnel.Status.Conditions, ConditionProgressing, metav1.ConditionTrue, ReasonWorkloadNotReady, "waiting for cloudflared DaemonSet to terminate before deleting Cloudflare tunnel", tunnel.Generation)
-		if err := r.Status().Update(ctx, tunnel); err != nil {
+		if err := r.SetReady(ctx, tunnel, &tunnel.Status.Conditions, tunnel.Generation, false, ReasonWorkloadNotReady, "waiting for cloudflared DaemonSet to terminate before deleting Cloudflare tunnel"); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 	if tunnel.Status.TunnelId != "" {
-		cfClient, err := r.cloudflareClient(ctx, tunnel)
+		cfClient, err := r.CloudflareClient(ctx, credentialsRefFromTunnel(tunnel))
 		if err != nil {
 			if statusErr := r.setTunnelStatus(ctx, tunnel, tunnel.Status.TunnelId, naming.TokenSecretName(tunnel.Name), false, ReasonCredentialsMissing, err.Error()); statusErr != nil {
 				return ctrl.Result{}, statusErr
@@ -269,29 +259,6 @@ func (r *CloudflareTunnelReconciler) deleteNamespaced(ctx context.Context, obj c
 		return err
 	}
 	return nil
-}
-
-func (r *CloudflareTunnelReconciler) cloudflareClient(ctx context.Context, tunnel *cfztv1alpha1.CloudflareTunnel) (cloudflare.Client, error) {
-	var secret corev1.Secret
-	key := types.NamespacedName{Namespace: tunnel.Spec.Cloudflared.Namespace, Name: tunnel.Spec.CredentialsSecretRef.Name}
-	if err := r.Get(ctx, key, &secret); err != nil {
-		return nil, fmt.Errorf("credentials Secret %s/%s not readable: %w", key.Namespace, key.Name, err)
-	}
-	accountID := string(secret.Data[tunnel.Spec.CredentialsSecretRef.Keys.AccountId])
-	apiToken := string(secret.Data[tunnel.Spec.CredentialsSecretRef.Keys.ApiToken])
-	if accountID == "" {
-		return nil, fmt.Errorf("credentials Secret %s/%s missing key %q", key.Namespace, key.Name, tunnel.Spec.CredentialsSecretRef.Keys.AccountId)
-	}
-	if apiToken == "" {
-		return nil, fmt.Errorf("credentials Secret %s/%s missing key %q", key.Namespace, key.Name, tunnel.Spec.CredentialsSecretRef.Keys.ApiToken)
-	}
-	factory := r.CloudflareClientFactory
-	if factory == nil {
-		factory = func(accountID, apiToken string) (cloudflare.Client, error) {
-			return cloudflare.New(accountID, apiToken)
-		}
-	}
-	return factory(accountID, apiToken)
 }
 
 var errForeignTunnel = fmt.Errorf("foreign tunnel")
@@ -393,25 +360,15 @@ func (r *CloudflareTunnelReconciler) setTunnelStatus(ctx context.Context, tunnel
 	if err := r.Get(ctx, types.NamespacedName{Name: tunnel.Name}, latest); err != nil {
 		return err
 	}
-	before := latest.DeepCopy()
-	latest.Status.TunnelId = tunnelID
-	latest.Status.TokenSecretRef.Name = tokenSecretName
-	if latest.Spec.Dns.Manage {
-		latest.Status.DnsMode = "managed"
-	} else {
-		latest.Status.DnsMode = "external"
-	}
-	if ready {
-		setCondition(&latest.Status.Conditions, ConditionReady, metav1.ConditionTrue, reason, message, latest.Generation)
-		setCondition(&latest.Status.Conditions, ConditionProgressing, metav1.ConditionFalse, reason, message, latest.Generation)
-	} else {
-		setCondition(&latest.Status.Conditions, ConditionReady, metav1.ConditionFalse, reason, message, latest.Generation)
-		setCondition(&latest.Status.Conditions, ConditionProgressing, metav1.ConditionTrue, reason, message, latest.Generation)
-	}
-	if equality.Semantic.DeepEqual(before.Status, latest.Status) {
-		return nil
-	}
-	return r.Status().Update(ctx, latest)
+	return r.setReady(ctx, latest, &latest.Status.Conditions, latest.Generation, ready, reason, message, func() {
+		latest.Status.TunnelId = tunnelID
+		latest.Status.TokenSecretRef.Name = tokenSecretName
+		if latest.Spec.Dns.Manage {
+			latest.Status.DnsMode = "managed"
+		} else {
+			latest.Status.DnsMode = "external"
+		}
+	})
 }
 
 func (r *CloudflareTunnelReconciler) setTunnelConfigStatus(ctx context.Context, tunnel *cfztv1alpha1.CloudflareTunnel, routes []tunnelconfig.Route, ingressDocHash string) error {

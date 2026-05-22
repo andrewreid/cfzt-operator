@@ -48,14 +48,12 @@ var _ = Describe("CloudflareAccessPolicy Controller", func() {
 		ensureNamespace(ctx, exposureTestNamespace)
 		fakeCF = cloudflare.NewFake()
 		reconciler = &CloudflareAccessPolicyReconciler{
-			Client: indexedClient,
-			Scheme: indexedClient.Scheme(),
-			CloudflareClientFactory: func(accountID, apiToken string) (cloudflare.Client, error) {
-				Expect(accountID).To(Equal("account-1"))
-				Expect(apiToken).To(Equal("token-1"))
-				return fakeCF, nil
+			Base: Base{
+				Client:              indexedClient,
+				Scheme:              indexedClient.Scheme(),
+				NewCloudflareClient: newFakeCloudflareClient(indexedClient, fakeCF),
+				Recorder:            newTestRecorder(),
 			},
-			Recorder: newTestRecorder(),
 		}
 		createCredentials(ctx)
 	})

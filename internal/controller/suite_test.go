@@ -37,6 +37,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	cfztv1alpha1 "github.com/andrewreid/cfzt-operator/api/v1alpha1"
+	"github.com/andrewreid/cfzt-operator/internal/cloudflare"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -115,6 +116,18 @@ type indexedListClient struct {
 
 func newTestRecorder() record.EventRecorder {
 	return record.NewFakeRecorder(1024)
+}
+
+func newFakeCloudflareClient(reader client.Reader, fakeCF *cloudflare.FakeClient) func(context.Context, CredentialsRef) (cloudflare.Client, error) {
+	return func(ctx context.Context, ref CredentialsRef) (cloudflare.Client, error) {
+		accountID, apiToken, err := cloudflare.Load(ctx, reader, ref)
+		if err != nil {
+			return nil, err
+		}
+		Expect(accountID).To(Equal("account-1"))
+		Expect(apiToken).To(Equal("token-1"))
+		return fakeCF, nil
+	}
 }
 
 func (c indexedListClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {

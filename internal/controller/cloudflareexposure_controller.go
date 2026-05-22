@@ -28,10 +28,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -48,11 +46,8 @@ import (
 
 // CloudflareExposureReconciler reconciles a CloudflareExposure object.
 type CloudflareExposureReconciler struct {
-	client.Client
-	Scheme                  *runtime.Scheme
-	CloudflareClientFactory CloudflareClientFactory
-	Recorder                record.EventRecorder
-	HTTPRouteSourceEnabled  bool
+	Base
+	HTTPRouteSourceEnabled bool
 }
 
 // +kubebuilder:rbac:groups=cfzt.reid.ee,resources=cloudflareexposures,verbs=get;list;watch;create;update;patch;delete
@@ -84,7 +79,7 @@ func (r *CloudflareExposureReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, r.setExposureStatus(ctx, &exposure, exposure.Status.Cloudflare, false, ReasonOriginInvalid, fmt.Sprintf("referenced CloudflareTunnel not found: %v", err))
 	}
 
-	cfClient, err := r.cloudflareClient(ctx, &tunnel)
+	cfClient, err := r.CloudflareClient(ctx, credentialsRefFromTunnel(&tunnel))
 	if err != nil {
 		return ctrl.Result{}, r.setExposureStatus(ctx, &exposure, exposure.Status.Cloudflare, false, ReasonCredentialsMissing, err.Error())
 	}
@@ -117,13 +112,13 @@ func (r *CloudflareExposureReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	status := exposure.Status.Cloudflare
-	status, done, result, err := r.reconcileExposureAccess(ctx, &exposure, cfClient, status)
-	if done {
+	result, done, err := r.reconcileExposureAccess(ctx, &exposure, cfClient, &status)
+	if done || err != nil {
 		return result, err
 	}
 
-	status, done, result, err = r.reconcileExposureDNS(ctx, &exposure, &tunnel, cfClient, status)
-	if done {
+	result, done, err = r.reconcileExposureDNS(ctx, &exposure, &tunnel, cfClient, &status)
+	if done || err != nil {
 		return result, err
 	}
 
@@ -136,89 +131,66 @@ func (r *CloudflareExposureReconciler) Reconcile(ctx context.Context, req ctrl.R
 	return ctrl.Result{}, r.setExposureStatus(ctx, &exposure, status, true, ReasonReconciled, "Exposure reconciled")
 }
 
-func (r *CloudflareExposureReconciler) cloudflareClient(ctx context.Context, tunnel *cfztv1alpha1.CloudflareTunnel) (cloudflare.Client, error) {
-	var secret corev1.Secret
-	key := types.NamespacedName{Namespace: tunnel.Spec.Cloudflared.Namespace, Name: tunnel.Spec.CredentialsSecretRef.Name}
-	if err := r.Get(ctx, key, &secret); err != nil {
-		return nil, fmt.Errorf("credentials Secret %s/%s not readable: %w", key.Namespace, key.Name, err)
-	}
-	accountID := string(secret.Data[tunnel.Spec.CredentialsSecretRef.Keys.AccountId])
-	apiToken := string(secret.Data[tunnel.Spec.CredentialsSecretRef.Keys.ApiToken])
-	if accountID == "" {
-		return nil, fmt.Errorf("credentials Secret %s/%s missing key %q", key.Namespace, key.Name, tunnel.Spec.CredentialsSecretRef.Keys.AccountId)
-	}
-	if apiToken == "" {
-		return nil, fmt.Errorf("credentials Secret %s/%s missing key %q", key.Namespace, key.Name, tunnel.Spec.CredentialsSecretRef.Keys.ApiToken)
-	}
-	factory := r.CloudflareClientFactory
-	if factory == nil {
-		factory = func(accountID, apiToken string) (cloudflare.Client, error) {
-			return cloudflare.New(accountID, apiToken)
-		}
-	}
-	return factory(accountID, apiToken)
-}
-
-func (r *CloudflareExposureReconciler) reconcileExposureAccess(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, cfClient cloudflare.Client, status cfztv1alpha1.ExposureCloudflareStatus) (cfztv1alpha1.ExposureCloudflareStatus, bool, ctrl.Result, error) {
+func (r *CloudflareExposureReconciler) reconcileExposureAccess(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, cfClient cloudflare.Client, status *cfztv1alpha1.ExposureCloudflareStatus) (ctrl.Result, bool, error) {
 	if exposure.Spec.Access.Enabled {
 		app, created, err := r.reconcileAccess(ctx, exposure, cfClient)
 		if err != nil {
 			if errors.Is(err, errHostnameConflict) {
 				r.Recorder.Eventf(exposure, corev1.EventTypeWarning, EventHostnameConflict, "Access application hostname conflict for %s", exposure.Spec.Hostname)
-				result, statusErr := r.setExposureStatusAndBackoff(ctx, exposure, status, ReasonHostnameConflict, err.Error())
-				return status, true, result, statusErr
+				result, statusErr := r.setExposureStatusAndBackoff(ctx, exposure, *status, ReasonHostnameConflict, err.Error())
+				return result, true, statusErr
 			}
 			if errors.Is(err, errForeignResource) {
-				result, statusErr := r.setExposureStatusAndBackoff(ctx, exposure, status, ReasonForeignResource, err.Error())
-				return status, true, result, statusErr
+				result, statusErr := r.setExposureStatusAndBackoff(ctx, exposure, *status, ReasonForeignResource, err.Error())
+				return result, true, statusErr
 			}
 			if errors.Is(err, errPolicyNotFound) {
-				return status, true, ctrl.Result{}, r.setExposureStatus(ctx, exposure, status, false, ReasonPolicyNotFound, err.Error())
+				return ctrl.Result{}, true, r.setExposureStatus(ctx, exposure, *status, false, ReasonPolicyNotFound, err.Error())
 			}
 			if errors.Is(err, errPolicyNotReady) {
-				if statusErr := r.setExposureStatus(ctx, exposure, status, false, ReasonPolicyNotReady, err.Error()); statusErr != nil {
-					return status, true, ctrl.Result{}, statusErr
+				if statusErr := r.setExposureStatus(ctx, exposure, *status, false, ReasonPolicyNotReady, err.Error()); statusErr != nil {
+					return ctrl.Result{}, true, statusErr
 				}
-				return status, true, ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+				return ctrl.Result{RequeueAfter: 30 * time.Second}, true, nil
 			}
-			return status, true, ctrl.Result{}, err
+			return ctrl.Result{}, true, err
 		}
 		status.AccessApplicationId = app.ID
 		if created {
 			r.Recorder.Eventf(exposure, corev1.EventTypeNormal, EventCreatedAccessApp, "Created Cloudflare Access application %s", app.ID)
 		}
-		return status, false, ctrl.Result{}, nil
+		return ctrl.Result{}, false, nil
 	}
 	if err := r.deleteOwnedAccessIfPresent(ctx, exposure, cfClient); err != nil {
-		return status, true, ctrl.Result{}, err
+		return ctrl.Result{}, true, err
 	}
 	status.AccessApplicationId = ""
-	return status, false, ctrl.Result{}, nil
+	return ctrl.Result{}, false, nil
 }
 
-func (r *CloudflareExposureReconciler) reconcileExposureDNS(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, tunnel *cfztv1alpha1.CloudflareTunnel, cfClient cloudflare.Client, status cfztv1alpha1.ExposureCloudflareStatus) (cfztv1alpha1.ExposureCloudflareStatus, bool, ctrl.Result, error) {
+func (r *CloudflareExposureReconciler) reconcileExposureDNS(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, tunnel *cfztv1alpha1.CloudflareTunnel, cfClient cloudflare.Client, status *cfztv1alpha1.ExposureCloudflareStatus) (ctrl.Result, bool, error) {
 	if tunnel.Spec.Dns.Manage {
 		record, err := r.reconcileDNS(ctx, exposure, tunnel, cfClient)
 		if err != nil {
 			if errors.Is(err, errHostnameConflict) {
 				r.Recorder.Eventf(exposure, corev1.EventTypeWarning, EventHostnameConflict, "DNS hostname conflict for %s", exposure.Spec.Hostname)
-				result, statusErr := r.setExposureStatusAndBackoff(ctx, exposure, status, ReasonHostnameConflict, err.Error())
-				return status, true, result, statusErr
+				result, statusErr := r.setExposureStatusAndBackoff(ctx, exposure, *status, ReasonHostnameConflict, err.Error())
+				return result, true, statusErr
 			}
 			if errors.Is(err, errForeignResource) {
-				result, statusErr := r.setExposureStatusAndBackoff(ctx, exposure, status, ReasonForeignResource, err.Error())
-				return status, true, result, statusErr
+				result, statusErr := r.setExposureStatusAndBackoff(ctx, exposure, *status, ReasonForeignResource, err.Error())
+				return result, true, statusErr
 			}
-			return status, true, ctrl.Result{}, r.setExposureStatus(ctx, exposure, status, false, ReasonDNSWriteFailed, err.Error())
+			return ctrl.Result{}, true, r.setExposureStatus(ctx, exposure, *status, false, ReasonDNSWriteFailed, err.Error())
 		}
 		status.DnsRecordId = record.ID
-		return status, false, ctrl.Result{}, nil
+		return ctrl.Result{}, false, nil
 	}
 	if err := r.deleteOwnedDNSIfPresent(ctx, exposure, cfClient); err != nil {
-		return status, true, ctrl.Result{}, err
+		return ctrl.Result{}, true, err
 	}
 	status.DnsRecordId = ""
-	return status, false, ctrl.Result{}, nil
+	return ctrl.Result{}, false, nil
 }
 
 var (
@@ -430,7 +402,7 @@ func (r *CloudflareExposureReconciler) reconcileDelete(ctx context.Context, expo
 	if err := r.Get(ctx, types.NamespacedName{Name: exposure.Spec.TunnelRef.Name}, &tunnel); err != nil {
 		return r.setExposureStatusAndRequeue(ctx, exposure, exposure.Status.Cloudflare, ReasonCredentialsMissing, fmt.Sprintf("cleanup needs referenced CloudflareTunnel credentials: %v", err))
 	}
-	cfClient, err := r.cloudflareClient(ctx, &tunnel)
+	cfClient, err := r.CloudflareClient(ctx, credentialsRefFromTunnel(&tunnel))
 	if err != nil {
 		return r.setExposureStatusAndRequeue(ctx, exposure, exposure.Status.Cloudflare, ReasonCredentialsMissing, err.Error())
 	}
@@ -514,19 +486,9 @@ func (r *CloudflareExposureReconciler) setExposureStatus(ctx context.Context, ex
 	if err := r.Get(ctx, key, latest); err != nil {
 		return err
 	}
-	before := latest.DeepCopy()
-	latest.Status.Cloudflare = cfStatus
-	if ready {
-		setCondition(&latest.Status.Conditions, ConditionReady, metav1.ConditionTrue, reason, message, latest.Generation)
-		setCondition(&latest.Status.Conditions, ConditionProgressing, metav1.ConditionFalse, reason, message, latest.Generation)
-	} else {
-		setCondition(&latest.Status.Conditions, ConditionReady, metav1.ConditionFalse, reason, message, latest.Generation)
-		setCondition(&latest.Status.Conditions, ConditionProgressing, metav1.ConditionTrue, reason, message, latest.Generation)
-	}
-	if equality.Semantic.DeepEqual(before.Status, latest.Status) {
-		return nil
-	}
-	return r.Status().Update(ctx, latest)
+	return r.setReady(ctx, latest, &latest.Status.Conditions, latest.Generation, ready, reason, message, func() {
+		latest.Status.Cloudflare = cfStatus
+	})
 }
 
 func (r *CloudflareExposureReconciler) setExposureStatusAndBackoff(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, cfStatus cfztv1alpha1.ExposureCloudflareStatus, reason, message string) (ctrl.Result, error) {

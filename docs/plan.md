@@ -241,8 +241,13 @@ Completed on 2026-05-22:
   `internal/ownership`; `internal/naming` retains only naming constants and
   functions. Exposure and TunnelRoute reconcilers now call
   `ownership.From(uid)` methods for comments, tags, and ownership checks.
+- Slice 6 subtask 13: shared reconciler Base landed. The four reconcilers now
+  embed `Base`, share credential loading and Cloudflare client construction,
+  use the shared Ready/Progressing status updater where practical, and Exposure
+  access/DNS reconcile steps mutate in-scope status instead of returning the
+  old four-value status tuple.
 
-Next: Slice 6 subtask 13.
+Next: Slice 6 subtask 14.
 
 ## 3. Slice plan
 

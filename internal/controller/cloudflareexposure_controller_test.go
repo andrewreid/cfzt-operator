@@ -35,7 +35,6 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		tunnelReconciler    *CloudflareTunnelReconciler
 		exposureReconciler  *CloudflareExposureReconciler
 		policyReconciler    *CloudflareAccessPolicyReconciler
-		cloudflareFactory   CloudflareClientFactory
 		defaultPolicyUUID   = "00000000-0000-4000-8000-000000000001"
 		defaultTunnelName   = "homelab"
 		defaultTunnelCFName = "homelab-rke2"
@@ -47,28 +46,29 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		ensureNamespace(ctx, namespace)
 		fakeCF = cloudflare.NewFake()
 		fakeCF.AddZone("zone-example", "example.com")
-		cloudflareFactory = func(accountID, apiToken string) (cloudflare.Client, error) {
-			Expect(accountID).To(Equal("account-1"))
-			Expect(apiToken).To(Equal("token-1"))
-			return fakeCF, nil
-		}
 		tunnelReconciler = &CloudflareTunnelReconciler{
-			Client:                  indexedClient,
-			Scheme:                  indexedClient.Scheme(),
-			CloudflareClientFactory: cloudflareFactory,
-			Recorder:                newTestRecorder(),
+			Base: Base{
+				Client:              indexedClient,
+				Scheme:              indexedClient.Scheme(),
+				NewCloudflareClient: newFakeCloudflareClient(indexedClient, fakeCF),
+				Recorder:            newTestRecorder(),
+			},
 		}
 		exposureReconciler = &CloudflareExposureReconciler{
-			Client:                  indexedClient,
-			Scheme:                  indexedClient.Scheme(),
-			CloudflareClientFactory: cloudflareFactory,
-			Recorder:                newTestRecorder(),
+			Base: Base{
+				Client:              indexedClient,
+				Scheme:              indexedClient.Scheme(),
+				NewCloudflareClient: newFakeCloudflareClient(indexedClient, fakeCF),
+				Recorder:            newTestRecorder(),
+			},
 		}
 		policyReconciler = &CloudflareAccessPolicyReconciler{
-			Client:                  indexedClient,
-			Scheme:                  indexedClient.Scheme(),
-			CloudflareClientFactory: cloudflareFactory,
-			Recorder:                newTestRecorder(),
+			Base: Base{
+				Client:              indexedClient,
+				Scheme:              indexedClient.Scheme(),
+				NewCloudflareClient: newFakeCloudflareClient(indexedClient, fakeCF),
+				Recorder:            newTestRecorder(),
+			},
 		}
 	})
 
@@ -268,7 +268,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 			}).
 			WithObjects(first, second, otherTunnel).
 			Build()
-		localReconciler := &CloudflareExposureReconciler{Client: localClient}
+		localReconciler := &CloudflareExposureReconciler{Base: Base{Client: localClient}}
 
 		conflict, err := localReconciler.hasDuplicateHostname(ctx, first)
 		Expect(err).NotTo(HaveOccurred())
@@ -658,7 +658,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		}
 		route := httpRoute(namespace, "jellyfin-route", "route.example.com")
 		localClient := fakeclient.NewClientBuilder().WithScheme(k8sClient.Scheme()).WithObjects(exposure, route).Build()
-		localReconciler := &CloudflareExposureReconciler{Client: localClient, Scheme: k8sClient.Scheme(), HTTPRouteSourceEnabled: true}
+		localReconciler := &CloudflareExposureReconciler{Base: Base{Client: localClient, Scheme: k8sClient.Scheme()}, HTTPRouteSourceEnabled: true}
 
 		defaulted, err := localReconciler.defaultFromSourceRef(ctx, exposure)
 
