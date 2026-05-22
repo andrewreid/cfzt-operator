@@ -259,8 +259,14 @@ Completed on 2026-05-22:
   smoke harness moved to `test/live/harness.go`, `dupl` is re-enabled for
   `internal/*`, and HTTPRoute optionality is documented in controller and Helm
   RBAC comments.
+- Slice 6 subtask 17: live smoke audit and alignment completed. The smoke test
+  now expects suffixed Cloudflare Access policy names, asserts the read-side
+  Access application `PolicyUUIDs` binding and ownership tags, verifies tunnel
+  ingress hash stability after no-op reconciliation, shortens live-smoke wait
+  budgets for faster failure, and documents the 30s conflict requeue floor in
+  the wait helper.
 
-Next: Slice 6 subtask 17.
+Next: Slice 6 final verification.
 
 ## 3. Slice plan
 

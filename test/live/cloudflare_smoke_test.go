@@ -12,6 +12,15 @@ import (
 	"github.com/andrewreid/cfzt-operator/internal/cloudflare"
 )
 
+const (
+	lifecycleTimeout      = 10 * time.Minute
+	resourceReadyTimeout  = 2 * time.Minute
+	restartReadyTimeout   = 90 * time.Second
+	conflictReadyTimeout  = 90 * time.Second
+	tunnelHashTimeout     = 90 * time.Second
+	daemonSetReadyTimeout = 2 * time.Minute
+)
+
 func TestCloudflarePreflight(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -63,7 +72,7 @@ func TestCloudflarePreflight(t *testing.T) {
 }
 
 func TestCloudflareLifecycle(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), lifecycleTimeout)
 	defer cancel()
 
 	cfg := loadSmokeConfig(t)
@@ -82,7 +91,7 @@ func TestCloudflareLifecycle(t *testing.T) {
 
 	t.Log("creating managed Access policy")
 	h.createAccessPolicy()
-	policy := h.waitAccessPolicyReady(7 * time.Minute)
+	policy := h.waitAccessPolicyReady(resourceReadyTimeout)
 	policyIDBefore := policy.Status.PolicyId
 	policyHashBefore := policy.Status.ObservedRulesHash
 	if !strings.HasPrefix(policyHashBefore, "sha256:") {
@@ -92,23 +101,23 @@ func TestCloudflareLifecycle(t *testing.T) {
 
 	t.Log("creating tunnel")
 	h.createTunnel()
-	tunnel := h.waitTunnelReady(7 * time.Minute)
+	tunnel := h.waitTunnelReady(resourceReadyTimeout)
 	tunnelIDBefore := tunnel.Status.TunnelId
 	if tunnel.Status.TokenSecretRef.Name != h.cfg.tunnelName+"-token" {
 		t.Fatalf("unexpected token Secret %q", tunnel.Status.TokenSecretRef.Name)
 	}
-	h.waitDaemonSetReady("cloudflared-"+h.cfg.tunnelName, 3*time.Minute)
+	h.waitDaemonSetReady("cloudflared-"+h.cfg.tunnelName, daemonSetReadyTimeout)
 
 	t.Log("creating tunnel private route")
 	h.createTunnelRoute()
-	tunnelRoute := h.waitTunnelRouteReady(7 * time.Minute)
+	tunnelRoute := h.waitTunnelRouteReady(resourceReadyTimeout)
 	tunnelRouteIDBefore := tunnelRoute.Status.RouteId
 	h.assertOneTunnelRoute(tunnelRouteIDBefore, tunnelIDBefore, h.cfg.tunnelRouteCIDR)
 
 	t.Log("creating public and Access exposures")
 	h.createExposures()
-	public := h.waitExposureReady(publicExposure, 7*time.Minute)
-	access := h.waitExposureReady(accessExposure, 7*time.Minute)
+	public := h.waitExposureReady(publicExposure, resourceReadyTimeout)
+	access := h.waitExposureReady(accessExposure, resourceReadyTimeout)
 	publicDNSBefore := public.Status.Cloudflare.DnsRecordId
 	publicRouteBefore := public.Status.Cloudflare.PublicHostnameRouteHash
 	accessDNSBefore := access.Status.Cloudflare.DnsRecordId
@@ -118,7 +127,17 @@ func TestCloudflareLifecycle(t *testing.T) {
 		t.Fatalf("expected non-empty route hashes, got public=%q access=%q", publicRouteBefore, accessRouteBefore)
 	}
 
+	tunnel = h.waitTunnelReady(tunnelHashTimeout)
+	// Slice 6 adjustment: subtask 4 made the tunnel config hash the live signal
+	// that the real tunnel config write happened once and can be skipped later.
+	ingressHashBefore := tunnel.Status.IngressDocHash
+	if ingressHashBefore == "" {
+		t.Fatalf("expected non-empty tunnel ingress doc hash after exposures are ready")
+	}
 	h.waitPublicRoute()
+	// Slice 6 adjustment: subtask 7 split write PolicyUUID from read
+	// PolicyUUIDs, so live smoke reads the CF app back through the slice shape.
+	h.assertAccessApplication(accessAppBefore, policyIDBefore)
 	h.assertAccessChallenged()
 
 	t.Log("checking idempotency after re-apply and operator restart")
@@ -128,19 +147,21 @@ func TestCloudflareLifecycle(t *testing.T) {
 	h.updateExposuresNoop()
 	h.restartOperator()
 
-	policy = h.waitAccessPolicyReady(4 * time.Minute)
-	tunnel = h.waitTunnelReady(4 * time.Minute)
-	tunnelRoute = h.waitTunnelRouteReady(4 * time.Minute)
-	public = h.waitExposureReady(publicExposure, 4*time.Minute)
-	access = h.waitExposureReady(accessExposure, 4*time.Minute)
+	policy = h.waitAccessPolicyReady(restartReadyTimeout)
+	tunnel = h.waitTunnelReady(restartReadyTimeout)
+	tunnelRoute = h.waitTunnelRouteReady(restartReadyTimeout)
+	public = h.waitExposureReady(publicExposure, restartReadyTimeout)
+	access = h.waitExposureReady(accessExposure, restartReadyTimeout)
 
 	assertEqual(t, "Access policy ID", policyIDBefore, policy.Status.PolicyId)
 	assertEqual(t, "Access policy rules hash", policyHashBefore, policy.Status.ObservedRulesHash)
 	assertEqual(t, "tunnel ID", tunnelIDBefore, tunnel.Status.TunnelId)
+	assertEqual(t, "tunnel ingress doc hash", ingressHashBefore, tunnel.Status.IngressDocHash)
 	assertEqual(t, "tunnel route ID", tunnelRouteIDBefore, tunnelRoute.Status.RouteId)
 	assertEqual(t, "public DNS record ID", publicDNSBefore, public.Status.Cloudflare.DnsRecordId)
 	assertEqual(t, "access DNS record ID", accessDNSBefore, access.Status.Cloudflare.DnsRecordId)
 	assertEqual(t, "Access application ID", accessAppBefore, access.Status.Cloudflare.AccessApplicationId)
+	h.assertAccessApplication(accessAppBefore, policyIDBefore)
 
 	t.Log("checking foreign DNS conflict safety")
 	record, err := h.cf.DNSRecords().Create(ctx, cloudflare.DNSRecordInput{
@@ -156,7 +177,7 @@ func TestCloudflareLifecycle(t *testing.T) {
 	}
 	h.foreignRecordID = record.ID
 	h.createConflictExposure()
-	reason := h.waitExposureConflictReason(conflictExposure, 4*time.Minute)
+	reason := h.waitExposureConflictReason(conflictExposure, conflictReadyTimeout)
 	t.Logf("conflict exposure reported %s", reason)
 	foreignRecords := mustListDNS(t, ctx, h.cf, h.cfg.zoneID, h.cfg.conflictHostname)
 	if len(foreignRecords) != 1 {
@@ -168,7 +189,7 @@ func TestCloudflareLifecycle(t *testing.T) {
 	t.Log("checking foreign tunnel route conflict safety")
 	foreignRoute := h.createForeignTunnelRoute(tunnelIDBefore)
 	h.createConflictTunnelRoute()
-	routeReason := h.waitTunnelRouteForeignReason(4 * time.Minute)
+	routeReason := h.waitTunnelRouteForeignReason(conflictReadyTimeout)
 	t.Logf("conflict tunnel route reported %s", routeReason)
 	foreignRoutes := h.listTunnelRoutes(h.cfg.tunnelRouteConflictCIDR)
 	if len(foreignRoutes) != 1 {

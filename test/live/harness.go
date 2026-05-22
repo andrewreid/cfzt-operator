@@ -47,6 +47,12 @@ const (
 	publicExposure      = "public-smoke"
 	accessExposure      = "access-smoke"
 	conflictExposure    = "conflict-smoke"
+
+	operatorReadyTimeout = 2 * time.Minute
+	echoReadyTimeout     = 2 * time.Minute
+	hostnameHTTPTimeout  = 2 * time.Minute
+	cleanupTimeout       = 4 * time.Minute
+	cleanupWaitTimeout   = 2 * time.Minute
 )
 
 type smokeConfig struct {
@@ -189,7 +195,7 @@ func (h *smokeHarness) installOperator() {
 		"--set", "image.pullPolicy=Never",
 		"--set", "replicaCount=1",
 		"--wait",
-		"--timeout", "3m"}
+		"--timeout", "2m"}
 	if !isLocalChartRef(h.cfg.chartRef) {
 		args = append(args[:4], append([]string{"--version", h.cfg.version}, args[4:]...)...)
 	}
@@ -262,7 +268,7 @@ func (h *smokeHarness) deployEcho() {
 		},
 	}
 	h.createOrUpdate(service, func() {})
-	h.waitDeploymentAvailable(h.cfg.smokeNamespace, echoName, 3*time.Minute)
+	h.waitDeploymentAvailable(h.cfg.smokeNamespace, echoName, echoReadyTimeout)
 }
 
 func (h *smokeHarness) createAccessPolicy() {
@@ -476,6 +482,9 @@ func (h *smokeHarness) waitTunnelRouteForeignReason(timeout time.Duration) strin
 
 func (h *smokeHarness) waitExposureConflictReason(name string, timeout time.Duration) string {
 	var reason string
+	// Slice 6 adjustment: subtask 14 changed waiting conflicts to fixed 30s
+	// requeues. Keep these waits comfortably above that floor, and accept both
+	// hostname and finalizer foreign-resource reasons for ownership conflicts.
 	h.waitFor("CloudflareExposure "+name+" conflict", timeout, func() (bool, error) {
 		var exposure cfztv1alpha1.CloudflareExposure
 		if err := h.k8s.Get(h.ctx, types.NamespacedName{Namespace: h.cfg.smokeNamespace, Name: name}, &exposure); err != nil {
@@ -521,7 +530,7 @@ func (h *smokeHarness) waitDaemonSetReady(name string, timeout time.Duration) {
 func (h *smokeHarness) waitPublicRoute() {
 	httpClient := smokeHTTPClient()
 	h.t.Logf("waiting for public route https://%s/hostname", h.cfg.publicHostname)
-	h.waitFor("public hostname HTTP 200", 10*time.Minute, func() (bool, error) {
+	h.waitFor("public hostname HTTP 200", hostnameHTTPTimeout, func() (bool, error) {
 		req, err := http.NewRequestWithContext(h.ctx, http.MethodGet, "https://"+h.cfg.publicHostname+"/hostname", nil)
 		if err != nil {
 			return false, err
@@ -540,7 +549,7 @@ func (h *smokeHarness) assertAccessChallenged() {
 	httpClient := smokeHTTPClient()
 	h.t.Logf("checking unauthenticated Access response for https://%s/hostname", h.cfg.accessHostname)
 	var lastStatus int
-	h.waitFor("Access hostname challenge", 10*time.Minute, func() (bool, error) {
+	h.waitFor("Access hostname challenge", hostnameHTTPTimeout, func() (bool, error) {
 		req, err := http.NewRequestWithContext(h.ctx, http.MethodGet, "https://"+h.cfg.accessHostname+"/hostname", nil)
 		if err != nil {
 			return false, err
@@ -568,16 +577,63 @@ func (h *smokeHarness) assertOneAccessPolicy(policyID string) {
 	if err != nil {
 		h.t.Fatalf("list Access policies: %v", err)
 	}
+	// Slice 6 adjustment: managed policyName is a base name; Cloudflare-side
+	// policy names always carry the operator suffix.
+	wantName := h.expectedAccessPolicyName()
 	var matches []cloudflare.AccessPolicy
 	for _, policy := range policies {
-		if policy.Name == h.cfg.accessPolicy {
+		if policy.Name == wantName {
 			matches = append(matches, policy)
 		}
 	}
 	if len(matches) != 1 {
-		h.t.Fatalf("expected exactly one managed Access policy named %s, got %d", h.cfg.accessPolicy, len(matches))
+		h.t.Fatalf("expected exactly one managed Access policy named %s, got %d", wantName, len(matches))
 	}
 	assertEqual(h.t, "managed Access policy ID", policyID, matches[0].ID)
+}
+
+func (h *smokeHarness) assertAccessApplication(appID, policyID string) {
+	apps, err := h.cf.AccessApplications().List(h.ctx, h.cfg.accessHostname)
+	if err != nil {
+		h.t.Fatalf("list Access applications for %s: %v", h.cfg.accessHostname, err)
+	}
+	var matches []cloudflare.AccessApplication
+	for _, app := range apps {
+		if app.ID == appID {
+			matches = append(matches, app)
+		}
+	}
+	if len(matches) != 1 {
+		h.t.Fatalf("expected exactly one Access application %s for %s, got %d", appID, h.cfg.accessHostname, len(matches))
+	}
+	app := matches[0]
+	assertEqual(h.t, "Access application domain", h.cfg.accessHostname, app.Domain)
+	assertEqual(h.t, "Access application name", accessExposure+"-cfzt", app.Name)
+	if len(app.PolicyUUIDs) != 1 || app.PolicyUUIDs[0] != policyID {
+		h.t.Fatalf("expected Access application policies [%s], got %v", policyID, app.PolicyUUIDs)
+	}
+	if !containsString(app.Tags, "managed-by=cfzt-operator") {
+		h.t.Fatalf("Access application missing managed-by tag: %v", app.Tags)
+	}
+	for _, tag := range app.Tags {
+		if strings.HasPrefix(tag, "source-uid-0=") {
+			return
+		}
+	}
+	h.t.Fatalf("Access application missing source UID chunk tag: %v", app.Tags)
+}
+
+func (h *smokeHarness) expectedAccessPolicyName() string {
+	return h.cfg.accessPolicy + "-cfzt"
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *smokeHarness) assertOneTunnelRoute(routeID, tunnelID, network string) {
@@ -656,43 +712,43 @@ func (h *smokeHarness) restartOperator() {
 	}
 	deploy.Spec.Template.Annotations["cfzt.reid.ee/live-smoke-restarted-at"] = time.Now().UTC().Format(time.RFC3339Nano)
 	must(h.t, h.k8s.Update(h.ctx, &deploy), "restart operator Deployment")
-	h.waitDeploymentAvailable(h.cfg.operatorNamespace, operatorReleaseName, 3*time.Minute)
+	h.waitDeploymentAvailable(h.cfg.operatorNamespace, operatorReleaseName, operatorReadyTimeout)
 }
 
 func (h *smokeHarness) cleanup() {
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 	defer cancel()
 
 	h.t.Log("cleanup: deleting CloudflareExposure resources")
 	h.deleteObject(cleanupCtx, &cfztv1alpha1.CloudflareExposure{ObjectMeta: metav1.ObjectMeta{Name: publicExposure, Namespace: h.cfg.smokeNamespace}})
 	h.deleteObject(cleanupCtx, &cfztv1alpha1.CloudflareExposure{ObjectMeta: metav1.ObjectMeta{Name: accessExposure, Namespace: h.cfg.smokeNamespace}})
 	h.deleteObject(cleanupCtx, &cfztv1alpha1.CloudflareExposure{ObjectMeta: metav1.ObjectMeta{Name: conflictExposure, Namespace: h.cfg.smokeNamespace}})
-	h.waitObjectAbsent(cleanupCtx, &cfztv1alpha1.CloudflareExposure{}, types.NamespacedName{Name: publicExposure, Namespace: h.cfg.smokeNamespace}, 5*time.Minute)
-	h.waitObjectAbsent(cleanupCtx, &cfztv1alpha1.CloudflareExposure{}, types.NamespacedName{Name: accessExposure, Namespace: h.cfg.smokeNamespace}, 5*time.Minute)
-	h.waitObjectAbsent(cleanupCtx, &cfztv1alpha1.CloudflareExposure{}, types.NamespacedName{Name: conflictExposure, Namespace: h.cfg.smokeNamespace}, 5*time.Minute)
+	h.waitObjectAbsent(cleanupCtx, &cfztv1alpha1.CloudflareExposure{}, types.NamespacedName{Name: publicExposure, Namespace: h.cfg.smokeNamespace}, cleanupWaitTimeout)
+	h.waitObjectAbsent(cleanupCtx, &cfztv1alpha1.CloudflareExposure{}, types.NamespacedName{Name: accessExposure, Namespace: h.cfg.smokeNamespace}, cleanupWaitTimeout)
+	h.waitObjectAbsent(cleanupCtx, &cfztv1alpha1.CloudflareExposure{}, types.NamespacedName{Name: conflictExposure, Namespace: h.cfg.smokeNamespace}, cleanupWaitTimeout)
 
 	h.t.Log("cleanup: deleting CloudflareTunnelRoute resources")
 	h.deleteObject(cleanupCtx, &cfztv1alpha1.CloudflareTunnelRoute{ObjectMeta: metav1.ObjectMeta{Name: h.cfg.tunnelRoute}})
 	h.deleteObject(cleanupCtx, &cfztv1alpha1.CloudflareTunnelRoute{ObjectMeta: metav1.ObjectMeta{Name: h.cfg.tunnelRouteConflict}})
-	h.waitObjectAbsent(cleanupCtx, &cfztv1alpha1.CloudflareTunnelRoute{}, types.NamespacedName{Name: h.cfg.tunnelRoute}, 5*time.Minute)
-	h.waitObjectAbsent(cleanupCtx, &cfztv1alpha1.CloudflareTunnelRoute{}, types.NamespacedName{Name: h.cfg.tunnelRouteConflict}, 5*time.Minute)
+	h.waitObjectAbsent(cleanupCtx, &cfztv1alpha1.CloudflareTunnelRoute{}, types.NamespacedName{Name: h.cfg.tunnelRoute}, cleanupWaitTimeout)
+	h.waitObjectAbsent(cleanupCtx, &cfztv1alpha1.CloudflareTunnelRoute{}, types.NamespacedName{Name: h.cfg.tunnelRouteConflict}, cleanupWaitTimeout)
 
 	if h.foreignRouteID != "" {
 		h.t.Log("cleanup: deleting foreign conflict tunnel route")
 		if err := h.cf.TunnelRoutes().Delete(cleanupCtx, h.foreignRouteID); err != nil && !errors.Is(err, cloudflare.ErrNotFound) {
 			h.t.Errorf("delete foreign tunnel route: %v", err)
 		}
-		h.waitTunnelRouteAbsent(cleanupCtx, "foreign tunnel route", h.cfg.tunnelRouteConflictCIDR, 3*time.Minute)
+		h.waitTunnelRouteAbsent(cleanupCtx, "foreign tunnel route", h.cfg.tunnelRouteConflictCIDR, cleanupWaitTimeout)
 	}
 
 	h.t.Log("cleanup: deleting CloudflareAccessPolicy")
 	h.deleteObject(cleanupCtx, &cfztv1alpha1.CloudflareAccessPolicy{ObjectMeta: metav1.ObjectMeta{Name: h.cfg.accessPolicy}})
-	h.deleteAccessPoliciesByName(cleanupCtx, h.cfg.accessPolicy)
-	h.waitObjectAbsent(cleanupCtx, &cfztv1alpha1.CloudflareAccessPolicy{}, types.NamespacedName{Name: h.cfg.accessPolicy}, 5*time.Minute)
+	h.deleteAccessPoliciesByName(cleanupCtx, h.expectedAccessPolicyName())
+	h.waitObjectAbsent(cleanupCtx, &cfztv1alpha1.CloudflareAccessPolicy{}, types.NamespacedName{Name: h.cfg.accessPolicy}, cleanupWaitTimeout)
 
 	h.t.Log("cleanup: deleting CloudflareTunnel")
 	h.deleteObject(cleanupCtx, &cfztv1alpha1.CloudflareTunnel{ObjectMeta: metav1.ObjectMeta{Name: h.cfg.tunnelName}})
-	h.waitObjectAbsent(cleanupCtx, &cfztv1alpha1.CloudflareTunnel{}, types.NamespacedName{Name: h.cfg.tunnelName}, 5*time.Minute)
+	h.waitObjectAbsent(cleanupCtx, &cfztv1alpha1.CloudflareTunnel{}, types.NamespacedName{Name: h.cfg.tunnelName}, cleanupWaitTimeout)
 
 	if h.foreignRecordID != "" {
 		h.t.Log("cleanup: deleting foreign conflict DNS record")
@@ -700,12 +756,12 @@ func (h *smokeHarness) cleanup() {
 			h.t.Errorf("delete foreign DNS record: %v", err)
 		}
 	}
-	h.waitDNSAbsent(cleanupCtx, "public DNS record", h.cfg.publicHostname, 3*time.Minute)
-	h.waitDNSAbsent(cleanupCtx, "access DNS record", h.cfg.accessHostname, 3*time.Minute)
-	h.waitTunnelRouteAbsent(cleanupCtx, "tunnel route", h.cfg.tunnelRouteCIDR, 3*time.Minute)
-	h.waitAccessApplicationsAbsent(cleanupCtx, 3*time.Minute)
-	h.waitAccessPolicyAbsent(cleanupCtx, 3*time.Minute)
-	h.waitTunnelAbsent(cleanupCtx, 3*time.Minute)
+	h.waitDNSAbsent(cleanupCtx, "public DNS record", h.cfg.publicHostname, cleanupWaitTimeout)
+	h.waitDNSAbsent(cleanupCtx, "access DNS record", h.cfg.accessHostname, cleanupWaitTimeout)
+	h.waitTunnelRouteAbsent(cleanupCtx, "tunnel route", h.cfg.tunnelRouteCIDR, cleanupWaitTimeout)
+	h.waitAccessApplicationsAbsent(cleanupCtx, cleanupWaitTimeout)
+	h.waitAccessPolicyAbsent(cleanupCtx, cleanupWaitTimeout)
+	h.waitTunnelAbsent(cleanupCtx, cleanupWaitTimeout)
 }
 
 func (h *smokeHarness) waitTunnelRouteAbsent(ctx context.Context, description, network string, timeout time.Duration) {
@@ -748,7 +804,7 @@ func (h *smokeHarness) waitAccessPolicyAbsent(ctx context.Context, timeout time.
 			return false, err
 		}
 		for _, policy := range policies {
-			if policy.Name == h.cfg.accessPolicy {
+			if policy.Name == h.expectedAccessPolicyName() {
 				return false, nil
 			}
 		}
