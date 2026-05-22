@@ -18,7 +18,6 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 )
 
 // TunnelRef identifies the CloudflareTunnel that publishes this exposure.
@@ -123,8 +122,7 @@ type ExposureCloudflareStatus struct {
 
 // CloudflareExposureStatus defines the observed state of CloudflareExposure.
 type CloudflareExposureStatus struct {
-	Cloudflare        ExposureCloudflareStatus `json:"cloudflare,omitempty"`
-	ObservedTunnelUid types.UID                `json:"observedTunnelUid,omitempty"`
+	Cloudflare ExposureCloudflareStatus `json:"cloudflare,omitempty"`
 
 	// +listType=map
 	// +listMapKey=type

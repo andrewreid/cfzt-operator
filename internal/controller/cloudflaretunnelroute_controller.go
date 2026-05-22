@@ -207,25 +207,22 @@ var errForeignRoute = errors.New("foreign route")
 func (r *CloudflareTunnelRouteReconciler) reconcileCloudflareRoute(ctx context.Context, route *cfztv1alpha1.CloudflareTunnelRoute, cfClient cloudflare.Client, desired cloudflare.TunnelRouteInput) (*cloudflare.TunnelRoute, bool, error) {
 	if route.Status.RouteId != "" {
 		cfRoute, err := cfClient.TunnelRoutes().Get(ctx, route.Status.RouteId)
-		if errors.Is(err, cloudflare.ErrNotFound) {
-			copy := route.DeepCopy()
-			copy.Status.RouteId = ""
-			return r.reconcileCloudflareRoute(ctx, copy, cfClient, desired)
-		}
-		if err != nil {
+		if err != nil && !errors.Is(err, cloudflare.ErrNotFound) {
 			return nil, false, err
 		}
-		if !ownedByComment(cfRoute.Comment, route.UID) {
-			return nil, false, errForeignRoute
+		if err == nil {
+			if !ownedByComment(cfRoute.Comment, route.UID) {
+				return nil, false, errForeignRoute
+			}
+			if tunnelRouteMatches(*cfRoute, desired) {
+				return cfRoute, false, nil
+			}
+			if err := r.preflightRouteTarget(ctx, cfClient, desired, cfRoute.ID); err != nil {
+				return nil, false, err
+			}
+			updated, err := cfClient.TunnelRoutes().Edit(ctx, cfRoute.ID, desired)
+			return updated, false, err
 		}
-		if tunnelRouteMatches(*cfRoute, desired) {
-			return cfRoute, false, nil
-		}
-		if err := r.preflightRouteTarget(ctx, route, cfClient, desired, cfRoute.ID); err != nil {
-			return nil, false, err
-		}
-		updated, err := cfClient.TunnelRoutes().Edit(ctx, cfRoute.ID, desired)
-		return updated, false, err
 	}
 
 	existing, err := cfClient.TunnelRoutes().List(ctx, cloudflare.ListTunnelRoutesFilter{
@@ -255,7 +252,7 @@ func (r *CloudflareTunnelRouteReconciler) reconcileCloudflareRoute(ctx context.C
 	return created, true, err
 }
 
-func (r *CloudflareTunnelRouteReconciler) preflightRouteTarget(ctx context.Context, route *cfztv1alpha1.CloudflareTunnelRoute, cfClient cloudflare.Client, desired cloudflare.TunnelRouteInput, allowedRouteID string) error {
+func (r *CloudflareTunnelRouteReconciler) preflightRouteTarget(ctx context.Context, cfClient cloudflare.Client, desired cloudflare.TunnelRouteInput, allowedRouteID string) error {
 	existing, err := cfClient.TunnelRoutes().List(ctx, cloudflare.ListTunnelRoutesFilter{
 		Network:          desired.Network,
 		VirtualNetworkID: desired.VirtualNetworkID,
@@ -266,9 +263,6 @@ func (r *CloudflareTunnelRouteReconciler) preflightRouteTarget(ctx context.Conte
 	for _, candidate := range existing {
 		if candidate.ID == allowedRouteID {
 			continue
-		}
-		if !ownedByComment(candidate.Comment, route.UID) {
-			return errForeignRoute
 		}
 		return errForeignRoute
 	}

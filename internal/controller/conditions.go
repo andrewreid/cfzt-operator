@@ -36,8 +36,6 @@ const (
 	EventCreatedAccessPolicy = "CreatedAccessPolicy"
 	EventUpdatedAccessPolicy = "UpdatedAccessPolicy"
 	EventHostnameConflict    = "HostnameConflict"
-	EventForeignTunnel       = "ForeignTunnel"
-	EventReconcileFailed     = "ReconcileFailed"
 	EventTokenRotated        = "TokenRotated"
 	EventBlockedByExposures  = "BlockedByExposures"
 	EventCreatedRoute        = "CreatedRoute"

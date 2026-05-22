@@ -8,9 +8,6 @@ import "errors"
 // ErrNotFound is returned when a requested resource does not exist.
 var ErrNotFound = errors.New("cloudflare: resource not found")
 
-// ErrNotImplemented is returned by stub methods not yet wired to the SDK.
-var ErrNotImplemented = errors.New("cloudflare: not implemented")
-
 // ErrUnsupportedAccessRule is returned when Cloudflare returns an Access rule
 // variant outside the MVP rule set supported by this operator.
 var ErrUnsupportedAccessRule = errors.New("cloudflare: unsupported access rule")

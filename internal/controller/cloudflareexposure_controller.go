@@ -567,7 +567,6 @@ func ownershipTags(uid types.UID) []string {
 
 const (
 	accessManagedByTag         = "managed-by=cfzt-operator"
-	accessSourceUIDTagPrefix   = "source-uid="
 	accessSourceUIDChunkPrefix = "source-uid-"
 	accessTagMaxLength         = 35
 )
@@ -588,15 +587,10 @@ func ownedByTags(tags []string, uid types.UID) bool {
 
 func ownershipUIDFromTags(tags []string) (types.UID, bool) {
 	hasManagedBy := false
-	directUID := ""
 	chunks := map[int]string{}
 	for _, tag := range tags {
 		if tag == accessManagedByTag {
 			hasManagedBy = true
-			continue
-		}
-		if value, ok := strings.CutPrefix(tag, accessSourceUIDTagPrefix); ok {
-			directUID = value
 			continue
 		}
 		if rest, ok := strings.CutPrefix(tag, accessSourceUIDChunkPrefix); ok {
@@ -614,9 +608,6 @@ func ownershipUIDFromTags(tags []string) (types.UID, bool) {
 	if !hasManagedBy {
 		return "", false
 	}
-	if directUID != "" {
-		return types.UID(directUID), true
-	}
 	if len(chunks) == 0 {
 		return "", false
 	}
@@ -633,10 +624,6 @@ func ownershipUIDFromTags(tags []string) (types.UID, bool) {
 
 func sourceUIDTags(uid types.UID) []string {
 	value := string(uid)
-	direct := accessSourceUIDTagPrefix + value
-	if len(direct) <= accessTagMaxLength {
-		return []string{direct}
-	}
 	var tags []string
 	for idx := 0; value != ""; idx++ {
 		prefix := fmt.Sprintf("%s%d=", accessSourceUIDChunkPrefix, idx)

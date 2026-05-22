@@ -3,9 +3,8 @@ package cloudflare
 import "context"
 
 // cloudflare-go/v4 v4.6.0 does not surface a comment field on tunnel responses.
-// Ownership marking via the tunnel `comment` field (D9) is therefore deferred
-// until either the SDK exposes it or the controller layer adopts an alternate
-// mechanism. Subtask 5 (tunnel controller) must resolve before relying on it.
+// Tunnel ownership therefore stays on status.tunnelId; other resources carry
+// the source-uid tag markers.
 type Tunnel struct {
 	ID   string
 	Name string

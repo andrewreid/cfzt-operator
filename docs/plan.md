@@ -187,9 +187,15 @@ Completed on 2026-05-21:
   cleans up both route CRs and CF routes. `hack/live-cloudflare-local.sh` and
   `.env.live.example` document `CF_SMOKE_ROUTE_CIDR` /
   `CF_SMOKE_ROUTE_CONFLICT_CIDR`.
+- Completed on 2026-05-22:
+  - Slice 6 subtask 1: dead-code + dead-branch purge completed. Removed the
+    unused Cloudflare error/event constants, `ObservedTunnelUid`, the dead
+    Access tag direct branch, the tunnel-route NotFound recursion and foreign
+    preflight branch, the stale tunnel SDK caveat, and the committed
+    `cover.out`. Chart metadata now calls out the placeholder appVersion/tag
+    values.
 
-Next: manual live-cluster smoke for Slices 1-5 remains pending because it
-requires a Kubernetes cluster and Cloudflare credentials.
+Next: Slice 6 subtask 2.
 
 ## 3. Slice plan
 
@@ -554,6 +560,402 @@ Subtask-derived additions: `TestFakeRouteCreateGetDelete`, `TestFakeRouteListByC
 - Tunnel-readiness coupling. Route registration gates on `status.tunnelId`, not full Tunnel `Ready=True`; cover with `TestRouteRetriesOnTunnelID`.
 - Live smoke CIDR collision — the chosen documentation/CGNAT CIDRs must not collide with any real route on the test account. Override via `CF_SMOKE_ROUTE_CIDR` / `CF_SMOKE_ROUTE_CONFLICT_CIDR` in `.env.live` if defaults conflict.
 - WARP scope creep. Route registration is the only intent of this slice. WARP client routing, Gateway policies, and split-tunnel config remain deferred.
+
+### Slice 6 — Pre-MVP cleanup
+
+Per `claude-review.md`. Outcome: ~720 LoC of duplicated scaffolding, dead
+branches, and stale kustomize removed; one Cloudflare API call saved per tunnel
+reconcile (1.11); real zone-cache hits restored (1.4); ownership-tag handling
+centralised; reconciler scaffolds share a `Base`; `policyName` collision
+protection no longer bypassable. Acts on every item in `claude-review.md`
+(§§1–8). Planning decisions baked in: always append `-cfzt` to managed Access
+policy names (§7.1); transient errors return errors for controller-runtime
+exponential backoff, "waiting" reasons return `RequeueAfter: 30s` (§1.15);
+`AccessApplicationInput.PolicyUUID string` for writes,
+`AccessApplication.PolicyUUIDs []string` for reads (§1.5); shared `Base` uses a
+simple callback helper, no generics (§1.1); reconcile steps mutate in-scope
+status and return directly (§1.8); aggressive prune of `config/` and
+`make deploy` targets (§1.9/§1.10). CR shapes, finalizer strings, label
+schemes, D1–D25, and `AGENTS.md ## Reconciliation Rules` invariants are
+preserved. Subtask order follows `claude-review.md ## 10` — small isolated
+cleanups first so the bigger reshapes don't fight rebases.
+
+**Subtasks**
+
+1. **Dead-code + dead-branch purge.**
+   - Files: `internal/cloudflare/client.go` (delete `ErrNotImplemented`),
+     `internal/controller/conditions.go` (delete `EventReconcileFailed`,
+     `EventForeignTunnel`), `api/v1alpha1/cloudflareexposure_types.go` (delete
+     `ObservedTunnelUid` + regen deepcopy + CRD YAML), repo root (delete
+     `cover.out`, add to `.gitignore`),
+     `internal/controller/cloudflareexposure_controller.go` (lines ~634–653
+     tag-chunk "direct" branch + line ~617 `directUID` short-circuit removed;
+     parser collapses to single chunked path),
+     `internal/controller/cloudflaretunnelroute_controller.go` lines ~258–276
+     `preflightRouteTarget` simplified to one-CIDR-one-route iteration
+     (review §3.3), lines ~211–214 `reconcileCloudflareRoute` NotFound
+     recursion linearised into a fall-through into the create path (review
+     §3.4), `internal/cloudflare/tunnels.go` lines 5–8 SDK comment about D9
+     marker updated/removed, `charts/cfzt-operator/Chart.yaml` +
+     `values.yaml` document the `tag: ""` placeholder explicitly.
+   - Implements: `claude-review.md ## 2` dead-code table, §1.7 unreachable
+     tag-chunk branch, §3.3 unsound foreign-route check, §3.4 recursion
+     linearisation.
+   - Tests: existing tests must remain green — pure deletions. Verify
+     `make manifests generate && git diff --exit-code` clean after CRD regen
+     for `ObservedTunnelUid` removal.
+
+2. **Index fallback removal + mapper-func generic helper.**
+   - Files: `internal/controller/indexes.go` (delete `isFieldIndexUnavailable`,
+     delete the `List → client-side filter` fallback in
+     `listCloudflareExposuresByField` + `listCloudflareTunnelRoutesByField`,
+     drop the `keep func(...) bool` parameter); the four reconciler call
+     sites simplified to e.g.
+     `listExposuresByTunnel(ctx, r.Client, tunnel.Name)`; new
+     `internal/controller/mapper.go` adds
+     `enqueueNamed[T client.Object](extract func(T) []types.NamespacedName)
+     handler.MapFunc` replacing the five existing mapper funcs.
+   - Implements: review §1.3, §3.1.
+   - Tests: existing `TestExposureEnqueuesTunnel`,
+     `TestTunnelStatusUpdatePropagatesToExposures`,
+     `TestPolicyStatusUpdatePropagatesToExposures` remain green without
+     edits. New: `TestEnqueueNamedExtracts`.
+
+3. **Zone cache + RealClient cache hoisted out of per-reconcile construction.**
+   - Files: `internal/cloudflare/real.go` — drop
+     `RealClient.{mu, zoneCache, zoneCacheReady}`; introduce package-level
+     `zoneCacheByCred sync.Map` keyed by
+     `cacheKey{ accountID string; tokenHash [32]byte }` mirroring the
+     existing `limiterByToken sync.Map`; introduce package-level
+     `clientCacheByCred sync.Map` so the SDK connection pool is reused
+     across reconciles.
+   - Implements: review §1.4.
+   - Tests: `TestRealClientZoneCacheServesAcrossInstances`,
+     `TestRealClientReuse`.
+
+4. **Conditional `Configurations.Update` + drop unused `Configurations.Get`.**
+   - Files: `internal/controller/cloudflaretunnel_controller.go` lines
+     ~247–260 — sha256 the marshalled `result.Config`, store on
+     `CloudflareTunnel.Status.IngressDocHash` (new `+optional` field, regen
+     CRD + deepcopy), skip the PUT when hash matches and `RouteHashes`
+     reflects the same exposure set; `internal/cloudflare/configurations.go`
+     — delete `Configurations.Get` from interface + fake + real;
+     `api/v1alpha1/cloudflaretunnel_types.go` — add `IngressDocHash string`
+     to `CloudflareTunnelStatus`.
+   - Implements: review §1.11, §5.2.
+   - Tests: `TestTunnelConfigUpdateSkippedWhenUnchanged`,
+     `TestTunnelConfigUpdateOnDrift`; existing `TestTunnelWritesIngressDoc`
+     adjusted to assert one PUT on creation only.
+
+5. **Cloudflare client surface cleanups.**
+   - Files: `internal/cloudflare/real.go` — extract
+     `mapAPIError(err error) error` and apply at every `withRetry` callback
+     boundary (~10 sites, review §1.13); refactor `accessNewBody` /
+     `accessUpdateBody` to share a `commonAccessFields(...)` helper so
+     divergence becomes visible (review §1.14); push tag-ensure inside
+     `realAccessApplications.Create` and `.Update` so the controller drops
+     its tag-ensure loop at `cloudflareexposure_controller.go:248` (review
+     §5.1); change `Tunnels.List(ctx, accountID, name string)` (drop
+     `ListTunnelsFilter` struct, review §5.3); add wrapper-boundary comment
+     on `ListTunnelRoutesFilter.Network` workaround at line ~254 documenting
+     the SDK subset/superset quirk (review §5.4).
+   - Implements: review §1.13, §1.14, §5.1, §5.3, §5.4.
+   - Tests: `TestMapAPIErrorNotFound`,
+     `TestFakeAccessApplicationsEnsuresTagsImplicitly`,
+     `TestTunnelsListString`. Existing `TestExposureCreate` adjusted.
+
+6. **Event-recorder switch to controller-runtime v1.**
+   - Files: `cmd/main.go` — wire `record.EventRecorder` (from
+     `k8s.io/client-go/tools/record`) for each of the four reconcilers via
+     `mgr.GetEventRecorderFor(...)`; delete the local `event(...)` helpers
+     and `nil`-recorder guards in `cloudflaretunnel_controller.go:450`,
+     `cloudflareexposure_controller.go:686`,
+     `cloudflaretunnelroute_controller.go:299`,
+     `cloudflareaccesspolicy_controller.go:244`; replace call sites with
+     `r.Recorder.Eventf(obj, type, reason, fmt, args...)`.
+   - Implements: review §1.2.
+   - Tests: existing event-emitting tests (`TestExposureFinalizer`
+     `BlockedByExposures` event, `TestTunnelTokenRotation` `TokenRotated`,
+     `TestRouteConditionsTransition` event sequence) all green.
+
+7. **`PolicyUUID` single-in, `PolicyUUIDs` multi-out.**
+   - Files: `internal/cloudflare/access_applications.go` —
+     `AccessApplicationInput.PolicyUUID string`,
+     `AccessApplication.PolicyUUIDs []string`; `internal/cloudflare/real.go`
+     ~lines 727+, 695, 711, 782–819 — drop `firstString`,
+     `fallbackPolicyIDs`, `selfHosted{New,Update}PolicyIDs`;
+     `internal/controller/cloudflareexposure_controller.go` ~line 679 —
+     `accessApplicationPoliciesMatch` collapses to single-branch comparison
+     (drift detection still uses the read-side slice to catch foreign
+     additions).
+   - Implements: review §1.5.
+   - Tests: `TestAccessApplicationForeignPolicyAttachmentDriftsBack`;
+     existing `TestExposureCreate` covers happy path.
+
+8. **`accesspolicy_hash.go` canonicalisation collapse.**
+   - Files: `internal/controller/accesspolicy_hash.go` — single
+     `canonicalize(rules []cloudflare.AccessRule) []canonicalAccessRule`
+     entry point (SDK boundary already speaks `cloudflare.AccessRule`);
+     `internal/controller/cloudflareaccesspolicy_controller.go` ~line 322 —
+     drop `canonicalizeCloudflareRules`; fold `translateRules` +
+     `accessPolicyMatches` into `hashAccessRules` + `accessRulesEqual`.
+   - Implements: review §1.12.
+   - Tests: existing `TestAccessPolicyRulesHashCanonical`,
+     `TestAccessPolicyRulesDrift` remain green with the single canonicaliser.
+
+9. **`cmd/main.go` trim.**
+   - Files: `cmd/main.go` — delete webhook server setup (`webhookCertPath`,
+     `webhookCertName`, `webhookCertKey`, `tlsOpts`,
+     `webhookServerOptions`, `webhook.NewServer(...)` lines ~60–125), delete
+     `metricsCertPath/Name/Key` (chart bakes its own metrics service), drop
+     now-unused imports (`crypto/tls`, `.../webhook`,
+     `.../metrics/filters`), remove `// nolint:gocyclo` at line ~56; target
+     ~80 lines.
+   - Implements: review §1.10, §3.8.
+   - Tests: `go build ./cmd/...` green; envtest green; manual
+     `go run ./cmd/main.go -h` shows trimmed flag set.
+
+10. **`policyName` always `-cfzt`-suffixed + image-regex port test.**
+    - Files: `internal/controller/cloudflareaccesspolicy_controller.go`
+      ~line 262 — always append `-cfzt` to `desiredPolicyName` regardless
+      of whether `spec.policyName` is set; document the behaviour change in
+      `api/v1alpha1/cloudflareaccesspolicy_types.go` `PolicyName` docstring;
+      update `spec.md ## CRD model ### CloudflareAccessPolicy` `policyName`
+      field description.
+    - Implements: review §7.1 (decision: always append).
+    - Tests: `TestAccessPolicyNameAlwaysSuffixed`,
+      `TestCloudflareTunnelImageRegexPort` (verifies CRD accepts
+      `registry.local:5000/cloudflared:2025.1.0`; widen
+      `api/v1alpha1/cloudflaretunnel_types.go` image regex + regen CRDs if
+      rejected, per review §7.2).
+
+11. **`config/` tree + Makefile prune (aggressive).**
+    - Files (delete): `config/network-policy/`, `config/prometheus/`,
+      `config/samples/` (minimal samples → `examples/` if any remain cited
+      from `spec.md`), `config/rbac/cloudflareexposure_admin_role.yaml` +
+      `..._editor_role.yaml` + `..._viewer_role.yaml` (×6 kubebuilder
+      helpers), `config/default/cert_metrics_manager_patch.yaml`,
+      `config/default/manager_metrics_patch.yaml`, `config/manager/`;
+      collapse `config/default/kustomization.yaml` to only what
+      `make manifests` writes into `config/crd/bases/` and what
+      `make helm-sync-crds` consumes (delete ~90% commented-out blocks);
+      `Makefile` — delete `docker-buildx`, `build-installer`, `install`,
+      `uninstall`, `deploy`, `undeploy` (~60 lines).
+    - Implements: review §1.9, §2 dead-code table for config tree.
+    - Tests: `make manifests generate && git diff --exit-code` clean;
+      `make helm-sync-crds && git diff --exit-code` clean; `make test`,
+      `helm lint charts/cfzt-operator`, `ci.yaml` all green.
+    - Cross-check: update `AGENTS.md ## Commands` if any deleted target was
+      referenced.
+
+12. **Ownership package extraction.**
+    - Files: new `internal/ownership/owner.go`
+      (`type Owner struct{ uid types.UID }`; `func From(uid types.UID) Owner`;
+      `.Comment() string`, `.CompactComment() string`, `.Tags() []string`,
+      `.MatchesComment(s string) bool`, `.MatchesTags(t []string) bool`);
+      new `internal/ownership/comment.go` (render/parse the
+      `managed-by=cfzt-operator source-uid=<uid>` long form + compact form
+      ≤34 chars); new `internal/ownership/accesstag.go` (chunked
+      `source-uid=<chunk>` tags with `accessTagMaxLength = 35`, dead-direct
+      branch already removed in subtask 1); delete `internal/naming/tags.go`
+      (move `OwnershipTag`, `ParseOwnershipTag`, `CompactOwnershipTag`); delete
+      inline ownership helpers in
+      `cloudflareexposure_controller.go:564–654`,
+      `cloudflaretunnelroute_controller.go` `ownedByComment`, tunnel
+      analogues; rewrite call sites to `ownership.From(uid).*`.
+    - Implements: review §1.6, §1.17.
+    - Tests: new `internal/ownership/owner_test.go` —
+      `TestOwnerCommentRoundTrip`, `TestOwnerCompactCommentRoundTrip`,
+      `TestOwnerAccessTagChunkRoundTrip`, `TestOwnerMatchesForeign`. Existing
+      `TestExposureForeignResource`, `TestRouteForeignRefuses`,
+      `TestExposureDNSForeignRecordConflict`, `TestAccessPolicyForeignRefuses`
+      remain green.
+
+13. **Shared reconciler `Base` + inline reconcile step pattern.**
+    - Files: new `internal/controller/base.go`:
+      ```go
+      type Base struct {
+          client.Client
+          Scheme   *runtime.Scheme
+          Recorder record.EventRecorder
+          NewCloudflareClient func(ctx context.Context, ref CredentialsRef)
+              (cloudflare.Client, error)
+      }
+      func (b *Base) SetReady(ctx context.Context, obj client.Object,
+          conditions *[]metav1.Condition, generation int64, ready bool,
+          reason, message string) error
+      ```
+      simple callback helper, no generics; new
+      `internal/cloudflare/credentials.go` —
+      `Load(ctx, c client.Reader, ref CredentialsRef) (accountID, token
+      string, err error)`, `CredentialsRef` adapter handles the
+      Tunnel-namespace-derived-from-`spec.cloudflared.namespace` vs
+      AccessPolicy-explicit-`credentialsSecretRef.namespace` divergence; the
+      four reconcilers embed `Base`, per-CR `cloudflareClient(...)` helpers
+      deleted (~250–350 LoC removed); Exposure `Reconcile` body refactored so
+      each step mutates in-scope `status` and short-circuit steps `return`
+      directly — drop the `(status, done, result, err)` tuple at
+      `cloudflareexposure_controller.go:122–139`.
+    - Implements: review §1.1, §1.8.
+    - Tests: existing envtests for the four reconcilers remain green without
+      modification (contract = conditions + events + CF state, not helper
+      shape). New: `TestBaseSetReadyIdempotent`,
+      `TestCredentialsLoaderTunnelNamespace`,
+      `TestCredentialsLoaderExplicitNamespace`.
+
+14. **Requeue/error policy standardisation.**
+    - Files: across the four reconcilers — `RequeueAfter: 30*time.Second`
+      for `CredentialsMissing`, `TunnelNotReady`, `PolicyNotReady`,
+      `HostnameConflict`, `ForeignResource`, `BlockedByExposures`,
+      `BlockedByRoutes`; `fmt.Errorf("...: %w", err)` (exponential backoff)
+      for `*Failed` / API-call / write-failure reasons; document policy in a
+      new `## Requeue policy` subsection of `AGENTS.md ## Reconciliation
+      Rules`.
+    - Implements: review §1.15 (decision: split by failure class).
+    - Tests: `TestExposureHostnameConflictRequeuesAt30s`,
+      `TestExposureCloudflareWriteFailureBacksOff`.
+
+15. **`internal/naming` shrink + final package reshape.**
+    - Files: `internal/naming/` retains only `TokenSecretName`,
+      `DaemonSetName`, `AccessAppName`, `Finalizer`; `tags.go` already
+      deleted by subtask 12; structural endpoint of subtasks 12+13. Verify
+      against review §4 proposed layout.
+      `internal/controller/conditions.go` move to `api/v1alpha1/` (review
+      §3.6) — out of scope here, flag for post-MVP.
+    - Implements: review §4.
+    - Tests: `go build ./...`, `go vet ./...`, `go test ./...` green.
+
+16. **Test reshape + linter re-enable.**
+    - Files: replace the four `internal/controller/*_validation_test.go`
+      files with one table-driven
+      `internal/controller/crd_admission_test.go` that builds a manifest per
+      table row, applies via envtest, asserts admission outcome (~half the
+      LoC, review §6); extract `test/live/cloudflare_smoke_test.go` (1,175
+      lines) harness into `test/live/harness.go`, leaving `*_test.go` thin
+      with just lifecycle/preflight cases (review §6); drop the `dupl`
+      suppression on `internal/*` in `.golangci.yml` lines ~42–46 (review
+      §3.7); add head-of-file comment on
+      `internal/controller/httproute_discovery.go` documenting the
+      deliberate `unstructured` choice and discouraging a "helpful"
+      `gateway-api/v1` upgrade (review §1.16); add a block comment on
+      `charts/cfzt-operator/templates/clusterrole.yaml` explaining that the
+      `gateway.networking.k8s.io/httproutes` grant is unconditional and
+      harmless when the CRD is absent (review §8).
+    - Implements: review §3.6 deferred, §3.7, §6, §8, §1.16.
+    - Tests: `make test` green with the consolidated `crd_admission_test.go`
+      (table sweep must cover every CEL rule the four deleted files
+      covered); live smoke unaffected by harness split (no behaviour change,
+      only file relocation).
+
+17. **Live smoke audit + alignment.**
+    - Run after subtasks 1–16 have landed. Re-read
+      `test/live/cloudflare_smoke_test.go` + the freshly extracted
+      `test/live/harness.go` (subtask 16) against every behaviour-visible
+      change introduced earlier in the slice. Audit for:
+      - subtask 4 — `IngressDocHash` skip-on-equal: verify any timing-based
+        assertion tolerates the one-PUT-then-skip steady state (live smoke
+        hits real CF, so observable only via reconcile cadence).
+      - subtask 5 — `Tunnels.List(ctx, accountID, name string)` string
+        signature, `Configurations.Get` removed, tag-ensure pushed inside
+        `AccessApplications.Create/Update`: live-smoke direct calls into
+        `h.cf.*` must compile against the new signatures and stop calling
+        `AccessTags.Ensure` explicitly.
+      - subtask 7 — `AccessApplication.PolicyUUIDs []string` read shape:
+        any live-smoke assertion reading back the bound policy from a CF
+        Access application must consume the slice (`PolicyUUIDs[0]`) rather
+        than the old `PolicyUUID` scalar.
+      - subtask 10 — `policyName` always `-cfzt`: any live-smoke
+        `CloudflareAccessPolicy` fixture that sets `spec.policyName` and
+        then asserts the CF-side name must expect the `-cfzt` suffix.
+      - subtask 12 — ownership package rename: verify no stale
+        `naming.OwnershipTag` references remain in `test/live/`.
+      - subtask 14 — requeue policy split: re-read `waitTunnelReady`,
+        `waitExposureConflictReason`, `waitTunnelRouteReady`,
+        `waitTunnelRouteForeignReason`, `waitAccessPolicyReady` timeouts and
+        adjust for the new 30s-floor / exponential-backoff cadence as
+        applicable.
+      - subtask 15 / 16 — package + harness split: confirm
+        `test/live/harness.go` imports only public surface (no
+        `internal/ownership`, no `internal/controller` types).
+    - Files: `test/live/cloudflare_smoke_test.go`, `test/live/harness.go`,
+      `hack/live-cloudflare-local.sh`, `.env.live.example` (only if env-var
+      surface changed). Make targeted edits as the audit surfaces them; do
+      not pre-bake speculative changes. Annotate each audit-driven edit
+      inline with a `// Slice 6 adjustment: ...` comment for provenance.
+    - Implements: cross-slice integration hygiene — live smoke remains the
+      MVP gate per `spec.md ## CI / CD`.
+    - Tests: `bash hack/live-cloudflare-local.sh preflight` clean;
+      `bash hack/live-cloudflare-local.sh lifecycle` green end-to-end across
+      all five existing phases (Slices 1–5). Any regression must be
+      root-caused to the offending earlier subtask and fixed in the same
+      PR — never silence the live smoke.
+
+**Definition of done** (from `claude-review.md ## 9. Estimated impact` +
+preserved invariants):
+
+- Net Go LoC delta ≥ −400 (target: ~−435 per reviewer's table). Adds in
+  `internal/ownership/` (+~120) and `internal/controller/base.go` (+~80)
+  compensated by removals across the four reconcilers and `config/`.
+- `make manifests generate && git diff --exit-code` clean.
+- `make helm-sync-crds && git diff --exit-code` clean.
+- `make test` green. `go test ./...` green.
+- `helm lint charts/cfzt-operator` clean.
+- `golangci-lint run` clean with `dupl` re-enabled on `internal/*`.
+- `ci.yaml` green.
+- Live-smoke `hack/live-cloudflare-local.sh lifecycle` green across all five
+  existing phases.
+- Behaviour-visible changes confined to: managed Access policy CF name now
+  always ends in `-cfzt` (subtask 10); one fewer Cloudflare API call per
+  Tunnel reconcile when ingress doc unchanged (subtask 4); reconcile
+  failure cadence now backoff-vs-30s per class (subtask 14, documented).
+- No spec.md decision (D1–D25) altered. CR shapes unchanged except: new
+  optional `CloudflareTunnelStatus.IngressDocHash` field (subtask 4);
+  `ObservedTunnelUid` removed (subtask 1, unused). CRD storage version
+  unchanged (`v1alpha1`).
+
+Subtask-derived additions: `TestEnqueueNamedExtracts`,
+`TestRealClientZoneCacheServesAcrossInstances`, `TestRealClientReuse`,
+`TestTunnelConfigUpdateSkippedWhenUnchanged`,
+`TestTunnelConfigUpdateOnDrift`, `TestMapAPIErrorNotFound`,
+`TestFakeAccessApplicationsEnsuresTagsImplicitly`, `TestTunnelsListString`,
+`TestAccessApplicationForeignPolicyAttachmentDriftsBack`,
+`TestAccessPolicyNameAlwaysSuffixed`, `TestCloudflareTunnelImageRegexPort`,
+`TestOwnerCommentRoundTrip`, `TestOwnerCompactCommentRoundTrip`,
+`TestOwnerAccessTagChunkRoundTrip`, `TestOwnerMatchesForeign`,
+`TestBaseSetReadyIdempotent`, `TestCredentialsLoaderTunnelNamespace`,
+`TestCredentialsLoaderExplicitNamespace`,
+`TestExposureHostnameConflictRequeuesAt30s`,
+`TestExposureCloudflareWriteFailureBacksOff` all pass.
+
+**Risks**
+
+- Subtask 13 (`Base` + step-pattern refactor) has the biggest blast radius.
+  Land subtasks 1–12 first so smaller cleanups don't fight rebases inside
+  the four reconcilers. Reviewer's "ship last" guidance (§10 item 7)
+  preserved by the ordering above.
+- `policyName` always-`-cfzt` (subtask 10) is a one-time behaviour change
+  for any pre-MVP user who set `spec.policyName` without expecting the
+  suffix. Pre-MVP, so deemed acceptable; subtask 10 also patches `spec.md`
+  and the CFAP `PolicyName` docstring.
+- Subtask 11 deletes `config/manager/` and `make deploy`/`install`/`uninstall`
+  targets. Chart is the contract (D14/D17) and `release.yaml` publishes the
+  chart, but developer muscle memory will break. Document in the same PR
+  commit body and remove any `AGENTS.md` command-table references.
+- Subtask 4 (`IngressDocHash`) is a status-field add; on operator upgrade
+  the hash is empty so the first reconcile after upgrade always re-PUTs the
+  config, then converges to the skip-on-equal steady state. No data loss.
+- Subtask 12 ownership-tag refactor must round-trip every existing CF
+  resource the operator owns: long-form DNS comments, compact route
+  comments, chunked Access-app tag lists. Pre-merge
+  `hack/live-cloudflare-local.sh lifecycle` is mandatory and subtask 17
+  re-audits.
+- Subtask 6 event-recorder switch: signature changes from
+  `Eventf(obj, nil, type, reason, reason, fmt, args...)` to
+  `Eventf(obj, type, reason, fmt, args...)`. Compile errors surface missed
+  call sites at build time.
+- Subtask 15/16 package + harness split must not leak internal types into
+  `test/live/`. Keep `test/live/cloudflare_smoke_test.go` import paths
+  stable; `internal/ownership` is reachable only via `h.cf.*` wrapper.
 
 ## 4. Bootstrap subtasks (scaffold absent)
 

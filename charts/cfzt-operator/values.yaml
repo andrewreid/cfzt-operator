@@ -1,6 +1,6 @@
 image:
   repository: ghcr.io/andrewreid/cfzt-operator
-  tag: ""                          # defaults to .Chart.AppVersion
+  tag: ""                          # placeholder; defaults to .Chart.AppVersion at render time
   pullPolicy: IfNotPresent
 imagePullSecrets: []
 
