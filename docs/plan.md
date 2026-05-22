@@ -221,8 +221,13 @@ Completed on 2026-05-22:
 - Slice 6 subtask 8: Access policy rule hashing and CF drift comparison now
   share one canonicaliser over the internal Cloudflare rule type. The duplicate
   API-vs-CF canonicalisation helpers were removed.
+- Slice 6 subtask 9: `cmd/main.go` no longer wires unused webhook server
+  setup, webhook certificate flags, metrics certificate flags, or HTTP/2 TLS
+  options. The manager still preserves metrics bind/secure flags, health
+  probe bind, leader election default-on, log flags, controller registration,
+  and HTTPRoute CRD startup discovery.
 
-Next: Slice 6 subtask 9.
+Next: Slice 6 subtask 10.
 
 ## 3. Slice plan
 
