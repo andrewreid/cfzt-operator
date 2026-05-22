@@ -6,7 +6,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	cfztv1alpha1 "github.com/andrewreid/cfzt-operator/api/v1alpha1"
@@ -15,11 +15,27 @@ import (
 
 type CredentialsRef = cloudflare.CredentialsRef
 
+type EventRecorder interface {
+	Eventf(obj runtime.Object, eventtype, reason, message string, args ...any)
+}
+
+type eventRecorderAdapter struct {
+	recorder events.EventRecorder
+}
+
+func NewEventRecorder(recorder events.EventRecorder) EventRecorder {
+	return eventRecorderAdapter{recorder: recorder}
+}
+
+func (r eventRecorderAdapter) Eventf(obj runtime.Object, eventtype, reason, message string, args ...any) {
+	r.recorder.Eventf(obj, nil, eventtype, reason, reason, message, args...)
+}
+
 // Base holds common reconciler dependencies.
 type Base struct {
 	client.Client
 	Scheme              *runtime.Scheme
-	Recorder            record.EventRecorder
+	Recorder            EventRecorder
 	NewCloudflareClient func(ctx context.Context, ref CredentialsRef) (cloudflare.Client, error)
 }
 

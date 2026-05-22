@@ -96,10 +96,12 @@ cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
+	"$(GOLANGCI_LINT)" cache clean
 	"$(GOLANGCI_LINT)" run
 
 .PHONY: lint-fix
 lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
+	"$(GOLANGCI_LINT)" cache clean
 	"$(GOLANGCI_LINT)" run --fix
 
 .PHONY: lint-config

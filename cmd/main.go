@@ -120,7 +120,7 @@ func main() {
 		Base: controller.Base{
 			Client:   mgr.GetClient(),
 			Scheme:   mgr.GetScheme(),
-			Recorder: mgr.GetEventRecorderFor("cloudflaretunnel-controller"),
+			Recorder: controller.NewEventRecorder(mgr.GetEventRecorder("cloudflaretunnel-controller")),
 		},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "cloudflaretunnel")
@@ -139,7 +139,7 @@ func main() {
 		Base: controller.Base{
 			Client:   mgr.GetClient(),
 			Scheme:   mgr.GetScheme(),
-			Recorder: mgr.GetEventRecorderFor("cloudflareexposure-controller"),
+			Recorder: controller.NewEventRecorder(mgr.GetEventRecorder("cloudflareexposure-controller")),
 		},
 		HTTPRouteSourceEnabled: httpRouteSourceEnabled,
 	}).SetupWithManager(mgr); err != nil {
@@ -151,7 +151,7 @@ func main() {
 		Base: controller.Base{
 			Client:   mgr.GetClient(),
 			Scheme:   mgr.GetScheme(),
-			Recorder: mgr.GetEventRecorderFor("cloudflareaccesspolicy-controller"),
+			Recorder: controller.NewEventRecorder(mgr.GetEventRecorder("cloudflareaccesspolicy-controller")),
 		},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "cloudflareaccesspolicy")
@@ -161,7 +161,7 @@ func main() {
 		Base: controller.Base{
 			Client:   mgr.GetClient(),
 			Scheme:   mgr.GetScheme(),
-			Recorder: mgr.GetEventRecorderFor("cloudflaretunnelroute-controller"),
+			Recorder: controller.NewEventRecorder(mgr.GetEventRecorder("cloudflaretunnelroute-controller")),
 		},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "cloudflaretunnelroute")
