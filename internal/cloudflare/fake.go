@@ -70,6 +70,17 @@ func (f *FakeClient) ConfigurationUpdateCalls(tunnelID string) int {
 	return f.configurationUpdateCalls[tunnelID]
 }
 
+func (f *FakeClient) SetAccessApplicationPolicyUUIDs(id string, policyUUIDs []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	app, ok := f.accessApps[id]
+	if !ok {
+		return ErrNotFound
+	}
+	app.PolicyUUIDs = append([]string(nil), policyUUIDs...)
+	return nil
+}
+
 func (f *FakeClient) Tunnels() Tunnels {
 	return &fakeTunnels{fc: f}
 }
@@ -457,7 +468,6 @@ func copyConfiguration(config TunnelConfiguration) *TunnelConfiguration {
 func applyAccessApplication(app *AccessApplication, in AccessApplicationInput) {
 	app.Name = in.Name
 	app.Domain = in.Domain
-	app.PolicyUUID = in.PolicyUUID
 	if in.PolicyUUID == "" {
 		app.PolicyUUIDs = nil
 	} else {

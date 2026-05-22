@@ -6,7 +6,6 @@ type AccessApplication struct {
 	ID          string
 	Name        string
 	Domain      string
-	PolicyUUID  string
 	PolicyUUIDs []string
 	Tags        []string
 }

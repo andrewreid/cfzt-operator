@@ -752,45 +752,42 @@ func accessAppFromListResponse(item zero_trust.AccessApplicationListResponse) Ac
 		ID:          item.ID,
 		Name:        item.Name,
 		Domain:      item.Domain,
-		PolicyUUID:  firstString(policyUUIDs),
 		PolicyUUIDs: policyUUIDs,
 		Tags:        tags,
 	}
 }
 
 func accessAppFromNewResponse(resp *zero_trust.AccessApplicationNewResponse, fallbackPolicyUUID string) *AccessApplication {
-	policyUUIDs := fallbackPolicyIDs(fallbackPolicyUUID)
+	var policyUUIDs []string
+	if fallbackPolicyUUID != "" {
+		policyUUIDs = []string{fallbackPolicyUUID}
+	}
 	tags := stringSlice(resp.Tags)
 	if selfHosted, ok := resp.AsUnion().(zero_trust.AccessApplicationNewResponseSelfHostedApplication); ok {
-		if ids := selfHostedNewPolicyIDs(selfHosted.Policies); len(ids) > 0 {
-			policyUUIDs = ids
-		}
 		tags = append([]string(nil), selfHosted.Tags...)
 	}
 	return &AccessApplication{
 		ID:          resp.ID,
 		Name:        resp.Name,
 		Domain:      resp.Domain,
-		PolicyUUID:  firstString(policyUUIDs),
 		PolicyUUIDs: policyUUIDs,
 		Tags:        tags,
 	}
 }
 
 func accessAppFromUpdateResponse(resp *zero_trust.AccessApplicationUpdateResponse, fallbackPolicyUUID string) *AccessApplication {
-	policyUUIDs := fallbackPolicyIDs(fallbackPolicyUUID)
+	var policyUUIDs []string
+	if fallbackPolicyUUID != "" {
+		policyUUIDs = []string{fallbackPolicyUUID}
+	}
 	tags := stringSlice(resp.Tags)
 	if selfHosted, ok := resp.AsUnion().(zero_trust.AccessApplicationUpdateResponseSelfHostedApplication); ok {
-		if ids := selfHostedUpdatePolicyIDs(selfHosted.Policies); len(ids) > 0 {
-			policyUUIDs = ids
-		}
 		tags = append([]string(nil), selfHosted.Tags...)
 	}
 	return &AccessApplication{
 		ID:          resp.ID,
 		Name:        resp.Name,
 		Domain:      resp.Domain,
-		PolicyUUID:  firstString(policyUUIDs),
 		PolicyUUIDs: policyUUIDs,
 		Tags:        tags,
 	}
@@ -813,40 +810,6 @@ func selfHostedListPolicyIDs(policies []zero_trust.AccessApplicationListResponse
 		}
 	}
 	return out
-}
-
-func selfHostedNewPolicyIDs(policies []zero_trust.AccessApplicationNewResponseSelfHostedApplicationPolicy) []string {
-	out := make([]string, 0, len(policies))
-	for _, policy := range policies {
-		if policy.ID != "" {
-			out = append(out, policy.ID)
-		}
-	}
-	return out
-}
-
-func selfHostedUpdatePolicyIDs(policies []zero_trust.AccessApplicationUpdateResponseSelfHostedApplicationPolicy) []string {
-	out := make([]string, 0, len(policies))
-	for _, policy := range policies {
-		if policy.ID != "" {
-			out = append(out, policy.ID)
-		}
-	}
-	return out
-}
-
-func fallbackPolicyIDs(policyUUID string) []string {
-	if policyUUID == "" {
-		return nil
-	}
-	return []string{policyUUID}
-}
-
-func firstString(values []string) string {
-	if len(values) == 0 {
-		return ""
-	}
-	return values[0]
 }
 
 func dnsRecordFromResponse(zoneID string, resp *cfdns.RecordResponse) *DNSRecord {

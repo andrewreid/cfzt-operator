@@ -214,8 +214,12 @@ Completed on 2026-05-22:
   `k8s.io/client-go/tools/record.EventRecorder` directly, local event helpers
   and nil-recorder guards were removed, and event call sites now call
   `Recorder.Eventf(obj, type, reason, message, args...)`.
+- Slice 6 subtask 7: Access application write input now keeps the single
+  `PolicyUUID` scalar, while read-side `AccessApplication` exposes only
+  `PolicyUUIDs`. Drift detection uses the read-side slice so foreign policy
+  attachments are reconciled away.
 
-Next: Slice 6 subtask 7.
+Next: Slice 6 subtask 8.
 
 ## 3. Slice plan
 

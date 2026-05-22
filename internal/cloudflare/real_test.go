@@ -92,9 +92,6 @@ func TestAccessAppFromListResponseCapturesAllPolicyIDs(t *testing.T) {
 		},
 	})
 
-	if app.PolicyUUID != "policy-1" {
-		t.Fatalf("PolicyUUID = %q, want policy-1", app.PolicyUUID)
-	}
 	if !reflect.DeepEqual(app.PolicyUUIDs, []string{"policy-1", "policy-2"}) {
 		t.Fatalf("PolicyUUIDs = %#v", app.PolicyUUIDs)
 	}

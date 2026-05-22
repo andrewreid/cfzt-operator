@@ -649,10 +649,7 @@ func sameStringSet(a, b []string) bool {
 }
 
 func accessApplicationPoliciesMatch(app cloudflare.AccessApplication, wantPolicyUUID string) bool {
-	if len(app.PolicyUUIDs) > 0 {
-		return sameStringSet(app.PolicyUUIDs, []string{wantPolicyUUID})
-	}
-	return app.PolicyUUID == wantPolicyUUID
+	return sameStringSet(app.PolicyUUIDs, []string{wantPolicyUUID})
 }
 
 // SetupWithManager sets up the controller with the Manager.

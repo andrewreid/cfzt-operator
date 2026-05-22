@@ -445,7 +445,25 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		apps, err := fakeCF.AccessApplications().List(ctx, exposure.Spec.Hostname)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(apps).To(HaveLen(1))
-		Expect(apps[0].PolicyUUID).To(Equal(policy.Status.PolicyId))
+		Expect(apps[0].PolicyUUIDs).To(Equal([]string{policy.Status.PolicyId}))
+	})
+
+	It("TestAccessApplicationForeignPolicyAttachmentDriftsBack", func() {
+		tunnel := readyTunnel(ctx, tunnelReconciler, "policy-drift-tunnel", "policy-drift-tunnel")
+		exposure := createExposure(ctx, "policy-drift", tunnel.Name, "policy-drift.example.com", true)
+
+		reconcileExposure(ctx, exposureReconciler, exposure)
+		apps, err := fakeCF.AccessApplications().List(ctx, exposure.Spec.Hostname)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(apps).To(HaveLen(1))
+		Expect(fakeCF.SetAccessApplicationPolicyUUIDs(apps[0].ID, []string{defaultPolicyUUID, "foreign-policy"})).To(Succeed())
+
+		reconcileExposure(ctx, exposureReconciler, exposure)
+
+		apps, err = fakeCF.AccessApplications().List(ctx, exposure.Spec.Hostname)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(apps).To(HaveLen(1))
+		Expect(apps[0].PolicyUUIDs).To(Equal([]string{defaultPolicyUUID}))
 	})
 
 	It("TestExposurePolicyRefNamePolicyNotReady", func() {
