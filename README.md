@@ -156,7 +156,7 @@ Useful optional fields:
 | `spec.cloudflared.image` | Override the pinned default `cloudflared` image; `:latest` is rejected. |
 | `spec.cloudflared.resources`, `nodeSelector`, `tolerations`, `affinity` | Pod placement and resource controls. |
 
-Status records `status.tunnelId`, `status.tokenSecretRef.name`, `status.dnsMode`, `status.routes[]`, and `status.conditions`.
+Status records `status.tunnelId`, `status.tokenSecretRef.name`, `status.dnsMode`, `status.routes[]`, `status.ingressDocHash`, and `status.conditions`.
 
 If a tunnel with the same Cloudflare name already exists and `status.tunnelId` is empty, the operator refuses with `Reason=ForeignTunnel`. To intentionally adopt a tunnel, patch the status ID out of band:
 
@@ -221,7 +221,7 @@ HTTPRoute support is enabled only when the Gateway API CRD is present at operato
 
 ### CloudflareAccessPolicy
 
-`CloudflareAccessPolicy` is cluster-scoped. `spec.policyName` defaults to `<metadata.name>-cfzt` and is immutable once set. `spec.decision` supports `allow`, `deny`, `bypass`, and `non_identity`.
+`CloudflareAccessPolicy` is cluster-scoped. `spec.policyName` is an optional immutable base name; when omitted the base defaults to `metadata.name`. The Cloudflare-side policy name is always `<base>-cfzt`. `spec.decision` supports `allow`, `deny`, `bypass`, and `non_identity`.
 
 Supported rule item types are `email`, `emailDomain`, `ip`, `everyone: true`, `serviceToken`, and `geoCountryCode`; each item must set exactly one type. Rules are grouped under `include`, `exclude`, and `require`; at least one rule item is required across those groups.
 
@@ -246,7 +246,7 @@ The operator refuses to mutate Cloudflare resources it cannot prove it owns:
 | Resource | Ownership record | Foreign condition |
 |---|---|---|
 | Tunnel | `CloudflareTunnel.status.tunnelId` | `ForeignTunnel` |
-| Exposure Access app | Access tags with `managed-by=cfzt-operator` and `source-uid=<exposure-uid>` | `ForeignResource` or `HostnameConflict` |
+| Exposure Access app | Access tags with `managed-by=cfzt-operator` and chunked `source-uid-<n>=...` values | `ForeignResource` or `HostnameConflict` |
 | Exposure DNS CNAME | DNS record comment with `managed-by=cfzt-operator source-uid=<exposure-uid>` | `ForeignResource` or `HostnameConflict` |
 | Access policy | `CloudflareAccessPolicy.status.policyId` | `ForeignPolicy` |
 | Tunnel route | `CloudflareTunnelRoute.status.routeId` plus comment `managed-by=cfzt source-uid=<route-uid>` | `ForeignRoute` |
@@ -289,6 +289,7 @@ Common Events include `CreatedTunnel`, `CreatedAccessApp`, `CreatedAccessPolicy`
 ```sh
 make manifests generate
 make helm-sync-crds
+make lint
 make test
 go test ./...
 go test -tags=live ./test/live -run '^TestCloudflarePreflight$' -count=1

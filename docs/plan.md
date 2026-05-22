@@ -209,11 +209,12 @@ Completed on 2026-05-22:
   ensure tags at the wrapper boundary, tunnel listing now takes a plain name
   string, and the route-list SDK subset/superset quirk is documented at the
   wrapper boundary.
-- Slice 6 subtask 6: Event recorder wiring now uses controller-runtime v1
-  recorders from `mgr.GetEventRecorderFor(...)`. The four reconcilers use
-  `k8s.io/client-go/tools/record.EventRecorder` directly, local event helpers
-  and nil-recorder guards were removed, and event call sites now call
-  `Recorder.Eventf(obj, type, reason, message, args...)`.
+- Slice 6 subtask 6: Event recorder wiring now uses controller-runtime
+  `mgr.GetEventRecorder(...)` through a small local adapter. The four
+  reconcilers share the simple `Eventf(obj, type, reason, message, args...)`
+  shape, local event helpers and nil-recorder guards were removed, and CI
+  clears the golangci-lint cache before linting so deprecation checks match
+  fresh GitHub runners.
 - Slice 6 subtask 7: Access application write input now keeps the single
   `PolicyUUID` scalar, while read-side `AccessApplication` exposes only
   `PolicyUUIDs`. Drift detection uses the read-side slice so foreign policy
@@ -362,7 +363,7 @@ Per `spec.md ## Implementation slices ### Slice 2`. Outcome: `CloudflareExposure
    - Tests: `TestZoneLongestSuffix`, `TestFakeAccessAppRoundTrip`, `TestFakeDNSRecordIdempotent`, `TestFakeConfigurationsPutOverwrites`.
 
 4. **Tunnel-config reconciler invocation inside Tunnel controller.**
-   - Files: `internal/tunnelconfig/reconciler.go`, extend `internal/controller/cloudflaretunnel_controller.go`.
+   - Files: `internal/tunnelconfig/builder.go`, extend `internal/controller/cloudflaretunnel_controller.go`.
    - Implements: D11/D19/D20 — Tunnel controller lists referencing Exposures, calls builder, PUTs full doc, writes per-Exposure route hashes into `status.routes[]` (`spec.md ## CRD model` Tunnel responsibilities 6–7).
    - Tests: `TestTunnelWritesIngressDoc`, `TestTunnelRouteHashesPersisted`.
 
@@ -736,10 +737,11 @@ cleanups first so the bigger reshapes don't fight rebases.
      `TestTunnelsListString`. Existing `TestExposureCreate` adjusted.
 
 6. **Event-recorder switch to controller-runtime v1.**
-   - Files: `cmd/main.go` — wire `record.EventRecorder` (from
-     `k8s.io/client-go/tools/record`) for each of the four reconcilers via
-     `mgr.GetEventRecorderFor(...)`; delete the local `event(...)` helpers
-     and `nil`-recorder guards in `cloudflaretunnel_controller.go:450`,
+   - Files: `cmd/main.go`, `internal/controller/base.go` — wire
+     controller-runtime `mgr.GetEventRecorder(...)` through the shared Base
+     adapter for each of the four reconcilers; delete the local `event(...)`
+     helpers and `nil`-recorder guards in
+     `cloudflaretunnel_controller.go:450`,
      `cloudflareexposure_controller.go:686`,
      `cloudflaretunnelroute_controller.go:299`,
      `cloudflareaccesspolicy_controller.go:244`; replace call sites with
@@ -970,7 +972,7 @@ preserved invariants):
 - `make helm-sync-crds && git diff --exit-code` clean.
 - `make test` green. `go test ./...` green.
 - `helm lint charts/cfzt-operator` clean.
-- `golangci-lint run` clean with `dupl` re-enabled on `internal/*`.
+- `make lint` clean with `dupl` re-enabled on `internal/*`.
 - `ci.yaml` green.
 - Live-smoke `hack/live-cloudflare-local.sh lifecycle` green across all five
   existing phases.
@@ -1036,7 +1038,7 @@ Run before Slice 1 subtask 1. Per `AGENTS.md ## Bootstrap`.
 3. `kubebuilder create api --group cfzt --version v1alpha1 --kind CloudflareExposure --resource --controller`. Commit.
 4. Edit generated `cmd/main.go`: enable leader election (D12), register both controllers, set `MaxConcurrentReconciles=1` on both (D19), wire `--zap-log-level`. Add HTTPRoute discovery placeholder (used in Slice 3) — for MVP scaffold leave the discovery branch as a TODO behind a build-time `false`.
 5. Hand-write `charts/cfzt-operator/` per `spec.md ## Helm chart layout` (Chart.yaml, values.yaml, crds/ placeholder, templates per layout, NOTES.txt with D23 GitOps caveat).
-6. Hand-write `.github/workflows/ci.yaml` (`go vet`, `golangci-lint`, `make manifests generate`, `make helm-sync-crds`, `git diff --exit-code`, `make test`, `helm lint`) and `release.yaml` (image to `ghcr.io/andrewreid/cfzt-operator:<tag>`, chart to `oci://ghcr.io/andrewreid/charts/cfzt-operator`). Per `spec.md ## CI / CD`.
+6. Hand-write `.github/workflows/ci.yaml` (`go vet`, `make lint`, `make manifests generate`, `make helm-sync-crds`, `git diff --exit-code`, `make test`, `helm lint`) and `release.yaml` (image to `ghcr.io/andrewreid/cfzt-operator:<tag>`, chart to `oci://ghcr.io/andrewreid/charts/cfzt-operator`). Per `spec.md ## CI / CD`.
 7. Add envtest bootstrap to `Makefile` `test` target per `AGENTS.md ## envtest setup`. Confirm `make test` works against the empty scaffold.
 8. Commit. Open Slice 1 with a working green CI baseline.
 
@@ -1074,7 +1076,7 @@ Slice 3 end-to-end:
 Slice 4 end-to-end:
 
 - Slice 1–3 smoke remain green.
-- Apply a `CloudflareAccessPolicy` per `spec.md ## CRD model ### CloudflareAccessPolicy` (decision `allow`, include rule `emailDomain: <your-domain>`). Wait for `Ready=True`; confirm `status.policyId` set and the policy appears in the Cloudflare dashboard with `managed-by=cfzt-operator` tag (or, if the SDK has no tag field, confirm the ID matches `status.policyId`).
+- Apply a `CloudflareAccessPolicy` per `spec.md ## CRD model ### CloudflareAccessPolicy` (decision `allow`, include rule `emailDomain: <your-domain>`). Wait for `Ready=True`; confirm `status.policyId` set and the policy appears in the Cloudflare dashboard with the expected `<base>-cfzt` name.
 - Apply a `CloudflareExposure` with `spec.access.policyRef.name: <policy-cr-name>`. Confirm `Ready=True` and the Access app binds the resolved UUID. `curl -v https://<hostname>` → Access challenge; authenticate, confirm origin response.
 - `kubectl edit cloudflareaccesspolicy <name>` — change an include rule. Within one reconcile, dashboard shows updated rule; all referencing Exposures re-bind cleanly.
 - `kubectl delete cloudflareaccesspolicy <name>` while an Exposure references it — confirm `Ready=False, Reason=BlockedByExposures`, policy CR not deleted, CF policy still present. Remove the referencing Exposure; confirm policy CR + CF policy are then deleted.
@@ -1093,4 +1095,4 @@ Slice 5 end-to-end:
 CI gate (D18, `.github/workflows/ci.yaml`):
 
 - All slices: PR must show green `ci.yaml`. No skipped tests. Generated-file drift gate must pass.
-- Release: tag `vX.Y.Z` triggers `release.yaml` → image at `ghcr.io/andrewreid/cfzt-operator:<tag>`, chart at `oci://ghcr.io/andrewreid/charts/cfzt-operator`.
+- Release: manually trigger `release.yaml` with version `X.Y.Z`; after all gates pass it creates tag `vX.Y.Z`, pushes image `ghcr.io/andrewreid/cfzt-operator:<tag>`, and pushes chart `oci://ghcr.io/andrewreid/charts/cfzt-operator`.

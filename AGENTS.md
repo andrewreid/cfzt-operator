@@ -108,17 +108,18 @@ If `rtk` is not on PATH (e.g. CI sandbox), fall back to bare command and warn th
 Kubebuilder + controller-runtime, Go, `cloudflare-go/v4` (D13). Module: `github.com/andrewreid/cfzt-operator`.
 
 ```
-api/v1alpha1/                CRD types (CloudflareTunnel cluster-scoped, CloudflareExposure namespaced)
-internal/controller/         tunnel + exposure reconcilers
+api/v1alpha1/                CRD types (Tunnel, Exposure, AccessPolicy, TunnelRoute)
+internal/controller/         tunnel, exposure, access-policy, tunnel-route reconcilers
 internal/tunnelconfig/       single-writer builder for tunnel ingress doc (D11)
 internal/cloudflare/         SDK wrapper + fake client + zone cache
 internal/origin/             Service + HTTPRoute origin derivation (Slice 3)
-internal/naming/             names + source-uid tag formatting
+internal/naming/             resource naming helpers
+internal/ownership/          source-uid comments + chunked Access tag ownership
 internal/workload/           cloudflared DaemonSet + token Secret
 cmd/                         manager entrypoint
 config/                      kubebuilder-generated kustomize
 charts/cfzt-operator/        hand-written Helm chart, OCI to GHCR (D14, D17)
-.github/workflows/           ci.yaml + release.yaml (D18)
+.github/workflows/           ci.yaml + live-smoke.yaml + release.yaml (D18)
 docs/plan.md                 implementation plan
 ```
 
@@ -137,6 +138,7 @@ rtk make manifests          # CRDs + RBAC from kubebuilder markers
 rtk make generate           # deepcopy etc.
 rtk make test               # unit + envtest (auto-installs setup-envtest binary)
 rtk go test ./...           # raw test pass
+rtk make lint               # custom golangci-lint with module plugins
 rtk make docker-build       # operator image
 rtk make run                # run controller against current kubeconfig
 rtk make helm-package       # package OCI Helm chart (D14)

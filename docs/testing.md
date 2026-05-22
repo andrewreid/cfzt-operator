@@ -53,7 +53,7 @@ These tests are mostly deployment smoke coverage. They do not exercise real Clou
 
 ## Live Cloudflare Smoke Tests
 
-The live smoke harness lives in `test/live/cloudflare_smoke_test.go` and is behind the `live` build tag. It is intentionally excluded from normal test runs because it talks to a real Cloudflare account, creates real DNS records, creates real Zero Trust resources, installs the chart into kind, and depends on public DNS/Cloudflare propagation.
+The live smoke test entrypoint lives in `test/live/cloudflare_smoke_test.go`; shared Kubernetes and Cloudflare helpers live in `test/live/harness.go`. The package is behind the `live` build tag. It is intentionally excluded from normal test runs because it talks to a real Cloudflare account, creates real DNS records, creates real Zero Trust resources, installs the chart into kind, and depends on public DNS/Cloudflare propagation.
 
 There are two tests:
 
@@ -76,7 +76,7 @@ There are two tests:
 10. Wait for both Exposures to become `Ready=True`.
 11. Call the public hostname and require HTTP 200 from the echo workload.
 12. Call the Access hostname without credentials and require an Access challenge or denial, not HTTP 200.
-13. Reapply no-op spec updates, restart the operator Deployment, and verify the Cloudflare object IDs and route hashes do not change.
+13. Reapply no-op spec updates, restart the operator Deployment, and verify the Cloudflare object IDs, route hashes, Access application policy binding, and Tunnel ingress document hash do not change.
 14. Create a foreign DNS CNAME for a conflict hostname, create a conflicting Exposure, and verify the operator reports `HostnameConflict` or `ForeignResource` without changing the foreign record.
 15. Create a foreign Cloudflare tunnel route, create a conflicting `CloudflareTunnelRoute`, and verify the operator reports `ForeignRoute` without changing the foreign route.
 16. Delete the Kubernetes resources, wait for finalizers, and verify managed DNS records, Access application, Access policy, tunnel route, and tunnel are gone.
@@ -179,7 +179,7 @@ Lifecycle:
 set -a
 source .env.live
 set +a
-go test -tags=live ./test/live -run '^TestCloudflareLifecycle$' -count=1 -timeout=30m -v
+go test -tags=live ./test/live -run '^TestCloudflareLifecycle$' -count=1 -timeout=15m -v
 ```
 
 For direct lifecycle runs, the current kubeconfig must point at the target cluster, `helm` must be installed, and the chart/image settings must be valid for that cluster. With the default local values, the image must already be loaded into kind because the chart is installed with `image.pullPolicy=Never`.
@@ -188,7 +188,7 @@ For direct lifecycle runs, the current kubeconfig must point at the target clust
 
 `.github/workflows/release.yaml` is manually triggered with a version input such as `0.2.3`. It does not publish from tag pushes. The workflow validates the requested version, then runs all release gates before creating the git tag, pushing GHCR artifacts, or creating the GitHub Release:
 
-- `go vet`, `make lint`, generated drift check, `make test`, and `helm lint`.
+- `go vet`, `make lint` (including the custom golangci-lint plugins and cache clean), generated drift check, `make test`, and `helm lint`.
 - Package the candidate Helm chart with the requested version.
 - Build a local candidate image and install the packaged candidate chart into kind.
 - Run `TestCloudflarePreflight`.
