@@ -218,8 +218,11 @@ Completed on 2026-05-22:
   `PolicyUUID` scalar, while read-side `AccessApplication` exposes only
   `PolicyUUIDs`. Drift detection uses the read-side slice so foreign policy
   attachments are reconciled away.
+- Slice 6 subtask 8: Access policy rule hashing and CF drift comparison now
+  share one canonicaliser over the internal Cloudflare rule type. The duplicate
+  API-vs-CF canonicalisation helpers were removed.
 
-Next: Slice 6 subtask 8.
+Next: Slice 6 subtask 9.
 
 ## 3. Slice plan
 

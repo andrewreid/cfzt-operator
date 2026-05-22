@@ -7,6 +7,7 @@ import (
 	"sort"
 
 	cfztv1alpha1 "github.com/andrewreid/cfzt-operator/api/v1alpha1"
+	"github.com/andrewreid/cfzt-operator/internal/cloudflare"
 )
 
 type canonicalAccessRules struct {
@@ -26,9 +27,9 @@ type canonicalAccessRule struct {
 
 func accessPolicyRulesHash(policy *cfztv1alpha1.CloudflareAccessPolicy) (string, error) {
 	canonical := canonicalAccessRules{
-		Include: canonicalizeAccessRules(policy.Spec.Rules.Include),
-		Exclude: canonicalizeAccessRules(policy.Spec.Rules.Exclude),
-		Require: canonicalizeAccessRules(policy.Spec.Rules.Require),
+		Include: canonicalize(translateRules(policy.Spec.Rules.Include)),
+		Exclude: canonicalize(translateRules(policy.Spec.Rules.Exclude)),
+		Require: canonicalize(translateRules(policy.Spec.Rules.Require)),
 	}
 	b, err := json.Marshal(canonical)
 	if err != nil {
@@ -38,7 +39,28 @@ func accessPolicyRulesHash(policy *cfztv1alpha1.CloudflareAccessPolicy) (string,
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
 }
 
-func canonicalizeAccessRules(in []cfztv1alpha1.AccessRule) []canonicalAccessRule {
+// translateRules converts api/v1alpha1 rules to the internal cloudflare shape.
+// Both sides are discriminated unions with exactly one field set per item (CEL
+// guarantees this on the API side); a straight copy is sufficient.
+func translateRules(in []cfztv1alpha1.AccessRule) []cloudflare.AccessRule {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]cloudflare.AccessRule, 0, len(in))
+	for _, r := range in {
+		out = append(out, cloudflare.AccessRule{
+			Email:          r.Email,
+			EmailDomain:    r.EmailDomain,
+			IP:             r.IP,
+			Everyone:       r.Everyone,
+			ServiceToken:   r.ServiceToken,
+			GeoCountryCode: r.GeoCountryCode,
+		})
+	}
+	return out
+}
+
+func canonicalize(in []cloudflare.AccessRule) []canonicalAccessRule {
 	if len(in) == 0 {
 		return nil
 	}
