@@ -18,6 +18,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -248,10 +250,16 @@ func (r *CloudflareTunnelReconciler) reconcileTunnelConfig(ctx context.Context, 
 	if err != nil {
 		return err
 	}
-	if err := cfClient.Configurations().Update(ctx, tunnelID, result.Config); err != nil {
+	ingressDocHash, err := tunnelConfigurationHash(result.Config)
+	if err != nil {
 		return err
 	}
-	return r.setTunnelRoutes(ctx, tunnel, result.Routes)
+	if tunnel.Status.IngressDocHash != ingressDocHash || !tunnelRoutesStatusMatches(tunnel.Status.Routes, result.Routes) {
+		if err := cfClient.Configurations().Update(ctx, tunnelID, result.Config); err != nil {
+			return err
+		}
+	}
+	return r.setTunnelConfigStatus(ctx, tunnel, result.Routes, ingressDocHash)
 }
 
 func (r *CloudflareTunnelReconciler) deleteNamespaced(ctx context.Context, obj client.Object, namespace, name string) error {
@@ -406,13 +414,14 @@ func (r *CloudflareTunnelReconciler) setTunnelStatus(ctx context.Context, tunnel
 	return r.Status().Update(ctx, latest)
 }
 
-func (r *CloudflareTunnelReconciler) setTunnelRoutes(ctx context.Context, tunnel *cfztv1alpha1.CloudflareTunnel, routes []tunnelconfig.Route) error {
+func (r *CloudflareTunnelReconciler) setTunnelConfigStatus(ctx context.Context, tunnel *cfztv1alpha1.CloudflareTunnel, routes []tunnelconfig.Route, ingressDocHash string) error {
 	latest := &cfztv1alpha1.CloudflareTunnel{}
 	if err := r.Get(ctx, types.NamespacedName{Name: tunnel.Name}, latest); err != nil {
 		return err
 	}
 	before := latest.DeepCopy()
 	now := metav1.Now()
+	latest.Status.IngressDocHash = ingressDocHash
 	previous := make(map[string]cfztv1alpha1.RouteStatus, len(latest.Status.Routes))
 	for _, route := range latest.Status.Routes {
 		previous[routeStatusKey(route.Namespace, route.Name, route.Hostname)] = route
@@ -440,6 +449,32 @@ func (r *CloudflareTunnelReconciler) setTunnelRoutes(ctx context.Context, tunnel
 
 func routeStatusKey(namespace, name, hostname string) string {
 	return namespace + "/" + name + "/" + hostname
+}
+
+func tunnelConfigurationHash(config cloudflare.TunnelConfiguration) (string, error) {
+	data, err := json.Marshal(config)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	return fmt.Sprintf("sha256:%x", sum), nil
+}
+
+func tunnelRoutesStatusMatches(status []cfztv1alpha1.RouteStatus, routes []tunnelconfig.Route) bool {
+	if len(status) != len(routes) {
+		return false
+	}
+	seen := make(map[string]cfztv1alpha1.RouteStatus, len(status))
+	for _, route := range status {
+		seen[routeStatusKey(route.Namespace, route.Name, route.Hostname)] = route
+	}
+	for _, route := range routes {
+		current, ok := seen[routeStatusKey(route.Namespace, route.Name, route.Hostname)]
+		if !ok || current.ExposureUid != route.ExposureUID || current.Hash != route.Hash {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *CloudflareTunnelReconciler) event(tunnel *cfztv1alpha1.CloudflareTunnel, eventType, reason, messageFmt string, args ...any) {

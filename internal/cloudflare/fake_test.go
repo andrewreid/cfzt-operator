@@ -205,7 +205,7 @@ func TestFakeConfigurationsPutOverwrites(t *testing.T) {
 	if err := fake.Configurations().Update(ctx, tunnel.ID, cloudflare.TunnelConfiguration{Ingress: []cloudflare.IngressRule{{Service: "http_status:404"}}}); err != nil {
 		t.Fatalf("Update returned error: %v", err)
 	}
-	config, err := fake.Configurations().Get(ctx, tunnel.ID)
+	config, err := fake.Configuration(tunnel.ID)
 	if err != nil {
 		t.Fatalf("Get returned error: %v", err)
 	}

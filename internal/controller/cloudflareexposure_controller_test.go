@@ -95,7 +95,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		Expect(meta.FindStatusCondition(current.Status.Conditions, ConditionReady).Status).To(Equal(metav1.ConditionTrue))
 
 		cfTunnel := fetchTunnel(ctx, tunnel.Name)
-		config, err := fakeCF.Configurations().Get(ctx, cfTunnel.Status.TunnelId)
+		config, err := fakeCF.Configuration(cfTunnel.Status.TunnelId)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(config.Ingress[0].Hostname).To(Equal("jellyfin.example.com"))
 		Expect(config.Ingress[0].Service).To(Equal("http://jellyfin.media.svc.cluster.local:8096"))
@@ -105,6 +105,44 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		Expect(records[0].Type).To(Equal("CNAME"))
 		Expect(records[0].Content).To(Equal(cfTunnel.Status.TunnelId + ".cfargotunnel.com"))
 		Expect(records[0].Proxied).To(BeTrue())
+	})
+
+	It("TestTunnelConfigUpdateSkippedWhenUnchanged", func() {
+		tunnel := readyTunnel(ctx, tunnelReconciler, "skip-config", "skip-config")
+		exposure := createExposure(ctx, "skip-config-app", tunnel.Name, "skip.example.com", false)
+		reconcileExposure(ctx, exposureReconciler, exposure)
+		cfTunnel := fetchTunnel(ctx, tunnel.Name)
+		before := fakeCF.ConfigurationUpdateCalls(cfTunnel.Status.TunnelId)
+
+		reconcileTunnel(ctx, tunnelReconciler, tunnel.Name)
+
+		afterWrite := fakeCF.ConfigurationUpdateCalls(cfTunnel.Status.TunnelId)
+		Expect(afterWrite).To(Equal(before + 1))
+		Expect(fetchTunnel(ctx, tunnel.Name).Status.IngressDocHash).NotTo(BeEmpty())
+
+		reconcileTunnel(ctx, tunnelReconciler, tunnel.Name)
+
+		Expect(fakeCF.ConfigurationUpdateCalls(cfTunnel.Status.TunnelId)).To(Equal(afterWrite))
+	})
+
+	It("TestTunnelConfigUpdateOnDrift", func() {
+		tunnel := readyTunnel(ctx, tunnelReconciler, "drift-config", "drift-config")
+		exposure := createExposure(ctx, "drift-config-app", tunnel.Name, "drift.example.com", false)
+		reconcileExposure(ctx, exposureReconciler, exposure)
+		reconcileTunnel(ctx, tunnelReconciler, tunnel.Name)
+		cfTunnel := fetchTunnel(ctx, tunnel.Name)
+		afterFirstWrite := fakeCF.ConfigurationUpdateCalls(cfTunnel.Status.TunnelId)
+
+		current := fetchExposure(ctx, exposure.Name)
+		current.Spec.Origin.Port = 9090
+		Expect(k8sClient.Update(ctx, current)).To(Succeed())
+
+		reconcileTunnel(ctx, tunnelReconciler, tunnel.Name)
+
+		Expect(fakeCF.ConfigurationUpdateCalls(cfTunnel.Status.TunnelId)).To(Equal(afterFirstWrite + 1))
+		config, err := fakeCF.Configuration(cfTunnel.Status.TunnelId)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(config.Ingress[0].Service).To(Equal("http://drift-config-app.media.svc.cluster.local:9090"))
 	})
 
 	It("TestExposureDNSManagedOff", func() {
@@ -294,7 +332,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(records).To(BeEmpty())
 		reconcileTunnel(ctx, tunnelReconciler, tunnel.Name)
-		config, err := fakeCF.Configurations().Get(ctx, fetchTunnel(ctx, tunnel.Name).Status.TunnelId)
+		config, err := fakeCF.Configuration(fetchTunnel(ctx, tunnel.Name).Status.TunnelId)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(config.Ingress).To(HaveLen(1))
 		Expect(config.Ingress[0].Service).To(Equal("http_status:404"))
@@ -513,7 +551,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		reconcileExposure(ctx, exposureReconciler, exposure)
 
 		cfTunnel := fetchTunnel(ctx, tunnel.Name)
-		config, err := fakeCF.Configurations().Get(ctx, cfTunnel.Status.TunnelId)
+		config, err := fakeCF.Configuration(cfTunnel.Status.TunnelId)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(config.Ingress[0].Service).To(Equal("http://192.168.1.50:8123"))
 		Expect(meta.FindStatusCondition(fetchExposure(ctx, exposure.Name).Status.Conditions, ConditionReady).Status).To(Equal(metav1.ConditionTrue))
@@ -532,7 +570,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 
 		reconcileTunnel(ctx, tunnelReconciler, tunnel.Name)
 		reconcileExposure(ctx, exposureReconciler, current)
-		config, err := fakeCF.Configurations().Get(ctx, fetchTunnel(ctx, tunnel.Name).Status.TunnelId)
+		config, err := fakeCF.Configuration(fetchTunnel(ctx, tunnel.Name).Status.TunnelId)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(config.Ingress[0].Service).To(Equal("http://jellyfin.media.svc.cluster.local:8096"))
 		Expect(meta.FindStatusCondition(fetchExposure(ctx, exposure.Name).Status.Conditions, ConditionReady).Status).To(Equal(metav1.ConditionTrue))

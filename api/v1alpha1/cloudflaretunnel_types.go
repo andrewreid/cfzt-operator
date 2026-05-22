@@ -125,7 +125,9 @@ type CloudflareTunnelStatus struct {
 	TunnelId       string         `json:"tunnelId,omitempty"`
 	TokenSecretRef TokenSecretRef `json:"tokenSecretRef,omitempty"`
 	DnsMode        string         `json:"dnsMode,omitempty"`
-	Routes         []RouteStatus  `json:"routes,omitempty"`
+	// +optional
+	IngressDocHash string        `json:"ingressDocHash,omitempty"`
+	Routes         []RouteStatus `json:"routes,omitempty"`
 
 	// +listType=map
 	// +listMapKey=type

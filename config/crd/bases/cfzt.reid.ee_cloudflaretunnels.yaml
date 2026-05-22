@@ -1203,6 +1203,8 @@ spec:
                 x-kubernetes-list-type: map
               dnsMode:
                 type: string
+              ingressDocHash:
+                type: string
               routes:
                 items:
                   description: RouteStatus records the last-written ingress rule for

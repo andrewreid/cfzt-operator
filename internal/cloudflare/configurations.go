@@ -12,6 +12,5 @@ type TunnelConfiguration struct {
 }
 
 type Configurations interface {
-	Get(ctx context.Context, tunnelID string) (*TunnelConfiguration, error)
 	Update(ctx context.Context, tunnelID string, config TunnelConfiguration) error
 }

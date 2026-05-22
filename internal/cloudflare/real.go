@@ -411,29 +411,6 @@ func routeFromSDK(route *zero_trust.Route) *TunnelRoute {
 	}
 }
 
-func (c *realConfigurations) Get(ctx context.Context, tunnelID string) (*TunnelConfiguration, error) {
-	var result *TunnelConfiguration
-	err := c.client.withRetry(ctx, func() error {
-		resp, err := c.client.api.ZeroTrust.Tunnels.Cloudflared.Configurations.Get(ctx, tunnelID,
-			zero_trust.TunnelCloudflaredConfigurationGetParams{AccountID: cf.F(c.client.accountID)},
-		)
-		if err != nil {
-			var apiErr *cf.Error
-			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
-				return ErrNotFound
-			}
-			return err
-		}
-		config := TunnelConfiguration{}
-		for _, rule := range resp.Config.Ingress {
-			config.Ingress = append(config.Ingress, IngressRule{Hostname: rule.Hostname, Service: rule.Service})
-		}
-		result = &config
-		return nil
-	})
-	return result, err
-}
-
 func (c *realConfigurations) Update(ctx context.Context, tunnelID string, config TunnelConfiguration) error {
 	return c.client.withRetry(ctx, func() error {
 		ingress := make([]zero_trust.TunnelCloudflaredConfigurationUpdateParamsConfigIngress, 0, len(config.Ingress))

@@ -200,8 +200,12 @@ Completed on 2026-05-22:
 - Slice 6 subtask 3: real Cloudflare client + zone caches now live at package
   scope keyed by account ID and API-token hash, so SDK clients, connection
   pools, rate limiters, and zone lookups are reused across reconciles.
+- Slice 6 subtask 4: tunnel config writes are now skipped when the desired
+  ingress document hash and route status already match. `status.ingressDocHash`
+  records the last written document, and the unused configurations `Get`
+  wrapper was removed.
 
-Next: Slice 6 subtask 4.
+Next: Slice 6 subtask 5.
 
 ## 3. Slice plan
 

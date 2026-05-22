@@ -17,6 +17,7 @@ type FakeClient struct {
 	tunnels                   map[string]*Tunnel
 	tokens                    map[string]string
 	configurations            map[string]TunnelConfiguration
+	configurationUpdateCalls  map[string]int
 	accessApps                map[string]*AccessApplication
 	accessTags                map[string]bool
 	accessPolicies            map[string]*AccessPolicy
@@ -35,6 +36,7 @@ func NewFake() *FakeClient {
 		tunnels:                   make(map[string]*Tunnel),
 		tokens:                    make(map[string]string),
 		configurations:            make(map[string]TunnelConfiguration),
+		configurationUpdateCalls:  make(map[string]int),
 		accessApps:                make(map[string]*AccessApplication),
 		accessTags:                make(map[string]bool),
 		accessPolicies:            make(map[string]*AccessPolicy),
@@ -50,6 +52,22 @@ func (f *FakeClient) SetTunnelToken(id, token string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.tokens[id] = token
+}
+
+func (f *FakeClient) Configuration(tunnelID string) (*TunnelConfiguration, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	config, ok := f.configurations[tunnelID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return copyConfiguration(config), nil
+}
+
+func (f *FakeClient) ConfigurationUpdateCalls(tunnelID string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.configurationUpdateCalls[tunnelID]
 }
 
 func (f *FakeClient) Tunnels() Tunnels {
@@ -171,16 +189,6 @@ type fakeConfigurations struct {
 	fc *FakeClient
 }
 
-func (c *fakeConfigurations) Get(_ context.Context, tunnelID string) (*TunnelConfiguration, error) {
-	c.fc.mu.Lock()
-	defer c.fc.mu.Unlock()
-	config, ok := c.fc.configurations[tunnelID]
-	if !ok {
-		return nil, ErrNotFound
-	}
-	return copyConfiguration(config), nil
-}
-
 func (c *fakeConfigurations) Update(_ context.Context, tunnelID string, config TunnelConfiguration) error {
 	c.fc.mu.Lock()
 	defer c.fc.mu.Unlock()
@@ -188,6 +196,7 @@ func (c *fakeConfigurations) Update(_ context.Context, tunnelID string, config T
 		return ErrNotFound
 	}
 	c.fc.configurations[tunnelID] = *copyConfiguration(config)
+	c.fc.configurationUpdateCalls[tunnelID]++
 	return nil
 }
 
