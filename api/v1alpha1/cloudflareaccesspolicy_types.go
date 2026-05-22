@@ -108,8 +108,9 @@ type CloudflareAccessPolicySpec struct {
 	// +kubebuilder:validation:Required
 	CredentialsSecretRef AccessPolicyCredentialsSecretRef `json:"credentialsSecretRef"`
 
-	// PolicyName is the name applied to the Cloudflare Access policy. When
-	// empty the controller defaults to "<metadata.name>-cfzt" at runtime.
+	// PolicyName is the base name for the Cloudflare Access policy. The
+	// controller always appends "-cfzt"; when empty the base defaults to
+	// metadata.name.
 	//
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:MaxLength=120

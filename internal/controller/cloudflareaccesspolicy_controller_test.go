@@ -81,7 +81,7 @@ var _ = Describe("CloudflareAccessPolicy Controller", func() {
 		Expect(got.Status.ObservedRulesHash).To(HavePrefix("sha256:"))
 	})
 
-	It("TestAccessPolicyCreateUsesSpecPolicyName", func() {
+	It("TestAccessPolicyNameAlwaysSuffixed", func() {
 		policy := createAccessPolicy(ctx, "create-policy-name", "custom-policy-name")
 
 		reconcileAccessPolicy(ctx, reconciler, policy.Name)
@@ -90,7 +90,7 @@ var _ = Describe("CloudflareAccessPolicy Controller", func() {
 		Expect(got.Status.PolicyId).NotTo(BeEmpty())
 		cfPolicy, err := fakeCF.AccessPolicies().Get(ctx, got.Status.PolicyId)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(cfPolicy.Name).To(Equal("custom-policy-name"))
+		Expect(cfPolicy.Name).To(Equal("custom-policy-name-cfzt"))
 	})
 
 	It("TestAccessPolicyForeignRefuses", func() {

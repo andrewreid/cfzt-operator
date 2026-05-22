@@ -63,6 +63,17 @@ var _ = Describe("CloudflareTunnel CRD validation", func() {
 	})
 
 	Context("valid object", func() {
+		It("TestCloudflareTunnelImageRegexPort", func() {
+			obj := validBase("valid-registry-port-image")
+			obj.Spec.Cloudflared.Image = "registry.local:5000/cloudflared:2025.1.0"
+
+			err := k8sClient.Create(ctx, obj)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("cleanup")
+			Expect(k8sClient.Delete(ctx, obj)).To(Succeed())
+		})
+
 		It("accepts a well-formed CloudflareTunnel", func() {
 			obj := validBase("valid-tunnel")
 

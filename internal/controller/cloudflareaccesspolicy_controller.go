@@ -257,10 +257,11 @@ func (r *CloudflareAccessPolicyReconciler) SetupWithManager(mgr ctrl.Manager) er
 }
 
 func desiredPolicyName(policy *cfztv1alpha1.CloudflareAccessPolicy) string {
+	base := policy.Name
 	if policy.Spec.PolicyName != "" {
-		return policy.Spec.PolicyName
+		base = policy.Spec.PolicyName
 	}
-	return policy.Name + "-cfzt"
+	return base + "-cfzt"
 }
 
 func buildAccessPolicyInput(policy *cfztv1alpha1.CloudflareAccessPolicy, name string) cloudflare.AccessPolicyInput {

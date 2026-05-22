@@ -226,8 +226,12 @@ Completed on 2026-05-22:
   options. The manager still preserves metrics bind/secure flags, health
   probe bind, leader election default-on, log flags, controller registration,
   and HTTPRoute CRD startup discovery.
+- Slice 6 subtask 10: managed Access policy names now always append `-cfzt`,
+  including when `spec.policyName` is set; spec/API docs were updated to make
+  `policyName` a base name. Cloudflared image validation now accepts registry
+  hosts with ports while still rejecting `:latest`.
 
-Next: Slice 6 subtask 10.
+Next: Slice 6 subtask 11.
 
 ## 3. Slice plan
 

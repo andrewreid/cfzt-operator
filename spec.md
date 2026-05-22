@@ -359,7 +359,7 @@ spec:
     keys:
       accountId: accountId          # default "accountId"
       apiToken: apiToken            # default "apiToken"
-  policyName: family-only-cfzt      # name in Cloudflare; defaults to "<metadata.name>-cfzt"
+  policyName: family-only           # base name; Cloudflare name becomes "family-only-cfzt"
   decision: allow                   # allow | deny | bypass | non_identity
   rules:
     include:                        # any-of match
@@ -408,7 +408,7 @@ Kubebuilder markers:
 `CloudflareAccessPolicy` controller responsibilities:
 
 1. Resolve Cloudflare credentials from the referenced Secret (same shape as Tunnel; namespace stored on the field).
-2. Reconcile policy identity by ID-record (mirrors D9 tunnel pattern): if `status.policyId` is set, `Get(id)` and verify name matches `spec.policyName`; if unset, `List(name=spec.policyName)` — zero hits → create; one or more hits → `Ready=False, Reason=ForeignPolicy`, no mutation.
+2. Reconcile policy identity by ID-record (mirrors D9 tunnel pattern): if `status.policyId` is set, `Get(id)` and verify name matches desired Cloudflare name (`<spec.policyName | metadata.name>-cfzt`); if unset, `List(name=desired Cloudflare name)` — zero hits → create; one or more hits → `Ready=False, Reason=ForeignPolicy`, no mutation.
 3. Write `source-uid` tag on the CF policy at create/update time (verify field via Cloudflare MCP at implementation; fall back to ID-only tracking like tunnels if SDK has no comment/tag surface on policies).
 4. Compare desired rules JSON against `status.observedRulesHash`; on mismatch, `Update` the CF policy and rewrite the hash.
 5. List `CloudflareExposure` CRs referencing this Policy CR by `spec.access.policyRef.name`; populate `status.referencedBy[]` and `status.referencedByCount`.
@@ -486,7 +486,7 @@ CRD fields are validated by `+kubebuilder:validation:*` markers and `x-kubernete
 - `spec.credentialsSecretRef.keys.apiToken`: optional, default `apiToken`, maxLength 253.
 - Credentials Secret namespace is always `spec.cloudflared.namespace` (default `cfzt-system`); the API intentionally stores that namespace once.
 - `spec.dns.manage`: bool, default `true`.
-- `spec.cloudflared.image`: pattern `^[a-z0-9./-]+(:[a-zA-Z0-9._-]+)?$`, not allowed to end `:latest`.
+- `spec.cloudflared.image`: image-reference pattern allows an optional registry port, not allowed to end `:latest`.
 
 `CloudflareAccessPolicy` (Slice 4, D24):
 
@@ -494,7 +494,7 @@ CRD fields are validated by `+kubebuilder:validation:*` markers and `x-kubernete
 - `spec.credentialsSecretRef.namespace`: required, RFC 1123 subdomain (cluster-scoped CR — namespace is stored on the field, not inherited).
 - `spec.credentialsSecretRef.keys.accountId`: optional, default `accountId`, maxLength 253.
 - `spec.credentialsSecretRef.keys.apiToken`: optional, default `apiToken`, maxLength 253.
-- `spec.policyName`: optional, defaults to `<metadata.name>-cfzt`; allowed charset matches CF Access policy name rules; maxLength 120.
+- `spec.policyName`: optional base name; Cloudflare policy name is always `<spec.policyName | metadata.name>-cfzt`; allowed charset matches CF Access policy name rules; maxLength 120.
 - `spec.decision`: required, enum `allow|deny|bypass|non_identity`.
 - `spec.rules.include`, `spec.rules.exclude`, `spec.rules.require`: optional lists of rule items (default `[]`).
 - Each rule item is a discriminated union with **exactly one** of `email`, `emailDomain`, `ip`, `everyone`, `serviceToken`, `geoCountryCode` set. CEL: `[has(self.email), has(self.emailDomain), has(self.ip), has(self.everyone), has(self.serviceToken), has(self.geoCountryCode)].filter(b, b).size() == 1`.
@@ -555,7 +555,7 @@ The operator is conservative. It only mutates Cloudflare resources whose ownersh
 - **Access applications**: `tags` field (or `aud` claim) carries `managed-by=cfzt-operator` and `source-uid=<CloudflareExposure.uid>`. Name = `<displayName-or-metadata.name>-cfzt`.
 - **DNS records**: `comment` field carries `managed-by=cfzt-operator source-uid=<CloudflareExposure.uid>`.
 - **Ingress rules: not tagged.** The entire doc is overwritten each reconcile from K8s desired state.
-- **Access policies** (Slice 4, D24): `CloudflareAccessPolicy.status.policyId` is the authoritative ownership record (mirrors tunnels per D9). SDK tags/decoration carry `managed-by=cfzt-operator source-uid=<CloudflareAccessPolicy.uid>` if the policy resource supports a tag/comment field; verify at implementation via the Cloudflare MCP and fall back to ID-only if not. Name = `spec.policyName` (default `<metadata.name>-cfzt`).
+- **Access policies** (Slice 4, D24): `CloudflareAccessPolicy.status.policyId` is the authoritative ownership record (mirrors tunnels per D9). SDK tags/decoration carry `managed-by=cfzt-operator source-uid=<CloudflareAccessPolicy.uid>` if the policy resource supports a tag/comment field; verify at implementation via the Cloudflare MCP and fall back to ID-only if not. Name = `<spec.policyName | metadata.name>-cfzt`; the suffix is always appended for collision protection.
 - **Tunnel routes** (Slice 5, D25): `CloudflareTunnelRoute.status.routeId` is the authoritative ownership record. CF-side `comment` carries compact ownership text `managed-by=cfzt source-uid=<CloudflareTunnelRoute.uid>`; the installed `cloudflare-go/v4` route API exposes `comment`, so Slice 5 requires this guard. Pre-existing active routes with the same target CIDR/VNet and no matching source-uid are NOT auto-adopted: `Ready=False, Reason=ForeignRoute`.
 
 **Mutation rule.** Before update or delete of an Access app or DNS record, the operator MUST verify the resource's `source-uid` matches a current local CR of the expected kind. Mismatch or missing tag → `Ready=False, Reason=ForeignResource`, no destructive action. Tunnels follow the ID-based rule above instead.
@@ -846,7 +846,7 @@ docs/
 - DNS record `comment`: `managed-by=cfzt-operator source-uid=<exposure-uid>`.
 - Access app `tags`: `managed-by=cfzt-operator`, `source-uid=<exposure-uid>`.
 - Tunnel ownership: tracked via `CloudflareTunnel.status.tunnelId` (no CF-side comment/tag — see D9).
-- Access policy name in Cloudflare (Slice 4, D24): `<spec.policyName | metadata.name+"-cfzt">`.
+- Access policy name in Cloudflare (Slice 4, D24): `<spec.policyName | metadata.name>-cfzt`; the suffix is always appended.
 - Access policy ownership (Slice 4): tracked via `CloudflareAccessPolicy.status.policyId`; tags `managed-by=cfzt-operator` and `source-uid=<policy-cr-uid>` written if the SDK exposes a tag/comment field for policies (verify at implementation).
 - `CloudflareTunnelRoute` `metadata.name`: user-chosen. No CF-side name (routes are identified by CIDR + VNet + ID).
 - Route `comment` in Cloudflare (Slice 5, D25): `managed-by=cfzt source-uid=<route-cr-uid>` plus optional user `spec.comment` text after a ` | ` separator. User comment is capped at 34 chars so the full CF comment fits Cloudflare's 100-char route limit.

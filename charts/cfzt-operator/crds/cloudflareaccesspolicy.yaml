@@ -99,8 +99,9 @@ spec:
                 type: string
               policyName:
                 description: |-
-                  PolicyName is the name applied to the Cloudflare Access policy. When
-                  empty the controller defaults to "<metadata.name>-cfzt" at runtime.
+                  PolicyName is the base name for the Cloudflare Access policy. The
+                  controller always appends "-cfzt"; when empty the base defaults to
+                  metadata.name.
                 maxLength: 120
                 pattern: ^[a-zA-Z0-9._ -]+$
                 type: string
