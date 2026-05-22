@@ -236,8 +236,13 @@ Completed on 2026-05-22:
   collapsed `config/default/kustomization.yaml`; deleted unsupported
   Makefile deploy/install/installer/buildx targets and unused Kustomize/Kubectl
   plumbing.
+- Slice 6 subtask 12: ownership package extraction completed. Source-UID
+  comment rendering/parsing and chunked Access app tag matching now live under
+  `internal/ownership`; `internal/naming` retains only naming constants and
+  functions. Exposure and TunnelRoute reconcilers now call
+  `ownership.From(uid)` methods for comments, tags, and ownership checks.
 
-Next: Slice 6 subtask 12.
+Next: Slice 6 subtask 13.
 
 ## 3. Slice plan
 
@@ -799,12 +804,11 @@ cleanups first so the bigger reshapes don't fight rebases.
       `managed-by=cfzt-operator source-uid=<uid>` long form + compact form
       ≤34 chars); new `internal/ownership/accesstag.go` (chunked
       `source-uid=<chunk>` tags with `accessTagMaxLength = 35`, dead-direct
-      branch already removed in subtask 1); delete `internal/naming/tags.go`
-      (move `OwnershipTag`, `ParseOwnershipTag`, `CompactOwnershipTag`); delete
-      inline ownership helpers in
+      branch already removed in subtask 1); delete `internal/naming/tags.go`;
+      delete inline ownership helpers in
       `cloudflareexposure_controller.go:564–654`,
-      `cloudflaretunnelroute_controller.go` `ownedByComment`, tunnel
-      analogues; rewrite call sites to `ownership.From(uid).*`.
+      `cloudflaretunnelroute_controller.go`, tunnel analogues; rewrite call
+      sites to `ownership.From(uid).*`.
     - Implements: review §1.6, §1.17.
     - Tests: new `internal/ownership/owner_test.go` —
       `TestOwnerCommentRoundTrip`, `TestOwnerCompactCommentRoundTrip`,
@@ -909,8 +913,8 @@ cleanups first so the bigger reshapes don't fight rebases.
       - subtask 10 — `policyName` always `-cfzt`: any live-smoke
         `CloudflareAccessPolicy` fixture that sets `spec.policyName` and
         then asserts the CF-side name must expect the `-cfzt` suffix.
-      - subtask 12 — ownership package rename: verify no stale
-        `naming.OwnershipTag` references remain in `test/live/`.
+      - subtask 12 — ownership package rename: verify live smoke uses no
+        stale naming ownership helpers.
       - subtask 14 — requeue policy split: re-read `waitTunnelReady`,
         `waitExposureConflictReason`, `waitTunnelRouteReady`,
         `waitTunnelRouteForeignReason`, `waitAccessPolicyReady` timeouts and

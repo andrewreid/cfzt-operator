@@ -21,6 +21,7 @@ import (
 	"github.com/andrewreid/cfzt-operator/internal/cloudflare"
 	"github.com/andrewreid/cfzt-operator/internal/naming"
 	"github.com/andrewreid/cfzt-operator/internal/origin"
+	"github.com/andrewreid/cfzt-operator/internal/ownership"
 )
 
 const exposureTestNamespace = "media"
@@ -71,16 +72,14 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		}
 	})
 
-	It("TestAccessOwnershipTagsFitCloudflareLimit", func() {
+	It("TestAccessOwnerTagsFitCloudflareLimit", func() {
 		uid := types.UID("c4fe2a8a-39b3-48cd-9a2a-d471cb045b4a")
-		tags := ownershipTags(uid)
+		tags := ownership.From(uid).Tags()
 
 		for _, tag := range tags {
-			Expect(len(tag)).To(BeNumerically("<=", accessTagMaxLength))
+			Expect(len(tag)).To(BeNumerically("<=", 35))
 		}
-		parsed, ok := ownershipUIDFromTags(tags)
-		Expect(ok).To(BeTrue())
-		Expect(parsed).To(Equal(uid))
+		Expect(ownership.From(uid).MatchesTags(tags)).To(BeTrue())
 	})
 
 	It("TestExposureCreate", func() {

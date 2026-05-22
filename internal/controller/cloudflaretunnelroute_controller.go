@@ -40,6 +40,7 @@ import (
 	cfztv1alpha1 "github.com/andrewreid/cfzt-operator/api/v1alpha1"
 	"github.com/andrewreid/cfzt-operator/internal/cloudflare"
 	"github.com/andrewreid/cfzt-operator/internal/naming"
+	"github.com/andrewreid/cfzt-operator/internal/ownership"
 )
 
 // CloudflareTunnelRouteReconciler reconciles a CloudflareTunnelRoute object.
@@ -142,7 +143,7 @@ func (r *CloudflareTunnelRouteReconciler) reconcileDelete(ctx context.Context, r
 		if err != nil && !errors.Is(err, cloudflare.ErrNotFound) {
 			return ctrl.Result{}, err
 		}
-		if err == nil && ownedByComment(cfRoute.Comment, route.UID) {
+		if err == nil && ownership.From(route.UID).MatchesComment(cfRoute.Comment) {
 			if err := cfClient.TunnelRoutes().Delete(ctx, route.Status.RouteId); err != nil && !errors.Is(err, cloudflare.ErrNotFound) {
 				return ctrl.Result{}, err
 			}
@@ -210,7 +211,7 @@ func (r *CloudflareTunnelRouteReconciler) reconcileCloudflareRoute(ctx context.C
 			return nil, false, err
 		}
 		if err == nil {
-			if !ownedByComment(cfRoute.Comment, route.UID) {
+			if !ownership.From(route.UID).MatchesComment(cfRoute.Comment) {
 				return nil, false, errForeignRoute
 			}
 			if tunnelRouteMatches(*cfRoute, desired) {
@@ -233,7 +234,7 @@ func (r *CloudflareTunnelRouteReconciler) reconcileCloudflareRoute(ctx context.C
 	}
 	var owned *cloudflare.TunnelRoute
 	for i := range existing {
-		if ownedByComment(existing[i].Comment, route.UID) {
+		if ownership.From(route.UID).MatchesComment(existing[i].Comment) {
 			copy := existing[i]
 			owned = &copy
 			continue
@@ -325,7 +326,7 @@ func canonicalNetwork(network string) (string, error) {
 }
 
 func routeOwnershipComment(route *cfztv1alpha1.CloudflareTunnelRoute) string {
-	prefix := naming.CompactOwnershipTag(route.UID)
+	prefix := ownership.From(route.UID).CompactComment()
 	if route.Spec.Comment == "" {
 		return prefix
 	}

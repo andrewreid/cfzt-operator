@@ -20,8 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
-	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -45,6 +43,7 @@ import (
 	"github.com/andrewreid/cfzt-operator/internal/cloudflare"
 	"github.com/andrewreid/cfzt-operator/internal/naming"
 	"github.com/andrewreid/cfzt-operator/internal/origin"
+	"github.com/andrewreid/cfzt-operator/internal/ownership"
 )
 
 // CloudflareExposureReconciler reconciles a CloudflareExposure object.
@@ -242,19 +241,17 @@ func (r *CloudflareExposureReconciler) reconcileAccess(ctx context.Context, expo
 		Name:       naming.AccessAppName(exposure.Spec.DisplayName, exposure.Name),
 		Domain:     exposure.Spec.Hostname,
 		PolicyUUID: policyUUID,
-		Tags:       ownershipTags(exposure.UID),
+		Tags:       ownership.From(exposure.UID).Tags(),
 	}
+	owner := ownership.From(exposure.UID)
 	var owned *cloudflare.AccessApplication
 	for _, app := range apps {
-		if owner, ok := ownershipUIDFromTags(app.Tags); ok && owner != exposure.UID {
-			return nil, false, fmt.Errorf("%w: Access application %s for hostname %s", errHostnameConflict, app.ID, exposure.Spec.Hostname)
-		}
-		if !ownedByTags(app.Tags, exposure.UID) {
+		if !owner.MatchesTags(app.Tags) {
 			return nil, false, fmt.Errorf("%w: Access application %s for hostname %s", errHostnameConflict, app.ID, exposure.Spec.Hostname)
 		}
 	}
 	for i := range apps {
-		if ownedByTags(apps[i].Tags, exposure.UID) {
+		if owner.MatchesTags(apps[i].Tags) {
 			owned = &apps[i]
 			break
 		}
@@ -392,23 +389,21 @@ func (r *CloudflareExposureReconciler) reconcileDNS(ctx context.Context, exposur
 		Type:    "CNAME",
 		Content: tunnel.Status.TunnelId + ".cfargotunnel.com",
 		Proxied: true,
-		Comment: naming.OwnershipTag(exposure.UID),
+		Comment: ownership.From(exposure.UID).Comment(),
 	}
 	records, err := cfClient.DNSRecords().List(ctx, zone.ID, exposure.Spec.Hostname, "CNAME")
 	if err != nil {
 		return nil, err
 	}
+	owner := ownership.From(exposure.UID)
 	var owned *cloudflare.DNSRecord
 	for _, record := range records {
-		if owner, ok := naming.ParseOwnershipTag(record.Comment); ok && owner != exposure.UID {
-			return nil, fmt.Errorf("%w: DNS record %s for hostname %s", errHostnameConflict, record.ID, exposure.Spec.Hostname)
-		}
-		if !ownedByComment(record.Comment, exposure.UID) {
+		if !owner.MatchesComment(record.Comment) {
 			return nil, fmt.Errorf("%w: DNS record %s for hostname %s", errHostnameConflict, record.ID, exposure.Spec.Hostname)
 		}
 	}
 	for i := range records {
-		if ownedByComment(records[i].Comment, exposure.UID) {
+		if owner.MatchesComment(records[i].Comment) {
 			owned = &records[i]
 			break
 		}
@@ -463,18 +458,19 @@ func (r *CloudflareExposureReconciler) deleteOwnedAccessIfPresent(ctx context.Co
 	if err != nil {
 		return err
 	}
+	owner := ownership.From(exposure.UID)
 	for _, app := range apps {
 		if app.ID != exposure.Status.Cloudflare.AccessApplicationId {
 			continue
 		}
-		if !ownedByTags(app.Tags, exposure.UID) {
+		if !owner.MatchesTags(app.Tags) {
 			return errForeignResource
 		}
 		if err := cfClient.AccessApplications().Delete(ctx, app.ID); err != nil && !errors.Is(err, cloudflare.ErrNotFound) {
 			return err
 		}
 	}
-	for _, tag := range sourceUIDTags(exposure.UID) {
+	for _, tag := range owner.Tags()[1:] {
 		if err := cfClient.AccessTags().Delete(ctx, tag); err != nil && !errors.Is(err, cloudflare.ErrNotFound) {
 			return err
 		}
@@ -497,11 +493,12 @@ func (r *CloudflareExposureReconciler) deleteOwnedDNSIfPresent(ctx context.Conte
 	if err != nil {
 		return err
 	}
+	owner := ownership.From(exposure.UID)
 	for _, record := range records {
 		if record.ID != exposure.Status.Cloudflare.DnsRecordId {
 			continue
 		}
-		if !ownedByComment(record.Comment, exposure.UID) {
+		if !owner.MatchesComment(record.Comment) {
 			return errForeignResource
 		}
 		if err := cfClient.DNSRecords().Delete(ctx, zone.ID, record.ID); err != nil && !errors.Is(err, cloudflare.ErrNotFound) {
@@ -553,82 +550,6 @@ func routeHashForExposure(tunnel *cfztv1alpha1.CloudflareTunnel, exposure *cfztv
 		}
 	}
 	return ""
-}
-
-func ownershipTags(uid types.UID) []string {
-	return append([]string{accessManagedByTag}, sourceUIDTags(uid)...)
-}
-
-const (
-	accessManagedByTag         = "managed-by=cfzt-operator"
-	accessSourceUIDChunkPrefix = "source-uid-"
-	accessTagMaxLength         = 35
-)
-
-func ownedByTags(tags []string, uid types.UID) bool {
-	found, ok := ownershipUIDFromTags(tags)
-	return ok && found == uid
-}
-
-func ownershipUIDFromTags(tags []string) (types.UID, bool) {
-	hasManagedBy := false
-	chunks := map[int]string{}
-	for _, tag := range tags {
-		if tag == accessManagedByTag {
-			hasManagedBy = true
-			continue
-		}
-		if rest, ok := strings.CutPrefix(tag, accessSourceUIDChunkPrefix); ok {
-			idxText, value, ok := strings.Cut(rest, "=")
-			if !ok || value == "" {
-				continue
-			}
-			idx, err := strconv.Atoi(idxText)
-			if err != nil || idx < 0 {
-				continue
-			}
-			chunks[idx] = value
-		}
-	}
-	if !hasManagedBy {
-		return "", false
-	}
-	if len(chunks) == 0 {
-		return "", false
-	}
-	var b strings.Builder
-	for i := 0; i < len(chunks); i++ {
-		chunk, ok := chunks[i]
-		if !ok {
-			return "", false
-		}
-		b.WriteString(chunk)
-	}
-	return types.UID(b.String()), true
-}
-
-func sourceUIDTags(uid types.UID) []string {
-	value := string(uid)
-	var tags []string
-	for idx := 0; value != ""; idx++ {
-		prefix := fmt.Sprintf("%s%d=", accessSourceUIDChunkPrefix, idx)
-		chunkSize := accessTagMaxLength - len(prefix)
-		if chunkSize <= 0 {
-			panic("access source UID tag prefix exceeds Cloudflare tag length limit")
-		}
-		if chunkSize > len(value) {
-			chunkSize = len(value)
-		}
-		tags = append(tags, prefix+value[:chunkSize])
-		value = value[chunkSize:]
-	}
-	return tags
-}
-
-func ownedByComment(comment string, uid types.UID) bool {
-	prefix, _, _ := strings.Cut(comment, " | ")
-	found, ok := naming.ParseOwnershipTag(prefix)
-	return ok && found == uid
 }
 
 func sameStringSet(a, b []string) bool {
