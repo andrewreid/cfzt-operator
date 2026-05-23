@@ -33,6 +33,9 @@ const (
 
 	EventCreatedTunnel       = "CreatedTunnel"
 	EventCreatedAccessApp    = "CreatedAccessApp"
+	EventCreatedDNSRecord    = "CreatedDNSRecord"
+	EventUpdatedDNSRecord    = "UpdatedDNSRecord"
+	EventDeletedDNSRecord    = "DeletedDNSRecord"
 	EventCreatedAccessPolicy = "CreatedAccessPolicy"
 	EventUpdatedAccessPolicy = "UpdatedAccessPolicy"
 	EventHostnameConflict    = "HostnameConflict"

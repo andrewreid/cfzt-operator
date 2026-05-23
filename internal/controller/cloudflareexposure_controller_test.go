@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -15,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -37,6 +39,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		tunnelReconciler    *CloudflareTunnelReconciler
 		exposureReconciler  *CloudflareExposureReconciler
 		policyReconciler    *CloudflareAccessPolicyReconciler
+		exposureRecorder    *record.FakeRecorder
 		defaultPolicyUUID   = "00000000-0000-4000-8000-000000000001"
 		defaultTunnelName   = "homelab"
 		defaultTunnelCFName = "homelab-rke2"
@@ -48,6 +51,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		ensureNamespace(ctx, namespace)
 		fakeCF = cloudflare.NewFake()
 		fakeCF.AddZone("zone-example", "example.com")
+		exposureRecorder = record.NewFakeRecorder(1024)
 		tunnelReconciler = &CloudflareTunnelReconciler{
 			Base: Base{
 				Client:              indexedClient,
@@ -61,7 +65,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 				Client:              indexedClient,
 				Scheme:              indexedClient.Scheme(),
 				NewCloudflareClient: newFakeCloudflareClient(indexedClient, fakeCF),
-				Recorder:            newTestRecorder(),
+				Recorder:            exposureRecorder,
 			},
 		}
 		policyReconciler = &CloudflareAccessPolicyReconciler{
@@ -173,6 +177,42 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		Expect(records).To(BeEmpty())
 	})
 
+	It("TestExposureDNSCreateEventNoDuplicate", func() {
+		tunnel := readyTunnel(ctx, tunnelReconciler, "dns-event-create", "dns-event-create")
+		exposure := createExposure(ctx, "dns-event-create", tunnel.Name, "dns-event-create.example.com", false)
+
+		reconcileExposure(ctx, exposureReconciler, exposure)
+		expectRecordedEvent(exposureRecorder, EventCreatedDNSRecord)
+		reconcileTunnel(ctx, tunnelReconciler, tunnel.Name)
+		reconcileExposure(ctx, exposureReconciler, exposure)
+
+		expectNoRecordedEvent(exposureRecorder, EventCreatedDNSRecord)
+		expectNoRecordedEvent(exposureRecorder, EventUpdatedDNSRecord)
+	})
+
+	It("TestExposureDNSUpdateEvent", func() {
+		tunnel := readyTunnel(ctx, tunnelReconciler, "dns-event-update", "dns-event-update")
+		exposure := createExposure(ctx, "dns-event-update", tunnel.Name, "dns-event-update.example.com", false)
+		reconcileExposure(ctx, exposureReconciler, exposure)
+		drainRecordedEvents(exposureRecorder)
+		records, err := fakeCF.DNSRecords().List(ctx, "zone-example", "dns-event-update.example.com", "CNAME")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(records).To(HaveLen(1))
+		_, err = fakeCF.DNSRecords().Update(ctx, records[0].ID, cloudflare.DNSRecordInput{
+			ZoneID:  records[0].ZoneID,
+			Name:    records[0].Name,
+			Type:    records[0].Type,
+			Content: "stale.cfargotunnel.com",
+			Proxied: false,
+			Comment: records[0].Comment,
+		})
+		Expect(err).NotTo(HaveOccurred())
+
+		reconcileExposure(ctx, exposureReconciler, exposure)
+
+		expectRecordedEvent(exposureRecorder, EventUpdatedDNSRecord)
+	})
+
 	It("TestExposureAccessDisabled", func() {
 		tunnel := readyTunnel(ctx, tunnelReconciler, "access-off", "access-off")
 		exposure := createExposure(ctx, "noauth", tunnel.Name, "noauth.example.com", false)
@@ -216,10 +256,12 @@ var _ = Describe("CloudflareExposure Controller", func() {
 
 		current := fetchExposure(ctx, exposure.Name)
 		Expect(current.Status.Cloudflare.DnsRecordId).NotTo(BeEmpty())
+		drainRecordedEvents(exposureRecorder)
 		latestTunnel := fetchTunnel(ctx, tunnel.Name)
 		latestTunnel.Spec.Dns.Manage = false
 		Expect(k8sClient.Update(ctx, latestTunnel)).To(Succeed())
 		reconcileExposure(ctx, exposureReconciler, current)
+		expectRecordedEvent(exposureRecorder, EventDeletedDNSRecord)
 
 		updated := fetchExposure(ctx, exposure.Name)
 		Expect(updated.Status.Cloudflare.DnsRecordId).To(BeEmpty())
@@ -355,9 +397,11 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		Expect(current.Finalizers).To(ContainElement(naming.Finalizer))
 		appID := current.Status.Cloudflare.AccessApplicationId
 		recordID := current.Status.Cloudflare.DnsRecordId
+		drainRecordedEvents(exposureRecorder)
 
 		Expect(k8sClient.Delete(ctx, current)).To(Succeed())
 		reconcileExposure(ctx, exposureReconciler, current)
+		expectRecordedEvent(exposureRecorder, EventDeletedDNSRecord)
 
 		Eventually(func(g Gomega) {
 			err := k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: exposure.Name}, &cfztv1alpha1.CloudflareExposure{})
@@ -803,6 +847,38 @@ func reconcileExposureExpectRequeueAfter30(ctx context.Context, reconciler *Clou
 	result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: exposure.Namespace, Name: exposure.Name}})
 	Expect(result).To(Equal(reconcile.Result{RequeueAfter: 30 * time.Second}))
 	Expect(err).NotTo(HaveOccurred())
+}
+
+func expectRecordedEvent(recorder *record.FakeRecorder, reason string) {
+	Eventually(func() bool {
+		select {
+		case event := <-recorder.Events:
+			return strings.Contains(event, reason)
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond).Should(BeTrue(), "expected event %s", reason)
+}
+
+func expectNoRecordedEvent(recorder *record.FakeRecorder, reason string) {
+	Consistently(func() bool {
+		select {
+		case event := <-recorder.Events:
+			return strings.Contains(event, reason)
+		default:
+			return false
+		}
+	}, 100*time.Millisecond, 10*time.Millisecond).Should(BeFalse(), "did not expect event %s", reason)
+}
+
+func drainRecordedEvents(recorder *record.FakeRecorder) {
+	for {
+		select {
+		case <-recorder.Events:
+		default:
+			return
+		}
+	}
 }
 
 type dnsCreateErrorClient struct {

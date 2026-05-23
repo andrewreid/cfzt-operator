@@ -769,7 +769,7 @@ The release workflow uses `GITHUB_TOKEN` with `packages: write`; CI and live-smo
   - `cfzt_cloudflare_api_duration_seconds{endpoint}`
   - `cfzt_resource_ready{kind, namespace}` (gauge; intentionally no `name` label — avoid cardinality blow-up)
 - **Logs** (logr/zap, structured). Every line carries `controller`; where relevant also `namespace`, `name`, `tunnelId`, `hostname`. Log level from `--zap-log-level` (default `info`).
-- **Events**: emit Kubernetes Events for state transitions: `CreatedTunnel`, `CreatedAccessApp`, `CreatedAccessPolicy`, `UpdatedAccessPolicy`, `HostnameConflict`, `ForeignTunnel`, `TokenRotated`, `BlockedByExposures`, `CreatedRoute`, `DeletedRoute`, `ForeignRoute`, `BlockedByRoutes`.
+- **Events**: emit Kubernetes Events for state transitions: `CreatedTunnel`, `CreatedAccessApp`, `CreatedDNSRecord`, `UpdatedDNSRecord`, `DeletedDNSRecord`, `CreatedAccessPolicy`, `UpdatedAccessPolicy`, `HostnameConflict`, `ForeignTunnel`, `TokenRotated`, `BlockedByExposures`, `CreatedRoute`, `DeletedRoute`, `ForeignRoute`, `BlockedByRoutes`.
 
 ## Suggested package layout
 

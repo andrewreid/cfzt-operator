@@ -55,7 +55,8 @@ Completed on 2026-05-19:
 - Slice 2 subtasks 1-10: `CloudflareExposure` API + CRD validation, deterministic
   `internal/tunnelconfig` builder, Cloudflare configurations / Access / DNS /
   zones interfaces with fake + real SDK wiring, Tunnel-owned tunnel-config doc
-  writes and route hashes, Exposure Access/DNS/status/finalizer paths, D20
+  writes and route hashes, Exposure Access/DNS/status/finalizer paths including
+  DNS create/update/delete events, D20
   cross-controller watches, hostname-conflict and foreign-resource guards,
   tunnel `BlockedByExposures`, external-origin coverage, regenerated CRDs,
   and Helm CRD sync. Tests added for CRD validation, fake CF resources, builder
@@ -374,8 +375,8 @@ Per `spec.md ## Implementation slices ### Slice 2`. Outcome: `CloudflareExposure
 
 6. **DNS reconcile path.**
    - Files: extend Exposure controller; reuse `internal/cloudflare/dns.go` and `zones.go`.
-   - Implements: D2 (`dns.manage` opt-out emits zero records and zero annotations), `spec.md ## DNS management`, ownership tagging on DNS record comment.
-   - Tests: `TestExposureDNSManagedOff`, `TestExposureDNSCreatesProxiedCNAME`, `TestExposureDNSForeignRecordConflict`.
+   - Implements: D2 (`dns.manage` opt-out emits zero records and zero annotations), `spec.md ## DNS management`, ownership tagging on DNS record comment, and Kubernetes Events for DNS create/update/delete mutations.
+   - Tests: `TestExposureDNSManagedOff`, `TestExposureDNSCreatesProxiedCNAME`, `TestExposureDNSForeignRecordConflict`, `TestExposureDNSCreateEventNoDuplicate`, `TestExposureDNSUpdateEvent`, `TestExposureDNSManageToggleOffDeletesOwnedRecord`, `TestExposureFinalizer`.
 
 7. **Cross-controller watches (D20).**
    - Files: extend both controllers' `SetupWithManager`.

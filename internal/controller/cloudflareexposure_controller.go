@@ -170,7 +170,7 @@ func (r *CloudflareExposureReconciler) reconcileExposureAccess(ctx context.Conte
 
 func (r *CloudflareExposureReconciler) reconcileExposureDNS(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, tunnel *cfztv1alpha1.CloudflareTunnel, cfClient cloudflare.Client, status *cfztv1alpha1.ExposureCloudflareStatus) (ctrl.Result, bool, error) {
 	if tunnel.Spec.Dns.Manage {
-		record, err := r.reconcileDNS(ctx, exposure, tunnel, cfClient)
+		record, action, err := r.reconcileDNS(ctx, exposure, tunnel, cfClient)
 		if err != nil {
 			if errors.Is(err, errHostnameConflict) {
 				r.Recorder.Eventf(exposure, corev1.EventTypeWarning, EventHostnameConflict, "DNS hostname conflict for %s", exposure.Spec.Hostname)
@@ -184,14 +184,32 @@ func (r *CloudflareExposureReconciler) reconcileExposureDNS(ctx context.Context,
 			return ctrl.Result{}, true, r.setExposureStatusAndBackoff(ctx, exposure, *status, ReasonDNSWriteFailed, err.Error())
 		}
 		status.DnsRecordId = record.ID
+		switch action {
+		case dnsReconcileCreated:
+			r.Recorder.Eventf(exposure, corev1.EventTypeNormal, EventCreatedDNSRecord, "Created Cloudflare DNS CNAME record %s for %s -> %s", record.ID, exposure.Spec.Hostname, record.Content)
+		case dnsReconcileUpdated:
+			r.Recorder.Eventf(exposure, corev1.EventTypeNormal, EventUpdatedDNSRecord, "Updated Cloudflare DNS CNAME record %s for %s -> %s", record.ID, exposure.Spec.Hostname, record.Content)
+		}
 		return ctrl.Result{}, false, nil
 	}
-	if err := r.deleteOwnedDNSIfPresent(ctx, exposure, cfClient); err != nil {
+	deleted, err := r.deleteOwnedDNSIfPresent(ctx, exposure, cfClient)
+	if err != nil {
 		return ctrl.Result{}, true, err
+	}
+	if deleted {
+		r.Recorder.Eventf(exposure, corev1.EventTypeNormal, EventDeletedDNSRecord, "Deleted Cloudflare DNS CNAME record %s for %s", status.DnsRecordId, exposure.Spec.Hostname)
 	}
 	status.DnsRecordId = ""
 	return ctrl.Result{}, false, nil
 }
+
+type dnsReconcileAction string
+
+const (
+	dnsReconcileUnchanged dnsReconcileAction = "unchanged"
+	dnsReconcileCreated   dnsReconcileAction = "created"
+	dnsReconcileUpdated   dnsReconcileAction = "updated"
+)
 
 var (
 	errHostnameConflict = errors.New("hostname conflict")
@@ -350,10 +368,10 @@ func ensureOwnerReference(exposure *cfztv1alpha1.CloudflareExposure, apiVersion,
 	exposure.OwnerReferences = append(refs, ref)
 }
 
-func (r *CloudflareExposureReconciler) reconcileDNS(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, tunnel *cfztv1alpha1.CloudflareTunnel, cfClient cloudflare.Client) (*cloudflare.DNSRecord, error) {
+func (r *CloudflareExposureReconciler) reconcileDNS(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, tunnel *cfztv1alpha1.CloudflareTunnel, cfClient cloudflare.Client) (*cloudflare.DNSRecord, dnsReconcileAction, error) {
 	zone, err := cfClient.Zones().Resolve(ctx, exposure.Spec.Hostname)
 	if err != nil {
-		return nil, err
+		return nil, dnsReconcileUnchanged, err
 	}
 	want := cloudflare.DNSRecordInput{
 		ZoneID:  zone.ID,
@@ -365,13 +383,13 @@ func (r *CloudflareExposureReconciler) reconcileDNS(ctx context.Context, exposur
 	}
 	records, err := cfClient.DNSRecords().List(ctx, zone.ID, exposure.Spec.Hostname, "CNAME")
 	if err != nil {
-		return nil, err
+		return nil, dnsReconcileUnchanged, err
 	}
 	owner := ownership.From(exposure.UID)
 	var owned *cloudflare.DNSRecord
 	for _, record := range records {
 		if !owner.MatchesComment(record.Comment) {
-			return nil, fmt.Errorf("%w: DNS record %s for hostname %s", errHostnameConflict, record.ID, exposure.Spec.Hostname)
+			return nil, dnsReconcileUnchanged, fmt.Errorf("%w: DNS record %s for hostname %s", errHostnameConflict, record.ID, exposure.Spec.Hostname)
 		}
 	}
 	for i := range records {
@@ -383,11 +401,13 @@ func (r *CloudflareExposureReconciler) reconcileDNS(ctx context.Context, exposur
 	if owned != nil {
 		if owned.Content == want.Content && owned.Proxied == want.Proxied && owned.Comment == want.Comment {
 			copy := *owned
-			return &copy, nil
+			return &copy, dnsReconcileUnchanged, nil
 		}
-		return cfClient.DNSRecords().Update(ctx, owned.ID, want)
+		record, err := cfClient.DNSRecords().Update(ctx, owned.ID, want)
+		return record, dnsReconcileUpdated, err
 	}
-	return cfClient.DNSRecords().Create(ctx, want)
+	record, err := cfClient.DNSRecords().Create(ctx, want)
+	return record, dnsReconcileCreated, err
 }
 
 func (r *CloudflareExposureReconciler) reconcileDelete(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure) (ctrl.Result, error) {
@@ -406,11 +426,15 @@ func (r *CloudflareExposureReconciler) reconcileDelete(ctx context.Context, expo
 	if err != nil {
 		return r.setExposureStatusAndRequeue(ctx, exposure, exposure.Status.Cloudflare, ReasonCredentialsMissing, err.Error())
 	}
-	if err := r.deleteOwnedDNSIfPresent(ctx, exposure, cfClient); err != nil {
+	deletedDNS, err := r.deleteOwnedDNSIfPresent(ctx, exposure, cfClient)
+	if err != nil {
 		if errors.Is(err, errForeignResource) {
 			return r.setExposureStatusAndRequeue(ctx, exposure, exposure.Status.Cloudflare, ReasonForeignResource, "DNS record is not owned by this CloudflareExposure")
 		}
 		return ctrl.Result{}, err
+	}
+	if deletedDNS {
+		r.Recorder.Eventf(exposure, corev1.EventTypeNormal, EventDeletedDNSRecord, "Deleted Cloudflare DNS CNAME record %s for %s", exposure.Status.Cloudflare.DnsRecordId, exposure.Spec.Hostname)
 	}
 	if err := r.deleteOwnedAccessIfPresent(ctx, exposure, cfClient); err != nil {
 		if errors.Is(err, errForeignResource) {
@@ -450,20 +474,20 @@ func (r *CloudflareExposureReconciler) deleteOwnedAccessIfPresent(ctx context.Co
 	return nil
 }
 
-func (r *CloudflareExposureReconciler) deleteOwnedDNSIfPresent(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, cfClient cloudflare.Client) error {
+func (r *CloudflareExposureReconciler) deleteOwnedDNSIfPresent(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, cfClient cloudflare.Client) (bool, error) {
 	if exposure.Status.Cloudflare.DnsRecordId == "" {
-		return nil
+		return false, nil
 	}
 	zone, err := cfClient.Zones().Resolve(ctx, exposure.Spec.Hostname)
 	if err != nil {
 		if errors.Is(err, cloudflare.ErrNotFound) {
-			return nil
+			return false, nil
 		}
-		return err
+		return false, err
 	}
 	records, err := cfClient.DNSRecords().List(ctx, zone.ID, exposure.Spec.Hostname, "CNAME")
 	if err != nil {
-		return err
+		return false, err
 	}
 	owner := ownership.From(exposure.UID)
 	for _, record := range records {
@@ -471,13 +495,14 @@ func (r *CloudflareExposureReconciler) deleteOwnedDNSIfPresent(ctx context.Conte
 			continue
 		}
 		if !owner.MatchesComment(record.Comment) {
-			return errForeignResource
+			return false, errForeignResource
 		}
 		if err := cfClient.DNSRecords().Delete(ctx, zone.ID, record.ID); err != nil && !errors.Is(err, cloudflare.ErrNotFound) {
-			return err
+			return false, err
 		}
+		return true, nil
 	}
-	return nil
+	return false, nil
 }
 
 func (r *CloudflareExposureReconciler) setExposureStatus(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, cfStatus cfztv1alpha1.ExposureCloudflareStatus, ready bool, reason, message string) error {
