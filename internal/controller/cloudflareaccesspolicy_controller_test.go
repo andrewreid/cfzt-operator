@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	cfztv1alpha1 "github.com/andrewreid/cfzt-operator/api/v1alpha1"
@@ -40,6 +41,7 @@ var _ = Describe("CloudflareAccessPolicy Controller", func() {
 		ctx        context.Context
 		fakeCF     *cloudflare.FakeClient
 		reconciler *CloudflareAccessPolicyReconciler
+		recorder   *record.FakeRecorder
 	)
 
 	BeforeEach(func() {
@@ -47,12 +49,13 @@ var _ = Describe("CloudflareAccessPolicy Controller", func() {
 		ensureNamespace(ctx, credsNamespace)
 		ensureNamespace(ctx, exposureTestNamespace)
 		fakeCF = cloudflare.NewFake()
+		recorder = record.NewFakeRecorder(1024)
 		reconciler = &CloudflareAccessPolicyReconciler{
 			Base: Base{
 				Client:              indexedClient,
 				Scheme:              indexedClient.Scheme(),
 				NewCloudflareClient: newFakeCloudflareClient(indexedClient, fakeCF),
-				Recorder:            newTestRecorder(),
+				Recorder:            recorder,
 			},
 		}
 		createCredentials(ctx)
@@ -263,8 +266,10 @@ var _ = Describe("CloudflareAccessPolicy Controller", func() {
 		Expect(k8sClient.Delete(ctx, current)).To(Succeed())
 		reconcileAccessPolicy(ctx, reconciler, current.Name)
 		Expect(k8sClient.Delete(ctx, ref)).To(Succeed())
+		drainRecordedEvents(recorder)
 
 		reconcileAccessPolicy(ctx, reconciler, current.Name)
+		expectRecordedEvent(recorder, EventDeletedAccessPolicy)
 
 		Eventually(func(g Gomega) {
 			err := k8sClient.Get(ctx, types.NamespacedName{Name: policy.Name}, &cfztv1alpha1.CloudflareAccessPolicy{})

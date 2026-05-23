@@ -100,7 +100,7 @@ func (r *CloudflareTunnelRouteReconciler) Reconcile(ctx context.Context, req ctr
 		VirtualNetworkID: route.Spec.VirtualNetworkId,
 		Comment:          routeOwnershipComment(&route),
 	}
-	cfRoute, created, err := r.reconcileCloudflareRoute(ctx, &route, cfClient, desired)
+	cfRoute, action, err := r.reconcileCloudflareRoute(ctx, &route, cfClient, desired)
 	if err != nil {
 		if errors.Is(err, errForeignRoute) {
 			r.Recorder.Eventf(&route, corev1.EventTypeWarning, EventForeignRoute, "Cloudflare tunnel route already exists without local ownership record")
@@ -111,8 +111,11 @@ func (r *CloudflareTunnelRouteReconciler) Reconcile(ctx context.Context, req ctr
 		}
 		return ctrl.Result{}, fmt.Errorf("%s: %w", ReasonRouteWriteFailed, err)
 	}
-	if created {
+	switch action {
+	case routeReconcileCreated:
 		r.Recorder.Eventf(&route, corev1.EventTypeNormal, EventCreatedRoute, "Created Cloudflare tunnel route %s", cfRoute.ID)
+	case routeReconcileUpdated:
+		r.Recorder.Eventf(&route, corev1.EventTypeNormal, EventUpdatedRoute, "Updated Cloudflare tunnel route %s", cfRoute.ID)
 	}
 
 	log.V(1).Info("CloudflareTunnelRoute reconciled", "routeID", cfRoute.ID)
@@ -175,24 +178,32 @@ func (r *CloudflareTunnelRouteReconciler) referencedTunnel(ctx context.Context, 
 
 var errForeignRoute = errors.New("foreign route")
 
-func (r *CloudflareTunnelRouteReconciler) reconcileCloudflareRoute(ctx context.Context, route *cfztv1alpha1.CloudflareTunnelRoute, cfClient cloudflare.Client, desired cloudflare.TunnelRouteInput) (*cloudflare.TunnelRoute, bool, error) {
+type routeReconcileAction string
+
+const (
+	routeReconcileUnchanged routeReconcileAction = "unchanged"
+	routeReconcileCreated   routeReconcileAction = "created"
+	routeReconcileUpdated   routeReconcileAction = "updated"
+)
+
+func (r *CloudflareTunnelRouteReconciler) reconcileCloudflareRoute(ctx context.Context, route *cfztv1alpha1.CloudflareTunnelRoute, cfClient cloudflare.Client, desired cloudflare.TunnelRouteInput) (*cloudflare.TunnelRoute, routeReconcileAction, error) {
 	if route.Status.RouteId != "" {
 		cfRoute, err := cfClient.TunnelRoutes().Get(ctx, route.Status.RouteId)
 		if err != nil && !errors.Is(err, cloudflare.ErrNotFound) {
-			return nil, false, err
+			return nil, routeReconcileUnchanged, err
 		}
 		if err == nil {
 			if !ownership.From(route.UID).MatchesComment(cfRoute.Comment) {
-				return nil, false, errForeignRoute
+				return nil, routeReconcileUnchanged, errForeignRoute
 			}
 			if tunnelRouteMatches(*cfRoute, desired) {
-				return cfRoute, false, nil
+				return cfRoute, routeReconcileUnchanged, nil
 			}
 			if err := r.preflightRouteTarget(ctx, cfClient, desired, cfRoute.ID); err != nil {
-				return nil, false, err
+				return nil, routeReconcileUnchanged, err
 			}
 			updated, err := cfClient.TunnelRoutes().Edit(ctx, cfRoute.ID, desired)
-			return updated, false, err
+			return updated, routeReconcileUpdated, err
 		}
 	}
 
@@ -201,7 +212,7 @@ func (r *CloudflareTunnelRouteReconciler) reconcileCloudflareRoute(ctx context.C
 		VirtualNetworkID: desired.VirtualNetworkID,
 	})
 	if err != nil {
-		return nil, false, err
+		return nil, routeReconcileUnchanged, err
 	}
 	var owned *cloudflare.TunnelRoute
 	for i := range existing {
@@ -210,17 +221,17 @@ func (r *CloudflareTunnelRouteReconciler) reconcileCloudflareRoute(ctx context.C
 			owned = &copy
 			continue
 		}
-		return nil, false, errForeignRoute
+		return nil, routeReconcileUnchanged, errForeignRoute
 	}
 	if owned != nil {
 		if tunnelRouteMatches(*owned, desired) {
-			return owned, false, nil
+			return owned, routeReconcileUnchanged, nil
 		}
 		updated, err := cfClient.TunnelRoutes().Edit(ctx, owned.ID, desired)
-		return updated, false, err
+		return updated, routeReconcileUpdated, err
 	}
 	created, err := cfClient.TunnelRoutes().Create(ctx, desired)
-	return created, true, err
+	return created, routeReconcileCreated, err
 }
 
 func (r *CloudflareTunnelRouteReconciler) preflightRouteTarget(ctx context.Context, cfClient cloudflare.Client, desired cloudflare.TunnelRouteInput, allowedRouteID string) error {

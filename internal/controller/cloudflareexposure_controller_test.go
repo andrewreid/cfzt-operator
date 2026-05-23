@@ -3,7 +3,6 @@ package controller
 import (
 	"context"
 	"errors"
-	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -39,6 +38,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		tunnelReconciler    *CloudflareTunnelReconciler
 		exposureReconciler  *CloudflareExposureReconciler
 		policyReconciler    *CloudflareAccessPolicyReconciler
+		tunnelRecorder      *record.FakeRecorder
 		exposureRecorder    *record.FakeRecorder
 		defaultPolicyUUID   = "00000000-0000-4000-8000-000000000001"
 		defaultTunnelName   = "homelab"
@@ -51,13 +51,14 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		ensureNamespace(ctx, namespace)
 		fakeCF = cloudflare.NewFake()
 		fakeCF.AddZone("zone-example", "example.com")
+		tunnelRecorder = record.NewFakeRecorder(1024)
 		exposureRecorder = record.NewFakeRecorder(1024)
 		tunnelReconciler = &CloudflareTunnelReconciler{
 			Base: Base{
 				Client:              indexedClient,
 				Scheme:              indexedClient.Scheme(),
 				NewCloudflareClient: newFakeCloudflareClient(indexedClient, fakeCF),
-				Recorder:            newTestRecorder(),
+				Recorder:            tunnelRecorder,
 			},
 		}
 		exposureReconciler = &CloudflareExposureReconciler{
@@ -123,12 +124,14 @@ var _ = Describe("CloudflareExposure Controller", func() {
 
 	It("TestTunnelConfigUpdateSkippedWhenUnchanged", func() {
 		tunnel := readyTunnel(ctx, tunnelReconciler, "skip-config", "skip-config")
+		drainRecordedEvents(tunnelRecorder)
 		exposure := createExposure(ctx, "skip-config-app", tunnel.Name, "skip.example.com", false)
 		reconcileExposure(ctx, exposureReconciler, exposure)
 		cfTunnel := fetchTunnel(ctx, tunnel.Name)
 		before := fakeCF.ConfigurationUpdateCalls(cfTunnel.Status.TunnelId)
 
 		reconcileTunnel(ctx, tunnelReconciler, tunnel.Name)
+		expectRecordedEvent(tunnelRecorder, EventUpdatedTunnelConfig)
 
 		afterWrite := fakeCF.ConfigurationUpdateCalls(cfTunnel.Status.TunnelId)
 		Expect(afterWrite).To(Equal(before + 1))
@@ -137,6 +140,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		reconcileTunnel(ctx, tunnelReconciler, tunnel.Name)
 
 		Expect(fakeCF.ConfigurationUpdateCalls(cfTunnel.Status.TunnelId)).To(Equal(afterWrite))
+		expectNoRecordedEvent(tunnelRecorder, EventUpdatedTunnelConfig)
 	})
 
 	It("TestTunnelConfigUpdateOnDrift", func() {
@@ -236,9 +240,11 @@ var _ = Describe("CloudflareExposure Controller", func() {
 
 		current := fetchExposure(ctx, exposure.Name)
 		Expect(current.Status.Cloudflare.AccessApplicationId).NotTo(BeEmpty())
+		drainRecordedEvents(exposureRecorder)
 		current.Spec.Access.Enabled = false
 		Expect(k8sClient.Update(ctx, current)).To(Succeed())
 		reconcileExposure(ctx, exposureReconciler, current)
+		expectRecordedEvent(exposureRecorder, EventDeletedAccessApp)
 
 		updated := fetchExposure(ctx, exposure.Name)
 		Expect(updated.Status.Cloudflare.AccessApplicationId).To(BeEmpty())
@@ -526,12 +532,14 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		exposure := createExposure(ctx, "policy-drift", tunnel.Name, "policy-drift.example.com", true)
 
 		reconcileExposure(ctx, exposureReconciler, exposure)
+		drainRecordedEvents(exposureRecorder)
 		apps, err := fakeCF.AccessApplications().List(ctx, exposure.Spec.Hostname)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(apps).To(HaveLen(1))
 		Expect(fakeCF.SetAccessApplicationPolicyUUIDs(apps[0].ID, []string{defaultPolicyUUID, "foreign-policy"})).To(Succeed())
 
 		reconcileExposure(ctx, exposureReconciler, exposure)
+		expectRecordedEvent(exposureRecorder, EventUpdatedAccessApp)
 
 		apps, err = fakeCF.AccessApplications().List(ctx, exposure.Spec.Hostname)
 		Expect(err).NotTo(HaveOccurred())
@@ -847,38 +855,6 @@ func reconcileExposureExpectRequeueAfter30(ctx context.Context, reconciler *Clou
 	result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: exposure.Namespace, Name: exposure.Name}})
 	Expect(result).To(Equal(reconcile.Result{RequeueAfter: 30 * time.Second}))
 	Expect(err).NotTo(HaveOccurred())
-}
-
-func expectRecordedEvent(recorder *record.FakeRecorder, reason string) {
-	Eventually(func() bool {
-		select {
-		case event := <-recorder.Events:
-			return strings.Contains(event, reason)
-		default:
-			return false
-		}
-	}, time.Second, 10*time.Millisecond).Should(BeTrue(), "expected event %s", reason)
-}
-
-func expectNoRecordedEvent(recorder *record.FakeRecorder, reason string) {
-	Consistently(func() bool {
-		select {
-		case event := <-recorder.Events:
-			return strings.Contains(event, reason)
-		default:
-			return false
-		}
-	}, 100*time.Millisecond, 10*time.Millisecond).Should(BeFalse(), "did not expect event %s", reason)
-}
-
-func drainRecordedEvents(recorder *record.FakeRecorder) {
-	for {
-		select {
-		case <-recorder.Events:
-		default:
-			return
-		}
-	}
 }
 
 type dnsCreateErrorClient struct {

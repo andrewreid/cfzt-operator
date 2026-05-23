@@ -20,6 +20,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -115,7 +116,43 @@ type indexedListClient struct {
 }
 
 func newTestRecorder() record.EventRecorder {
+	return newTestFakeRecorder()
+}
+
+func newTestFakeRecorder() *record.FakeRecorder {
 	return record.NewFakeRecorder(1024)
+}
+
+func expectRecordedEvent(recorder *record.FakeRecorder, reason string) {
+	Eventually(func() bool {
+		select {
+		case event := <-recorder.Events:
+			return strings.Contains(event, reason)
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond).Should(BeTrue(), "expected event %s", reason)
+}
+
+func expectNoRecordedEvent(recorder *record.FakeRecorder, reason string) {
+	Consistently(func() bool {
+		select {
+		case event := <-recorder.Events:
+			return strings.Contains(event, reason)
+		default:
+			return false
+		}
+	}, 100*time.Millisecond, 10*time.Millisecond).Should(BeFalse(), "did not expect event %s", reason)
+}
+
+func drainRecordedEvents(recorder *record.FakeRecorder) {
+	for {
+		select {
+		case <-recorder.Events:
+		default:
+			return
+		}
+	}
 }
 
 func newFakeCloudflareClient(reader client.Reader, fakeCF *cloudflare.FakeClient) func(context.Context, CredentialsRef) (cloudflare.Client, error) {

@@ -9,6 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	cfztv1alpha1 "github.com/andrewreid/cfzt-operator/api/v1alpha1"
@@ -21,6 +22,7 @@ var _ = Describe("CloudflareTunnelRoute Controller", func() {
 		ctx        context.Context
 		fakeCF     *cloudflare.FakeClient
 		reconciler *CloudflareTunnelRouteReconciler
+		recorder   *record.FakeRecorder
 	)
 
 	BeforeEach(func() {
@@ -28,12 +30,13 @@ var _ = Describe("CloudflareTunnelRoute Controller", func() {
 		ensureNamespace(ctx, "cfzt-system")
 		createCredentials(ctx)
 		fakeCF = cloudflare.NewFake()
+		recorder = record.NewFakeRecorder(1024)
 		reconciler = &CloudflareTunnelRouteReconciler{
 			Base: Base{
 				Client:              indexedClient,
 				Scheme:              indexedClient.Scheme(),
 				NewCloudflareClient: newFakeCloudflareClient(indexedClient, fakeCF),
-				Recorder:            newTestRecorder(),
+				Recorder:            recorder,
 			},
 		}
 	})
@@ -110,10 +113,12 @@ var _ = Describe("CloudflareTunnelRoute Controller", func() {
 		reconcileRoute(ctx, reconciler, route.Name)
 		ready := fetchTunnelRoute(ctx, route.Name)
 		routeID := ready.Status.RouteId
+		drainRecordedEvents(recorder)
 
 		ready.Spec.Network = "172.16.5.0/24"
 		Expect(k8sClient.Update(ctx, ready)).To(Succeed())
 		reconcileRoute(ctx, reconciler, route.Name)
+		expectRecordedEvent(recorder, EventUpdatedRoute)
 
 		updated := fetchTunnelRoute(ctx, route.Name)
 		Expect(updated.Status.RouteId).To(Equal(routeID))

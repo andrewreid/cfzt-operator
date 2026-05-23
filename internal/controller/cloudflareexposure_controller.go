@@ -133,7 +133,7 @@ func (r *CloudflareExposureReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 func (r *CloudflareExposureReconciler) reconcileExposureAccess(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, cfClient cloudflare.Client, status *cfztv1alpha1.ExposureCloudflareStatus) (ctrl.Result, bool, error) {
 	if exposure.Spec.Access.Enabled {
-		app, created, err := r.reconcileAccess(ctx, exposure, cfClient)
+		app, action, err := r.reconcileAccess(ctx, exposure, cfClient)
 		if err != nil {
 			if errors.Is(err, errHostnameConflict) {
 				r.Recorder.Eventf(exposure, corev1.EventTypeWarning, EventHostnameConflict, "Access application hostname conflict for %s", exposure.Spec.Hostname)
@@ -156,13 +156,20 @@ func (r *CloudflareExposureReconciler) reconcileExposureAccess(ctx context.Conte
 			return ctrl.Result{}, true, err
 		}
 		status.AccessApplicationId = app.ID
-		if created {
+		switch action {
+		case accessApplicationReconcileCreated:
 			r.Recorder.Eventf(exposure, corev1.EventTypeNormal, EventCreatedAccessApp, "Created Cloudflare Access application %s", app.ID)
+		case accessApplicationReconcileUpdated:
+			r.Recorder.Eventf(exposure, corev1.EventTypeNormal, EventUpdatedAccessApp, "Updated Cloudflare Access application %s", app.ID)
 		}
 		return ctrl.Result{}, false, nil
 	}
-	if err := r.deleteOwnedAccessIfPresent(ctx, exposure, cfClient); err != nil {
+	deleted, err := r.deleteOwnedAccessIfPresent(ctx, exposure, cfClient)
+	if err != nil {
 		return ctrl.Result{}, true, err
+	}
+	if deleted {
+		r.Recorder.Eventf(exposure, corev1.EventTypeNormal, EventDeletedAccessApp, "Deleted Cloudflare Access application %s for %s", status.AccessApplicationId, exposure.Spec.Hostname)
 	}
 	status.AccessApplicationId = ""
 	return ctrl.Result{}, false, nil
@@ -218,14 +225,22 @@ var (
 	errPolicyNotReady   = errors.New("policy not ready")
 )
 
-func (r *CloudflareExposureReconciler) reconcileAccess(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, cfClient cloudflare.Client) (*cloudflare.AccessApplication, bool, error) {
+type accessApplicationReconcileAction string
+
+const (
+	accessApplicationReconcileUnchanged accessApplicationReconcileAction = "unchanged"
+	accessApplicationReconcileCreated   accessApplicationReconcileAction = "created"
+	accessApplicationReconcileUpdated   accessApplicationReconcileAction = "updated"
+)
+
+func (r *CloudflareExposureReconciler) reconcileAccess(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, cfClient cloudflare.Client) (*cloudflare.AccessApplication, accessApplicationReconcileAction, error) {
 	apps, err := cfClient.AccessApplications().List(ctx, exposure.Spec.Hostname)
 	if err != nil {
-		return nil, false, err
+		return nil, accessApplicationReconcileUnchanged, err
 	}
 	policyUUID, err := r.resolveAccessPolicyUUID(ctx, exposure)
 	if err != nil {
-		return nil, false, err
+		return nil, accessApplicationReconcileUnchanged, err
 	}
 	want := cloudflare.AccessApplicationInput{
 		Name:       naming.AccessAppName(exposure.Spec.DisplayName, exposure.Name),
@@ -237,7 +252,7 @@ func (r *CloudflareExposureReconciler) reconcileAccess(ctx context.Context, expo
 	var owned *cloudflare.AccessApplication
 	for _, app := range apps {
 		if !owner.MatchesTags(app.Tags) {
-			return nil, false, fmt.Errorf("%w: Access application %s for hostname %s", errHostnameConflict, app.ID, exposure.Spec.Hostname)
+			return nil, accessApplicationReconcileUnchanged, fmt.Errorf("%w: Access application %s for hostname %s", errHostnameConflict, app.ID, exposure.Spec.Hostname)
 		}
 	}
 	for i := range apps {
@@ -249,13 +264,13 @@ func (r *CloudflareExposureReconciler) reconcileAccess(ctx context.Context, expo
 	if owned != nil {
 		if owned.Name == want.Name && accessApplicationPoliciesMatch(*owned, want.PolicyUUID) && sameStringSet(owned.Tags, want.Tags) {
 			copy := *owned
-			return &copy, false, nil
+			return &copy, accessApplicationReconcileUnchanged, nil
 		}
 		updated, err := cfClient.AccessApplications().Update(ctx, owned.ID, want)
-		return updated, false, err
+		return updated, accessApplicationReconcileUpdated, err
 	}
 	app, err := cfClient.AccessApplications().Create(ctx, want)
-	return app, true, err
+	return app, accessApplicationReconcileCreated, err
 }
 
 func (r *CloudflareExposureReconciler) resolveAccessPolicyUUID(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure) (string, error) {
@@ -436,42 +451,51 @@ func (r *CloudflareExposureReconciler) reconcileDelete(ctx context.Context, expo
 	if deletedDNS {
 		r.Recorder.Eventf(exposure, corev1.EventTypeNormal, EventDeletedDNSRecord, "Deleted Cloudflare DNS CNAME record %s for %s", exposure.Status.Cloudflare.DnsRecordId, exposure.Spec.Hostname)
 	}
-	if err := r.deleteOwnedAccessIfPresent(ctx, exposure, cfClient); err != nil {
+	deletedAccess, err := r.deleteOwnedAccessIfPresent(ctx, exposure, cfClient)
+	if err != nil {
 		if errors.Is(err, errForeignResource) {
 			return r.setExposureStatusAndRequeue(ctx, exposure, exposure.Status.Cloudflare, ReasonForeignResource, "Access application is not owned by this CloudflareExposure")
 		}
 		return ctrl.Result{}, err
 	}
+	if deletedAccess {
+		r.Recorder.Eventf(exposure, corev1.EventTypeNormal, EventDeletedAccessApp, "Deleted Cloudflare Access application %s for %s", exposure.Status.Cloudflare.AccessApplicationId, exposure.Spec.Hostname)
+	}
 	controllerutil.RemoveFinalizer(exposure, naming.Finalizer)
 	return ctrl.Result{}, r.Update(ctx, exposure)
 }
 
-func (r *CloudflareExposureReconciler) deleteOwnedAccessIfPresent(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, cfClient cloudflare.Client) error {
+func (r *CloudflareExposureReconciler) deleteOwnedAccessIfPresent(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, cfClient cloudflare.Client) (bool, error) {
 	if exposure.Status.Cloudflare.AccessApplicationId == "" {
-		return nil
+		return false, nil
 	}
 	apps, err := cfClient.AccessApplications().List(ctx, exposure.Spec.Hostname)
 	if err != nil {
-		return err
+		return false, err
 	}
 	owner := ownership.From(exposure.UID)
+	deleted := false
 	for _, app := range apps {
 		if app.ID != exposure.Status.Cloudflare.AccessApplicationId {
 			continue
 		}
 		if !owner.MatchesTags(app.Tags) {
-			return errForeignResource
+			return false, errForeignResource
 		}
-		if err := cfClient.AccessApplications().Delete(ctx, app.ID); err != nil && !errors.Is(err, cloudflare.ErrNotFound) {
-			return err
+		if err := cfClient.AccessApplications().Delete(ctx, app.ID); err != nil {
+			if errors.Is(err, cloudflare.ErrNotFound) {
+				continue
+			}
+			return false, err
 		}
+		deleted = true
 	}
 	for _, tag := range owner.Tags()[1:] {
 		if err := cfClient.AccessTags().Delete(ctx, tag); err != nil && !errors.Is(err, cloudflare.ErrNotFound) {
-			return err
+			return false, err
 		}
 	}
-	return nil
+	return deleted, nil
 }
 
 func (r *CloudflareExposureReconciler) deleteOwnedDNSIfPresent(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, cfClient cloudflare.Client) (bool, error) {
@@ -497,7 +521,10 @@ func (r *CloudflareExposureReconciler) deleteOwnedDNSIfPresent(ctx context.Conte
 		if !owner.MatchesComment(record.Comment) {
 			return false, errForeignResource
 		}
-		if err := cfClient.DNSRecords().Delete(ctx, zone.ID, record.ID); err != nil && !errors.Is(err, cloudflare.ErrNotFound) {
+		if err := cfClient.DNSRecords().Delete(ctx, zone.ID, record.ID); err != nil {
+			if errors.Is(err, cloudflare.ErrNotFound) {
+				return false, nil
+			}
 			return false, err
 		}
 		return true, nil

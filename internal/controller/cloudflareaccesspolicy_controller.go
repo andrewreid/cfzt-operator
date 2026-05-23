@@ -174,8 +174,12 @@ func (r *CloudflareAccessPolicyReconciler) reconcileDelete(ctx context.Context, 
 			setCondition(&policy.Status.Conditions, ConditionProgressing, metav1.ConditionTrue, ReasonForeignPolicy, "deletion blocked to avoid deleting a foreign Cloudflare Access policy", policy.Generation)
 			return ctrl.Result{}, r.Status().Update(ctx, policy)
 		}
-		if err := cfClient.AccessPolicies().Delete(ctx, policy.Status.PolicyId); err != nil && !errors.Is(err, cloudflare.ErrNotFound) {
+		err = cfClient.AccessPolicies().Delete(ctx, policy.Status.PolicyId)
+		if err != nil && !errors.Is(err, cloudflare.ErrNotFound) {
 			return ctrl.Result{}, err
+		}
+		if err == nil {
+			r.Recorder.Eventf(policy, corev1.EventTypeNormal, EventDeletedAccessPolicy, "Deleted Cloudflare Access policy %s", policy.Status.PolicyId)
 		}
 	}
 	controllerutil.RemoveFinalizer(policy, naming.Finalizer)

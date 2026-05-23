@@ -40,7 +40,8 @@ Completed on 2026-05-19:
   reconciler for credential resolution / ID-based D9 tunnel create-adopt /
   token Secret upsert / DaemonSet upsert, token rotation, finalizer cleanup,
   `Ready` + `Progressing` conditions, and events (`CreatedTunnel`,
-  `TokenRotated`). RBAC markers regenerated for Secrets, DaemonSets, Events.
+  `UpdatedTunnelConfig`, `DeletedTunnel`, `TokenRotated`). RBAC markers
+  regenerated for Secrets, DaemonSets, Events.
   Tunnel-owned Secrets and DaemonSets have ownerReferences and are watched by
   the Tunnel controller. DaemonSet builder sets `ClusterFirstWithHostNet` when
   `hostNetwork: true`.
@@ -148,7 +149,8 @@ Completed on 2026-05-20:
   `Reason=PolicyNotReady` when binding cannot proceed, binds the resolved UUID
   through Access application create/update, and watches AccessPolicy status
   changes to requeue referencing Exposures. Events include
-  `UpdatedAccessPolicy` and `BlockedByExposures`. Tests added/expanded:
+  `UpdatedAccessPolicy`, `DeletedAccessPolicy`, and `BlockedByExposures`.
+  Tests added/expanded:
   `TestAccessPolicyRulesHashCanonical`, `TestAccessPolicyRulesDrift`,
   `TestAccessPolicyReferencedByPopulated`,
   `TestAccessPolicyReferencedByDecrements`,
@@ -171,7 +173,8 @@ Completed on 2026-05-21:
   correction, finalizer cleanup, Tunnel deletion blocking with
   `Reason=BlockedByRoutes`, Route↔Tunnel cross-watches, and status/events
   (`TunnelNotReady`, `NetworkInvalid`, `ForeignRoute`, `RouteWriteFailed`,
-  `Reconciled`, `CreatedRoute`, `DeletedRoute`, `BlockedByRoutes`). Tests added:
+  `Reconciled`, `CreatedRoute`, `UpdatedRoute`, `DeletedRoute`,
+  `BlockedByRoutes`). Tests added:
   `TestCloudflareTunnelRouteCRDValidation`, `TestFakeRouteCreateGetDelete`,
   `TestFakeRouteListByCanonicalCIDRAndVNet`,
   `TestFakeRouteListOmitsVNetWhenUnset`, `TestFakeRouteEditIdempotent`,
@@ -370,7 +373,7 @@ Per `spec.md ## Implementation slices ### Slice 2`. Outcome: `CloudflareExposure
 
 5. **Exposure controller core: validation + Access app + policy binding.**
    - Files: `internal/controller/cloudflareexposure_controller.go`, wiring in `cmd/main.go`.
-   - Implements: `spec.md ## CRD model` (Exposure responsibilities 1–3), `## Ownership and deletion semantics` (Access app `source-uid` tag, hostname conflict guard), naming `<displayName|metadata.name>-cfzt`. D19 `MaxConcurrentReconciles=1`.
+   - Implements: `spec.md ## CRD model` (Exposure responsibilities 1–3), `## Ownership and deletion semantics` (Access app `source-uid` tag, hostname conflict guard), naming `<displayName|metadata.name>-cfzt`, and Kubernetes Events for Access app create/update/delete mutations. D19 `MaxConcurrentReconciles=1`.
    - Tests: `TestExposureCreate` (partial — Access path), `TestExposureAccessDisabled`, `TestExposureForeignResource`, `TestExposureHostnameConflict` (Access leg).
 
 6. **DNS reconcile path.**
@@ -517,7 +520,7 @@ Per `spec.md ## Implementation slices ### Slice 4` (D24). Outcome: `CloudflareAc
 
 9. **Status conditions + events.**
    - Files: extend policy controller.
-   - Implements: D8 conditions on `CloudflareAccessPolicy`; reasons `ForeignPolicy`, `PolicyNotReady`, `BlockedByExposures`, `Reconciled`. Events: `CreatedAccessPolicy`, `UpdatedAccessPolicy`, `BlockedByExposures`.
+   - Implements: D8 conditions on `CloudflareAccessPolicy`; reasons `ForeignPolicy`, `PolicyNotReady`, `BlockedByExposures`, `Reconciled`. Events: `CreatedAccessPolicy`, `UpdatedAccessPolicy`, `DeletedAccessPolicy`, `BlockedByExposures`.
    - Tests: `TestAccessPolicyConditionsTransition`.
 
 10. **RBAC + Helm chart sync.**
@@ -588,7 +591,7 @@ routes reference the tunnel (`Reason=BlockedByRoutes`).
 
 7. **Status conditions + events.**
    - Files: extend route controller; reuse `internal/controller/conditions.go`.
-   - Implements: D8 conditions on `CloudflareTunnelRoute`; reasons `TunnelNotReady`, `NetworkInvalid`, `ForeignRoute`, `RouteWriteFailed`, `Reconciled`. Events: `CreatedRoute`, `DeletedRoute`, `ForeignRoute`, `BlockedByRoutes` (emitted from tunnel controller).
+   - Implements: D8 conditions on `CloudflareTunnelRoute`; reasons `TunnelNotReady`, `NetworkInvalid`, `ForeignRoute`, `RouteWriteFailed`, `Reconciled`. Events: `CreatedRoute`, `UpdatedRoute`, `DeletedRoute`, `ForeignRoute`, `BlockedByRoutes` (emitted from tunnel controller).
    - Tests: `TestRouteConditionsTransition`.
 
 8. **Live Cloudflare smoke coverage.**

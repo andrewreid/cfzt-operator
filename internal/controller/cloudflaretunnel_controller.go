@@ -120,7 +120,8 @@ func (r *CloudflareTunnelReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		r.Recorder.Eventf(&tunnel, corev1.EventTypeNormal, EventTokenRotated, "Token checksum changed for tunnel %s", tunnel.Name)
 	}
 
-	if err := r.reconcileTunnelConfig(ctx, &tunnel, cfClient, cfTunnel.ID); err != nil {
+	configUpdated, routeCount, err := r.reconcileTunnelConfig(ctx, &tunnel, cfClient, cfTunnel.ID)
+	if err != nil {
 		if _, ok := err.(*tunnelconfig.HostnameConflictError); ok {
 			if statusErr := r.setTunnelStatus(ctx, &tunnel, cfTunnel.ID, naming.TokenSecretName(tunnel.Name), false, ReasonHostnameConflict, err.Error()); statusErr != nil {
 				return ctrl.Result{}, statusErr
@@ -128,6 +129,9 @@ func (r *CloudflareTunnelReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
 		return ctrl.Result{}, err
+	}
+	if configUpdated {
+		r.Recorder.Eventf(&tunnel, corev1.EventTypeNormal, EventUpdatedTunnelConfig, "Updated Cloudflare tunnel configuration %s with %d hostname routes", cfTunnel.ID, routeCount)
 	}
 
 	ready, err := r.daemonSetReady(ctx, &tunnel)
@@ -182,6 +186,7 @@ func (r *CloudflareTunnelReconciler) reconcileDelete(ctx context.Context, tunnel
 		}
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
+	deletedTunnel := false
 	if tunnel.Status.TunnelId != "" {
 		cfClient, err := r.CloudflareClient(ctx, credentialsRefFromTunnel(tunnel))
 		if err != nil {
@@ -203,9 +208,13 @@ func (r *CloudflareTunnelReconciler) reconcileDelete(ctx context.Context, tunnel
 		if err != nil && !errors.Is(err, cloudflare.ErrNotFound) {
 			return ctrl.Result{}, err
 		}
+		deletedTunnel = err == nil
 	}
 	if err := r.deleteNamespaced(ctx, &corev1.Secret{}, tunnel.Spec.Cloudflared.Namespace, naming.TokenSecretName(tunnel.Name)); err != nil {
 		return ctrl.Result{}, err
+	}
+	if deletedTunnel {
+		r.Recorder.Eventf(tunnel, corev1.EventTypeNormal, EventDeletedTunnel, "Deleted Cloudflare tunnel %s", tunnel.Status.TunnelId)
 	}
 	controllerutil.RemoveFinalizer(tunnel, naming.Finalizer)
 	return ctrl.Result{}, r.Update(ctx, tunnel)
@@ -240,25 +249,27 @@ func (r *CloudflareTunnelReconciler) referencingRoutes(ctx context.Context, tunn
 	return listRoutesByTunnel(ctx, r.Client, tunnelName)
 }
 
-func (r *CloudflareTunnelReconciler) reconcileTunnelConfig(ctx context.Context, tunnel *cfztv1alpha1.CloudflareTunnel, cfClient cloudflare.Client, tunnelID string) error {
+func (r *CloudflareTunnelReconciler) reconcileTunnelConfig(ctx context.Context, tunnel *cfztv1alpha1.CloudflareTunnel, cfClient cloudflare.Client, tunnelID string) (bool, int, error) {
 	exposures, err := r.referencingExposures(ctx, tunnel.Name)
 	if err != nil {
-		return err
+		return false, 0, err
 	}
 	result, err := tunnelconfig.Build(exposures)
 	if err != nil {
-		return err
+		return false, 0, err
 	}
 	ingressDocHash, err := tunnelConfigurationHash(result.Config)
 	if err != nil {
-		return err
+		return false, 0, err
 	}
+	updated := false
 	if tunnel.Status.IngressDocHash != ingressDocHash || !tunnelRoutesStatusMatches(tunnel.Status.Routes, result.Routes) {
 		if err := cfClient.Configurations().Update(ctx, tunnelID, result.Config); err != nil {
-			return err
+			return false, 0, err
 		}
+		updated = true
 	}
-	return r.setTunnelConfigStatus(ctx, tunnel, result.Routes, ingressDocHash)
+	return updated, len(result.Routes), r.setTunnelConfigStatus(ctx, tunnel, result.Routes, ingressDocHash)
 }
 
 func (r *CloudflareTunnelReconciler) deleteNamespaced(ctx context.Context, obj client.Object, namespace, name string) error {
