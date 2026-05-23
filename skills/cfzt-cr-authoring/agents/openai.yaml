@@ -1,0 +1,4 @@
+interface:
+  display_name: "CFZT CR Authoring"
+  short_description: "Create valid CFZT operator CRs"
+  default_prompt: "Use $cfzt-cr-authoring to create CFZT operator CR manifests."
