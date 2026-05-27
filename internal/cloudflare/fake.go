@@ -146,6 +146,18 @@ func (t *fakeTunnels) Create(_ context.Context, in CreateTunnelInput) (*Tunnel, 
 	return &copy, nil
 }
 
+func (t *fakeTunnels) Rename(_ context.Context, id string, in RenameTunnelInput) (*Tunnel, error) {
+	t.fc.mu.Lock()
+	defer t.fc.mu.Unlock()
+	tun, ok := t.fc.tunnels[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	tun.Name = in.Name
+	copy := *tun
+	return &copy, nil
+}
+
 func (t *fakeTunnels) List(_ context.Context, name string) ([]Tunnel, error) {
 	t.fc.mu.Lock()
 	defer t.fc.mu.Unlock()

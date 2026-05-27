@@ -194,6 +194,24 @@ func (t *realTunnels) Create(ctx context.Context, in CreateTunnelInput) (*Tunnel
 	return result, err
 }
 
+func (t *realTunnels) Rename(ctx context.Context, id string, in RenameTunnelInput) (*Tunnel, error) {
+	var result *Tunnel
+	err := t.client.withRetry(ctx, func() error {
+		resp, err := t.client.api.ZeroTrust.Tunnels.Cloudflared.Edit(ctx, id,
+			zero_trust.TunnelCloudflaredEditParams{
+				AccountID: cf.F(t.client.accountID),
+				Name:      cf.F(in.Name),
+			},
+		)
+		if err != nil {
+			return mapAPIError(err)
+		}
+		result = &Tunnel{ID: resp.ID, Name: resp.Name}
+		return nil
+	})
+	return result, err
+}
+
 func (t *realTunnels) List(ctx context.Context, name string) ([]Tunnel, error) {
 	params := zero_trust.TunnelCloudflaredListParams{
 		AccountID: cf.F(t.client.accountID),

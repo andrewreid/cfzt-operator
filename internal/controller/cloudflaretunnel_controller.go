@@ -74,6 +74,10 @@ func (r *CloudflareTunnelReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		if err := r.Update(ctx, &tunnel); err != nil {
 			return ctrl.Result{}, err
 		}
+		return ctrl.Result{}, nil
+	}
+	if len(desiredCloudflareTunnelName(&tunnel)) > 120 {
+		return ctrl.Result{}, r.setTunnelStatus(ctx, &tunnel, tunnel.Status.TunnelId, naming.TokenSecretName(tunnel.Name), false, ReasonTunnelNameInvalid, "generated Cloudflare tunnel name exceeds 120 characters; recreate the CloudflareTunnel with spec.tunnelName at most 106 characters")
 	}
 
 	cfClient, err := r.CloudflareClient(ctx, credentialsRefFromTunnel(&tunnel))
@@ -84,10 +88,10 @@ func (r *CloudflareTunnelReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
-	cfTunnel, created, err := r.reconcileCloudflareTunnel(ctx, &tunnel, cfClient)
+	cfTunnel, action, err := r.reconcileCloudflareTunnel(ctx, &tunnel, cfClient)
 	if err != nil {
-		if err == errForeignTunnel {
-			return ctrl.Result{}, r.setTunnelStatus(ctx, &tunnel, "", naming.TokenSecretName(tunnel.Name), false, ReasonForeignTunnel, "Cloudflare tunnel name already exists without local ownership record")
+		if errors.Is(err, errForeignTunnel) {
+			return ctrl.Result{}, r.setTunnelStatus(ctx, &tunnel, tunnel.Status.TunnelId, naming.TokenSecretName(tunnel.Name), false, ReasonForeignTunnel, err.Error())
 		}
 		return ctrl.Result{}, err
 	}
@@ -97,8 +101,11 @@ func (r *CloudflareTunnelReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 		tunnel.Status.TunnelId = cfTunnel.ID
 	}
-	if created {
+	switch action {
+	case tunnelActionCreated:
 		r.Recorder.Eventf(&tunnel, corev1.EventTypeNormal, EventCreatedTunnel, "Created Cloudflare tunnel %s", cfTunnel.ID)
+	case tunnelActionRecovered:
+		r.Recorder.Eventf(&tunnel, corev1.EventTypeNormal, EventRecoveredTunnel, "Recovered Cloudflare tunnel %s from generated name %s", cfTunnel.ID, cfTunnel.Name)
 	}
 
 	token, err := cfClient.Tunnels().Token(ctx, cfTunnel.ID)
@@ -199,8 +206,8 @@ func (r *CloudflareTunnelReconciler) reconcileDelete(ctx context.Context, tunnel
 		if err != nil && !errors.Is(err, cloudflare.ErrNotFound) {
 			return ctrl.Result{}, err
 		}
-		if err == nil && cfTunnel.Name != tunnel.Spec.TunnelName {
-			setCondition(&tunnel.Status.Conditions, ConditionReady, metav1.ConditionFalse, ReasonForeignTunnel, "tracked Cloudflare tunnel name does not match spec.tunnelName", tunnel.Generation)
+		if err == nil && cfTunnel.Name != desiredCloudflareTunnelName(tunnel) && cfTunnel.Name != tunnel.Spec.TunnelName {
+			setCondition(&tunnel.Status.Conditions, ConditionReady, metav1.ConditionFalse, ReasonForeignTunnel, "tracked Cloudflare tunnel name does not match desired or legacy tunnel name", tunnel.Generation)
 			setCondition(&tunnel.Status.Conditions, ConditionProgressing, metav1.ConditionTrue, ReasonForeignTunnel, "deletion blocked to avoid deleting a foreign Cloudflare tunnel", tunnel.Generation)
 			return ctrl.Result{}, r.Status().Update(ctx, tunnel)
 		}
@@ -281,34 +288,65 @@ func (r *CloudflareTunnelReconciler) deleteNamespaced(ctx context.Context, obj c
 	return nil
 }
 
-var errForeignTunnel = fmt.Errorf("foreign tunnel")
+var errForeignTunnel = errors.New("foreign tunnel")
 
-func (r *CloudflareTunnelReconciler) reconcileCloudflareTunnel(ctx context.Context, tunnel *cfztv1alpha1.CloudflareTunnel, cfClient cloudflare.Client) (*cloudflare.Tunnel, bool, error) {
+const (
+	tunnelActionNone      = ""
+	tunnelActionCreated   = "created"
+	tunnelActionRecovered = "recovered"
+)
+
+func (r *CloudflareTunnelReconciler) reconcileCloudflareTunnel(ctx context.Context, tunnel *cfztv1alpha1.CloudflareTunnel, cfClient cloudflare.Client) (*cloudflare.Tunnel, string, error) {
+	desiredName := desiredCloudflareTunnelName(tunnel)
 	if tunnel.Status.TunnelId != "" {
 		cfTunnel, err := cfClient.Tunnels().Get(ctx, tunnel.Status.TunnelId)
 		if errors.Is(err, cloudflare.ErrNotFound) {
 			tunnel.Status.TunnelId = ""
 		} else if err != nil {
-			return nil, false, err
-		} else if cfTunnel.Name != tunnel.Spec.TunnelName {
-			return nil, false, fmt.Errorf("tracked Cloudflare tunnel %s has name %q, want %q", cfTunnel.ID, cfTunnel.Name, tunnel.Spec.TunnelName)
+			return nil, tunnelActionNone, err
+		} else if cfTunnel.Name == desiredName {
+			return cfTunnel, tunnelActionNone, nil
+		} else if cfTunnel.Name == tunnel.Spec.TunnelName {
+			renamed, err := cfClient.Tunnels().Rename(ctx, cfTunnel.ID, cloudflare.RenameTunnelInput{Name: desiredName})
+			if err != nil {
+				return nil, tunnelActionNone, err
+			}
+			r.Recorder.Eventf(tunnel, corev1.EventTypeNormal, EventRenamedTunnel, "Renamed Cloudflare tunnel %s from %s to %s", renamed.ID, tunnel.Spec.TunnelName, desiredName)
+			return renamed, tunnelActionNone, nil
 		} else {
-			return cfTunnel, false, nil
+			return nil, tunnelActionNone, fmt.Errorf("%w: tracked Cloudflare tunnel %s has name %q, want %q", errForeignTunnel, cfTunnel.ID, cfTunnel.Name, desiredName)
 		}
 	}
 
-	existing, err := cfClient.Tunnels().List(ctx, tunnel.Spec.TunnelName)
+	existing, err := cfClient.Tunnels().List(ctx, desiredName)
 	if err != nil {
-		return nil, false, err
+		return nil, tunnelActionNone, err
 	}
-	if len(existing) > 0 {
-		return nil, false, errForeignTunnel
+	if len(existing) == 1 {
+		return &existing[0], tunnelActionRecovered, nil
 	}
-	cfTunnel, err := cfClient.Tunnels().Create(ctx, cloudflare.CreateTunnelInput{Name: tunnel.Spec.TunnelName, ConfigSrc: "cloudflare"})
+	if len(existing) > 1 {
+		return nil, tunnelActionNone, fmt.Errorf("%w: multiple Cloudflare tunnels named %q exist without local ownership record", errForeignTunnel, desiredName)
+	}
+
+	legacyExisting, err := cfClient.Tunnels().List(ctx, tunnel.Spec.TunnelName)
 	if err != nil {
-		return nil, false, err
+		return nil, tunnelActionNone, err
 	}
-	return cfTunnel, true, nil
+	if len(legacyExisting) > 0 {
+		return nil, tunnelActionNone, fmt.Errorf("%w: legacy Cloudflare tunnel name %q exists without local ownership record; patch status.tunnelId or delete the remote tunnel", errForeignTunnel, tunnel.Spec.TunnelName)
+	}
+
+	cfTunnel, err := cfClient.Tunnels().Create(ctx, cloudflare.CreateTunnelInput{Name: desiredName, ConfigSrc: "cloudflare"})
+	if err != nil {
+		return nil, tunnelActionNone, err
+	}
+	return cfTunnel, tunnelActionCreated, nil
+}
+
+func desiredCloudflareTunnelName(tunnel *cfztv1alpha1.CloudflareTunnel) string {
+	sum := sha256.Sum256([]byte(string(tunnel.UID)))
+	return fmt.Sprintf("%s-cfzt-%x", tunnel.Spec.TunnelName, sum[:4])
 }
 
 func (r *CloudflareTunnelReconciler) upsertTokenSecret(ctx context.Context, tunnel *cfztv1alpha1.CloudflareTunnel, token string) error {

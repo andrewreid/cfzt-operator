@@ -32,12 +32,13 @@ Completed on 2026-05-19:
 - Subtask 2: `internal/cloudflare` interface + fake (client.go, tunnels.go,
   real.go, fake.go, fake_test.go). cloudflare-go/v4 v4.6.0 added. SDK does
   not surface tunnel `comment` field — D9 amended (see spec) to track
-  ownership via `status.tunnelId` rather than CF-side tag. Real client uses a
-  shared per-token rate limiter keyed by API token hash.
+  ownership via generated tunnel name plus `status.tunnelId` rather than
+  CF-side tag. Real client uses a shared per-token rate limiter keyed by API
+  token hash.
 - Subtask 3: `internal/naming/` names + ownership tag helpers.
 - Subtasks 4–8: `internal/workload` token Secret + DaemonSet builders,
   pinned cloudflared image const, token checksum rollout annotation, tunnel
-  reconciler for credential resolution / ID-based D9 tunnel create-adopt /
+  reconciler for credential resolution / generated-name D9 tunnel create-recover /
   token Secret upsert / DaemonSet upsert, token rotation, finalizer cleanup,
   `Ready` + `Progressing` conditions, and events (`CreatedTunnel`,
   `UpdatedTunnelConfig`, `DeletedTunnel`, `TokenRotated`). RBAC markers
@@ -45,12 +46,29 @@ Completed on 2026-05-19:
   Tunnel-owned Secrets and DaemonSets have ownerReferences and are watched by
   the Tunnel controller. DaemonSet builder sets `ClusterFirstWithHostNet` when
   `hostNetwork: true`.
-  Tests added for workload builders and tunnel create/adopt/foreign
+  Tests added for workload builders and tunnel create/recover/foreign
   refusal/token rotation/finalizer/condition transitions.
 - Subtask 9: Helm CRDs synced from `config/crd/bases` into
   `charts/cfzt-operator/crds/`; chart lint and template render pass; NOTES
   credential example now includes both `accountId` and `apiToken`;
   `make test` is green.
+
+Completed on 2026-05-27:
+- Durable orphan-recovery hardening after release live-smoke exposed a
+  create-before-status crash window. `CloudflareTunnel.spec.tunnelName` is now
+  a human base name (maxLength 106); the Cloudflare-side name is generated as
+  `<spec.tunnelName>-cfzt-<hash8(metadata.uid)>`. Statusful legacy tunnels are
+  renamed in place, preserving tunnel ID, token, DNS CNAME targets, Access
+  apps, tunnel routes, and published hostname routes. Statusless generated-name
+  tunnels are recovered into `status.tunnelId`; statusless legacy unsuffixed
+  tunnels remain `Reason=ForeignTunnel` and require manual status patching or
+  cleanup. Legacy statusful CRs with a base name over 106 characters report
+  `Reason=TunnelNameInvalid` instead of attempting an over-budget generated
+  rename. `CloudflareAccessPolicy` now recovers a statusless same-name policy
+  only when the full Cloudflare policy shape exactly matches the CR; mismatches
+  remain `Reason=ForeignPolicy`. Finalizer-add reconciles now return before
+  external Cloudflare creates, and create/recovery events are emitted only
+  after status persistence.
 
 Completed on 2026-05-19:
 - Slice 2 subtasks 1-10: `CloudflareExposure` API + CRD validation, deterministic
@@ -304,8 +322,8 @@ Per `spec.md ## Implementation slices` → Slice 1. Outcome: `CloudflareTunnel` 
 
 5. **Tunnel controller reconcile loop (no Exposure dependency yet).**
    - Files: `internal/controller/cloudflaretunnel_controller.go`, wiring in `cmd/main.go`.
-   - Implements: `spec.md ## CRD model` (CloudflareTunnel responsibilities 1–5, 8), `## Ownership and deletion semantics` (D9 status-ID ownership + name collision guard → `Reason=ForeignTunnel`), `AGENTS.md ## Reconciliation Rules`. D19 `MaxConcurrentReconciles=1`.
-   - Tests: `TestTunnelCreate`, `TestTunnelAdopt`, `TestTunnelForeignTunnelRefuses`.
+   - Implements: `spec.md ## CRD model` (CloudflareTunnel responsibilities 1–5, 8), `## Ownership and deletion semantics` (D9 generated-name + status-ID ownership, generated-name orphan recovery, legacy-name guard → `Reason=ForeignTunnel`), `AGENTS.md ## Reconciliation Rules`. D19 `MaxConcurrentReconciles=1`.
+   - Tests: `TestTunnelCreate`, `TestTunnelGeneratedNameOrphanRecovery`, `TestTunnelStatusfulLegacyRenamed`, `TestTunnelForeignTunnelRefuses`.
 
 6. **Token rotation + checksum-driven rollout.**
    - Files: extend `internal/controller/cloudflaretunnel_controller.go`, `internal/workload/daemonset.go`.
@@ -332,7 +350,8 @@ Per `spec.md ## Implementation slices` → Slice 1. Outcome: `CloudflareTunnel` 
 - `kubectl apply` of a `CloudflareTunnel` against an empty Cloudflare account creates the tunnel, populates `status.tunnelId`, creates Secret `<name>-token`, creates DaemonSet `cloudflared-<name>`.
 - `Ready=True` once DaemonSet has ≥1 ready pod.
 - Reapply is a no-op.
-- envtest tests pass: `TestTunnelCreate`, `TestTunnelAdopt`, `TestTunnelTokenRotation`, `TestTunnelFinalizerNoop`.
+- Statusful legacy tunnels are renamed in place to `<spec.tunnelName>-cfzt-<hash8(metadata.uid)>`; statusless generated-name tunnels are recovered; statusless legacy-name tunnels remain `Reason=ForeignTunnel`.
+- envtest tests pass: `TestTunnelCreate`, `TestTunnelGeneratedNameOrphanRecovery`, `TestTunnelStatusfulLegacyRenamed`, `TestTunnelForeignTunnelRefuses`, `TestTunnelTokenRotation`, `TestTunnelFinalizerNoop`.
 - `ci.yaml` green.
 - `helm install` against a fresh cluster works.
 
@@ -495,8 +514,8 @@ Per `spec.md ## Implementation slices ### Slice 4` (D24). Outcome: `CloudflareAc
 
 4. **Policy controller core: credentials, ID-record reconcile, ForeignPolicy guard.**
    - Files: `internal/controller/cloudflareaccesspolicy_controller.go`, wiring in `cmd/main.go` (`MaxConcurrentReconciles=1`).
-   - Implements: `spec.md ## CRD model` (CloudflareAccessPolicy responsibilities 1–3, 8), `## Ownership and deletion semantics` policy ownership rule (mirrors D9 tunnel pattern), `Reason=ForeignPolicy` on name-collision without local ID.
-   - Tests: `TestAccessPolicyCreate`, `TestAccessPolicyForeignRefuses`.
+   - Implements: `spec.md ## CRD model` (CloudflareAccessPolicy responsibilities 1–3, 8), `## Ownership and deletion semantics` policy ownership rule, exact-match orphan recovery, `Reason=ForeignPolicy` on mismatched name-collision without local ID.
+   - Tests: `TestAccessPolicyCreate`, `TestAccessPolicyExactMatchOrphanRecovery`, `TestAccessPolicyForeignRefuses`.
 
 5. **Rule-hash drift detection + update path.**
    - Files: extend policy controller; helper `internal/controller/accesspolicy_hash.go` for canonical rules JSON → sha256.
@@ -520,7 +539,7 @@ Per `spec.md ## Implementation slices ### Slice 4` (D24). Outcome: `CloudflareAc
 
 9. **Status conditions + events.**
    - Files: extend policy controller.
-   - Implements: D8 conditions on `CloudflareAccessPolicy`; reasons `ForeignPolicy`, `PolicyNotReady`, `BlockedByExposures`, `Reconciled`. Events: `CreatedAccessPolicy`, `UpdatedAccessPolicy`, `DeletedAccessPolicy`, `BlockedByExposures`.
+   - Implements: D8 conditions on `CloudflareAccessPolicy`; reasons `ForeignPolicy`, `PolicyNotReady`, `BlockedByExposures`, `Reconciled`. Events: `CreatedAccessPolicy`, `RecoveredAccessPolicy`, `UpdatedAccessPolicy`, `DeletedAccessPolicy`, `BlockedByExposures`.
    - Tests: `TestAccessPolicyConditionsTransition`.
 
 10. **RBAC + Helm chart sync.**
@@ -531,11 +550,11 @@ Per `spec.md ## Implementation slices ### Slice 4` (D24). Outcome: `CloudflareAc
 **Definition of done** (from `spec.md ## Implementation slices ### Slice 4`):
 
 - `kubectl apply` of a `CloudflareAccessPolicy` creates a CF Access policy, populates `status.policyId`, sets `Ready=True`.
-- A pre-existing CF policy with name collision and no local ID record → `Ready=False, Reason=ForeignPolicy`, no mutation of the foreign policy.
+- A pre-existing CF policy with name collision and no local ID record is recovered only when its full Cloudflare policy shape exactly matches the CR; mismatches go `Ready=False, Reason=ForeignPolicy`, no mutation of the foreign policy.
 - An Exposure with `policyRef.name` binds the policy ID once the Policy CR becomes ready.
 - `kubectl delete` of a Policy CR with referencing Exposures is blocked (`Reason=BlockedByExposures`); succeeds once references are removed.
 - Editing `spec.rules` on a Policy CR rewrites the CF policy and propagates a reconcile to all referencing Exposures.
-- envtest tests pass: `TestAccessPolicyCreate`, `TestAccessPolicyForeignRefuses`, `TestAccessPolicyRulesDrift`, `TestAccessPolicyFinalizerBlockedByExposures`, `TestAccessPolicyFinalizerUnblocks`, `TestExposurePolicyRefName`, `TestExposurePolicyRefNamePolicyNotReady`, `TestExposurePolicyRefOneOfValidation`.
+- envtest tests pass: `TestAccessPolicyCreate`, `TestAccessPolicyExactMatchOrphanRecovery`, `TestAccessPolicyForeignRefuses`, `TestAccessPolicyRulesDrift`, `TestAccessPolicyFinalizerBlockedByExposures`, `TestAccessPolicyFinalizerUnblocks`, `TestExposurePolicyRefName`, `TestExposurePolicyRefNamePolicyNotReady`, `TestExposurePolicyRefOneOfValidation`.
 - Manual: dashboard shows policy created; `kubectl edit cfap` rolls rules in CF within one reconcile.
 
 Subtask-derived additions: `TestCloudflareAccessPolicyCRDValidation`, `TestFakeAccessPolicyCreateGetDelete`, `TestFakeAccessPolicyListByName`, `TestFakeAccessPolicyUpdateRulesIdempotent`, `TestAccessPolicyRulesHashCanonical`, `TestAccessPolicyReferencedByPopulated`, `TestAccessPolicyReferencedByDecrements`, `TestExposurePolicyRefNameMissingPolicyCR`, `TestAccessPolicyConditionsTransition` also pass.

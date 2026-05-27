@@ -49,13 +49,13 @@ These are resolved. Treat them as binding constraints, not options.
 | D6 | `CloudflareTunnel` is **cluster-scoped**. The cloudflared workload it manages is namespaced (default namespace `cfzt-system`, override via `spec.cloudflared.namespace`). |
 | D7 | Cloudflared is deployed as a **DaemonSet only** in MVP. Image is pinned in operator code to a specific version, overridable via `spec.cloudflared.image`. |
 | D8 | Conditions on every CRD are **`Ready` and `Progressing` only**. Detail goes in `Reason`/`Message`. No granular `*Ready` condition set. |
-| D9 | **Multi-cluster is out of scope.** No cluster-name flag. Accidental-collision safety is provided per-resource as follows: **Access applications and DNS records** are tagged with the source CR's UID (`managed-by=cfzt-operator source-uid=<uid>`) — operator refuses to mutate any tagged resource whose UID does not match a current local CR. **Cloudflare Tunnels** are tracked by tunnel ID in `CloudflareTunnel.status.tunnelId` — operator refuses to adopt a name-matched tunnel when no local ID record exists (`Reason=ForeignTunnel`). The SDK (`cloudflare-go/v4` v4.6.0) does not surface a tunnel `comment` field, so tunnel ownership relies on the local ID record rather than a CF-side tag; this is acceptable under D12 leader-election (single operator process per cluster). **Ingress rules inside the tunnel-config doc are NOT individually tagged** — see D11. |
+| D9 | **Multi-cluster is out of scope.** No cluster-name flag. Accidental-collision safety is provided per-resource as follows: **Access applications and DNS records** are tagged with the source CR's UID (`managed-by=cfzt-operator source-uid=<uid>`) — operator refuses to mutate any tagged resource whose UID does not match a current local CR. **Cloudflare Tunnels** are named `<spec.tunnelName>-cfzt-<hash8(metadata.uid)>` and tracked by tunnel ID in `CloudflareTunnel.status.tunnelId`. If `status.tunnelId` is missing, the operator may recover a tunnel with the exact generated name; legacy unsuffixed name matches still produce `Reason=ForeignTunnel` and require manual status repair or cleanup. The SDK (`cloudflare-go/v4` v4.6.0) does not surface a tunnel `comment` field, so tunnel ownership relies on the generated name plus local ID record rather than a CF-side tag. **Ingress rules inside the tunnel-config doc are NOT individually tagged** — see D11. |
 | D10 | Origin is **always explicit** on `CloudflareExposure.spec.origin` in MVP. There is no `defaultGatewayOrigin` field on `CloudflareTunnel`. Origin host may point at anything reachable from the cloudflared pods (in-cluster Service DNS, LAN hostname, public IP). Auto-derivation from HTTPRoute parentRefs is deferred. |
 | D11 | The tunnel-config doc is **single-writer per tunnel**. Exposure controllers do not call the configurations endpoint directly — they enqueue the owning tunnel, and the tunnel reconciler computes and writes the **full** ingress doc from all referencing Exposures. The doc is fully derived from K8s state every reconcile; the operator never adopts pre-existing rules and does not tag individual rules. **Last-write-wins.** Combined with D12 this is safe. |
 | D12 | **Leader election is required ON.** Together with D11 this guarantees one writer per tunnel-config doc per cluster. |
 | D13 | Cloudflare SDK: **`github.com/cloudflare/cloudflare-go/v4`** (auto-generated client). Wrapped behind an internal interface so a fake can be substituted for tests. Reference the [Cloudflare MCP server](https://github.com/cloudflare/mcp-server-cloudflare) for SDK method discovery during implementation. |
 | D14 | Distribution: **Helm chart published as an OCI artifact to GHCR** (D17 for chart shape). Container image also on GHCR. Module path: `github.com/andrewreid/cfzt-operator`. |
-| D15 | API version is `v1alpha1`. Breaking changes are permitted without a conversion webhook. **Upgrade strategy: delete and recreate CRs.** Users must export `CloudflareTunnel`, `CloudflareExposure`, `CloudflareAccessPolicy`, and `CloudflareTunnelRoute` manifests, uninstall, install the new version, and reapply. No state migration. |
+| D15 | API version is `v1alpha1`. Breaking changes are permitted without a conversion webhook. Safe targeted migrations may be implemented in reconcilers; otherwise the upgrade strategy is delete and recreate CRs after exporting manifests. |
 | D16 | **External (non-Kubernetes) origins are first-class.** A `CloudflareExposure` with no `sourceRef` and an explicit `origin` pointing at a LAN host, public IP, or any address reachable from the cloudflared pods is fully supported. Use case: keeping a Home Assistant / NAS / appliance tunnel in GitOps without making the device a Kubernetes Service. |
 | D17 | **Helm chart shape**: hand-written under `charts/cfzt-operator/`. CRDs live in `charts/cfzt-operator/crds/` for Helm 3 native handling (install-only; upgrades do not modify CRDs — matches D15 delete-recreate policy). Templates cover Deployment, ServiceAccount, ClusterRole, ClusterRoleBinding, RBAC for leases. `values.yaml` exposes image repo/tag/pullPolicy, replicas, resources, and logLevel. The chart always passes `--leader-elect=true`; D12 is not user-toggleable in shipped installs. CRDs are NOT installed by `helmify`-style generation — written by hand. |
 | D18 | **CI in scope.** GitHub Actions workflows: `ci.yaml` (lint + unit + envtest on PR), `live-smoke.yaml` (manual live Cloudflare smoke), `release.yaml` (manual versioned release → build + push image to GHCR + push Helm OCI chart to GHCR). |
@@ -94,7 +94,7 @@ Supported:
 - API group: `cfzt.reid.ee`.
 - Cluster-scoped `CloudflareTunnel` CRD.
 - Namespaced `CloudflareExposure` CRD.
-- Creation of Cloudflare Tunnels. Adoption of pre-existing tunnels is NOT automatic — see D9 (`status.tunnelId` is the ownership record; name-collision without a local ID record → `Reason=ForeignTunnel`).
+- Creation of Cloudflare Tunnels with generated Cloudflare names. Recovery is limited to exact generated-name matches — see D9 (`status.tunnelId` plus `<spec.tunnelName>-cfzt-<hash8(uid)>`; legacy name-collision without a local ID record → `Reason=ForeignTunnel`).
 - Per-tunnel token retrieval and storage in a Kubernetes Secret.
 - Managed cloudflared DaemonSet per `CloudflareTunnel`.
 - Creation and update of Cloudflare published hostname routes via tunnel-config (D1, D11).
@@ -236,7 +236,7 @@ spec:
     keys:
       accountId: accountId           # default "accountId"
       apiToken: apiToken             # default "apiToken"
-  tunnelName: homelab-rke2           # name of the tunnel inside Cloudflare
+  tunnelName: homelab-rke2           # human base name; CF name becomes homelab-rke2-cfzt-<hash8(uid)>
   dns:
     manage: true                     # D2 default
   cloudflared:
@@ -274,7 +274,7 @@ Kubebuilder markers (non-exhaustive):
 `CloudflareTunnel` controller responsibilities:
 
 1. Resolve Cloudflare credentials from the referenced Secret.
-2. Reconcile tunnel identity (see D9 + `## Ownership and deletion semantics`): if `status.tunnelId` is set, `Get(id)` and verify name matches; if unset, `List(name=spec.tunnelName)` — zero hits → create; one or more hits → `Ready=False, Reason=ForeignTunnel`, no mutation.
+2. Reconcile tunnel identity (see D9 + `## Ownership and deletion semantics`): desired Cloudflare name is `<spec.tunnelName>-cfzt-<hash8(metadata.uid)>`. If `status.tunnelId` is set, `Get(id)` and verify the name is desired, or rename legacy `spec.tunnelName` to the desired generated name. If unset, recover exactly one generated-name tunnel by writing its ID to status; a legacy unsuffixed match remains `Ready=False, Reason=ForeignTunnel`; otherwise create the generated-name tunnel.
 3. Store the Cloudflare tunnel ID in `status.tunnelId`.
 4. Retrieve the tunnel token (D4) via the SDK and create/update the token Secret. Record its name in `status.tokenSecretRef`.
 5. Create or update the cloudflared DaemonSet (D7) in `spec.cloudflared.namespace`. Stamp a token-checksum annotation on the pod template so token rotations roll the workload.
@@ -408,7 +408,7 @@ Kubebuilder markers:
 `CloudflareAccessPolicy` controller responsibilities:
 
 1. Resolve Cloudflare credentials from the referenced Secret (same shape as Tunnel; namespace stored on the field).
-2. Reconcile policy identity by ID-record (mirrors D9 tunnel pattern): if `status.policyId` is set, `Get(id)` and verify name matches desired Cloudflare name (`<spec.policyName | metadata.name>-cfzt`); if unset, `List(name=desired Cloudflare name)` — zero hits → create; one or more hits → `Ready=False, Reason=ForeignPolicy`, no mutation.
+2. Reconcile policy identity by ID-record: if `status.policyId` is set, `Get(id)` and verify name matches desired Cloudflare name (`<spec.policyName | metadata.name>-cfzt`); if unset, zero same-name hits → create, one same-name exact rule-shape match → recover into status, any mismatch → `Ready=False, Reason=ForeignPolicy`, no mutation.
 3. Compare desired rules JSON against `status.observedRulesHash`; on mismatch, `Update` the CF policy and rewrite the hash.
 4. List `CloudflareExposure` CRs referencing this Policy CR by `spec.access.policyRef.name`; populate `status.referencedBy[]` and `status.referencedByCount`.
 5. Enqueue each referencing Exposure when `status.policyId` first becomes set or `observedRulesHash` changes (cross-watch — see additions to `## Tunnel configuration concurrency`).
@@ -479,7 +479,7 @@ CRD fields are validated by `+kubebuilder:validation:*` markers and `x-kubernete
 
 `CloudflareTunnel`:
 
-- `spec.tunnelName`: required, minLength 1, maxLength 120.
+- `spec.tunnelName`: required, minLength 1, maxLength 106. Effective Cloudflare tunnel name is `<spec.tunnelName>-cfzt-<hash8(metadata.uid)>`, capped to the existing 120-character budget.
 - `spec.credentialsSecretRef.name`: required.
 - `spec.credentialsSecretRef.keys.accountId`: optional, default `accountId`, maxLength 253.
 - `spec.credentialsSecretRef.keys.apiToken`: optional, default `apiToken`, maxLength 253.
@@ -550,11 +550,11 @@ The operator is conservative. It only mutates Cloudflare resources whose ownersh
 
 **Ownership rules** (see D9 for rationale on tunnels):
 
-- **Tunnels: tracked by ID, not by tag.** `CloudflareTunnel.status.tunnelId` is the authoritative ownership record. On reconcile: if `status.tunnelId` is set, `Get(id)` confirms the tunnel exists and `Name` matches `spec.tunnelName`; if `Get` returns 404, the local record is invalidated and the controller creates a new tunnel. If `status.tunnelId` is unset, the controller `List`s by `spec.tunnelName` — zero hits → create; one or more hits → `Ready=False, Reason=ForeignTunnel`, no mutation. Pre-existing tunnels with a colliding name are NOT auto-adopted; the operator user must delete the foreign tunnel or pre-populate `status.tunnelId` out-of-band (`kubectl patch --subresource=status`). cloudflare-go/v4 v4.6.0 does not surface a tunnel `comment` field, so no CF-side tag is written for tunnels. Safe under D12 leader-election.
+- **Tunnels: generated name + status ID.** Desired Cloudflare name is `<spec.tunnelName>-cfzt-<hash8(metadata.uid)>`. `CloudflareTunnel.status.tunnelId` is the authoritative ownership record once present. On reconcile: if `status.tunnelId` is set, `Get(id)` confirms the tunnel exists and the name is either desired or legacy `spec.tunnelName`; legacy names are renamed in place to the generated name, preserving tunnel ID and token. If `status.tunnelId` is unset, exactly one generated-name tunnel is recovered into status; legacy unsuffixed matches remain `Ready=False, Reason=ForeignTunnel`. Pre-existing generated-name collisions are unlikely but still treated conservatively if ambiguous. cloudflare-go/v4 v4.6.0 does not surface a tunnel `comment` field, so no CF-side tag is written for tunnels.
 - **Access applications**: `tags` field carries `managed-by=cfzt-operator` and chunked `source-uid-<n>=...` values for `CloudflareExposure.uid`. Name = `<displayName-or-metadata.name>-cfzt`.
 - **DNS records**: `comment` field carries `managed-by=cfzt-operator source-uid=<CloudflareExposure.uid>`.
 - **Ingress rules: not tagged.** The entire doc is overwritten each reconcile from K8s desired state.
-- **Access policies** (Slice 4, D24): `CloudflareAccessPolicy.status.policyId` is the authoritative ownership record (mirrors tunnels per D9). Before mutation or deletion, the controller verifies the tracked Cloudflare policy name still matches `<spec.policyName | metadata.name>-cfzt`; the suffix is always appended for collision protection.
+- **Access policies** (Slice 4, D24): `CloudflareAccessPolicy.status.policyId` is the authoritative ownership record. Before mutation or deletion, the controller verifies the tracked Cloudflare policy name still matches `<spec.policyName | metadata.name>-cfzt`; the suffix is always appended for collision protection. If status is empty and a same-name policy already exists, the operator recovers it only when the full Cloudflare policy shape exactly matches the CR; mismatches remain `Reason=ForeignPolicy`.
 - **Tunnel routes** (Slice 5, D25): `CloudflareTunnelRoute.status.routeId` is the authoritative ownership record. CF-side `comment` carries compact ownership text `managed-by=cfzt source-uid=<CloudflareTunnelRoute.uid>`; the installed `cloudflare-go/v4` route API exposes `comment`, so Slice 5 requires this guard. Pre-existing active routes with the same target CIDR/VNet and no matching source-uid are NOT auto-adopted: `Ready=False, Reason=ForeignRoute`.
 
 **Mutation rule.** Before update or delete of an Access app, DNS record, or TunnelRoute, the operator MUST verify the resource's `source-uid` matches a current local CR of the expected kind. Mismatch or missing tag → `Ready=False, Reason=ForeignResource` or route-specific `ForeignRoute`, no destructive action. Tunnels and Access policies follow the ID-based rules above instead.
@@ -562,6 +562,10 @@ The operator is conservative. It only mutates Cloudflare resources whose ownersh
 **Hostname conflict rule.** If an Access app or DNS record already exists for a hostname and its `source-uid` does not match the reconciling Exposure → `Ready=False, Reason=HostnameConflict`. Do not touch the conflicting resource. Requeue after 30 seconds. (Ingress-rule conflicts inside the doc are resolved at build time: builder errors if two Exposures claim the same hostname, surfacing on both as `HostnameConflict`.)
 
 **Tunnel deletion rule.** A `CloudflareTunnel` with ≥1 referencing `CloudflareExposure` cannot complete deletion. The tunnel finalizer holds, sets `Ready=False, Reason=BlockedByExposures`. A `CloudflareTunnel` with ≥1 referencing `CloudflareTunnelRoute` (Slice 5, D25) is similarly blocked with `Ready=False, Reason=BlockedByRoutes`. Both blocks must clear before deletion completes.
+
+**Tunnel generated-name migration rule.** Existing statusful `CloudflareTunnel` CRs created before generated names are migrated automatically: the controller reads `status.tunnelId`, renames the same Cloudflare tunnel from legacy `spec.tunnelName` to `<spec.tunnelName>-cfzt-<hash8(metadata.uid)>`, and keeps the same tunnel ID. Existing DNS CNAMEs, Access applications, tunnel routes, tokens, and published hostname routes continue to point at the same tunnel ID. If `status.tunnelId` has already been lost and only a legacy unsuffixed tunnel remains, the operator does not auto-adopt; patch `status.tunnelId` manually or delete the remote tunnel and let the controller recreate it.
+
+If an old statusful CR has `spec.tunnelName` longer than 106 characters, the generated name would exceed the 120-character budget. The controller must not rename or create in that case; it reports `Ready=False, Reason=TunnelNameInvalid`. Because `spec.tunnelName` is immutable, replace the `CloudflareTunnel` with a shorter base name and repoint dependants.
 
 **Policy deletion rule** (Slice 4, D24). A `CloudflareAccessPolicy` with ≥1 referencing `CloudflareExposure` (via `spec.access.policyRef.name`) cannot complete deletion. The policy finalizer holds, sets `Ready=False, Reason=BlockedByExposures`. Mirrors the tunnel-deletion rule.
 
@@ -581,7 +585,7 @@ Every CRD exposes exactly two conditions:
 `Reason` values (non-exhaustive):
 
 - `CredentialsMissing`
-- `TunnelCreating`, `TokenFetchFailed`, `WorkloadNotReady`
+- `TunnelCreating`, `TunnelNameInvalid`, `TokenFetchFailed`, `WorkloadNotReady`
 - `OriginInvalid`, `NetworkInvalid`, `HostnameConflict`, `ForeignResource`, `ForeignTunnel`, `ForeignPolicy`, `ForeignRoute`
 - `AccessAppPending`, `PolicyNotFound`, `PolicyNotReady`, `DNSWriteFailed`, `RouteWriteFailed`
 - `TunnelNotReady`
@@ -859,7 +863,7 @@ docs/
 - DaemonSet name: `cloudflared-<CloudflareTunnel.metadata.name>`.
 - DNS record `comment`: `managed-by=cfzt-operator source-uid=<exposure-uid>`.
 - Access app `tags`: `managed-by=cfzt-operator`, chunked `source-uid-<n>=...` values.
-- Tunnel ownership: tracked via `CloudflareTunnel.status.tunnelId` (no CF-side comment/tag — see D9).
+- Tunnel Cloudflare name: `<spec.tunnelName>-cfzt-<hash8(metadata.uid)>`; ownership is then tracked via `CloudflareTunnel.status.tunnelId` (no CF-side comment/tag — see D9).
 - Access policy name in Cloudflare (Slice 4, D24): `<spec.policyName | metadata.name>-cfzt`; the suffix is always appended.
 - Access policy ownership (Slice 4): tracked via `CloudflareAccessPolicy.status.policyId`; the controller verifies the tracked Cloudflare policy name before mutation or deletion.
 - `CloudflareTunnelRoute` `metadata.name`: user-chosen. No CF-side name (routes are identified by CIDR + VNet + ID).
@@ -930,7 +934,7 @@ The implementer ships in slices. Each slice has a measurable definition of done.
 1. Kubebuilder scaffold (module `github.com/andrewreid/cfzt-operator`, group `cfzt.reid.ee/v1alpha1`).
 2. `CloudflareTunnel` types + CRD generation + Helm chart skeleton.
 3. `internal/cloudflare` interface + real + fake implementations (tunnels, token).
-4. Tunnel controller: credential resolution, ID-based ownership reconciliation (see `## Ownership and deletion semantics`), token fetch, Secret upsert, DaemonSet upsert.
+4. Tunnel controller: credential resolution, generated-name + ID-based ownership reconciliation (see `## Ownership and deletion semantics`), token fetch, Secret upsert, DaemonSet upsert.
 5. Token-rotation handling via pod-template checksum annotation.
 6. Finalizer (no-op while no Exposures exist).
 7. envtest coverage.
@@ -940,8 +944,8 @@ The implementer ships in slices. Each slice has a measurable definition of done.
 - `kubectl apply` of a `CloudflareTunnel` against an empty Cloudflare account creates the tunnel, populates `status.tunnelId`, creates Secret `<name>-token`, creates DaemonSet `cloudflared-<name>`.
 - `Ready=True` once DaemonSet has ≥1 ready pod.
 - Reapply is a no-op.
-- A pre-existing tunnel in the account with the same `spec.tunnelName` and no local `status.tunnelId` record causes the CR to go `Ready=False, Reason=ForeignTunnel` with no mutation of the foreign tunnel.
-- envtest tests pass: `TestTunnelCreate`, `TestTunnelAdopt`, `TestTunnelForeignTunnelRefuses`, `TestTunnelTokenRotation`, `TestTunnelFinalizerNoop`, `TestTunnelConditionsTransition`.
+- A pre-existing generated-name tunnel is recovered into `status.tunnelId`; a pre-existing legacy `spec.tunnelName` tunnel with no local status remains `Ready=False, Reason=ForeignTunnel`.
+- envtest tests pass: `TestTunnelCreate`, `TestTunnelGeneratedNameOrphanRecovery`, `TestTunnelStatusfulLegacyRenamed`, `TestTunnelForeignTunnelRefuses`, `TestTunnelTokenRotation`, `TestTunnelFinalizerNoop`, `TestTunnelConditionsTransition`.
 - `ci.yaml` green.
 - `helm install` against a fresh cluster works.
 

@@ -93,7 +93,7 @@ type CloudflareTunnelSpec struct {
 
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=120
+	// +kubebuilder:validation:MaxLength=106
 	TunnelName string `json:"tunnelName"`
 
 	// +kubebuilder:validation:Optional
