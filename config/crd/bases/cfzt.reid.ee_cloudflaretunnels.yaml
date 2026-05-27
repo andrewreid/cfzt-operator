@@ -1129,7 +1129,7 @@ spec:
                     type: boolean
                 type: object
               tunnelName:
-                maxLength: 120
+                maxLength: 106
                 minLength: 1
                 type: string
             required:

@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -54,6 +55,9 @@ var _ = Describe("CloudflareTunnel Controller", func() {
 
 		created := fetchTunnel(ctx, tunnel.Name)
 		Expect(created.Status.TunnelId).NotTo(BeEmpty())
+		cfTunnel, err := fakeCF.Tunnels().Get(ctx, created.Status.TunnelId)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfTunnel.Name).To(Equal(desiredCloudflareTunnelName(created)))
 		Expect(created.Status.TokenSecretRef.Name).To(Equal(naming.TokenSecretName(tunnel.Name)))
 		Expect(meta.FindStatusCondition(created.Status.Conditions, ConditionReady).Status).To(Equal(metav1.ConditionFalse))
 		Expect(meta.FindStatusCondition(created.Status.Conditions, ConditionReady).Reason).To(Equal(ReasonWorkloadNotReady))
@@ -75,7 +79,7 @@ var _ = Describe("CloudflareTunnel Controller", func() {
 		Expect(meta.FindStatusCondition(ready.Status.Conditions, ConditionReady).Reason).To(Equal(ReasonReconciled))
 	})
 
-	It("TestTunnelAdopt", func() {
+	It("TestTunnelStatusfulLegacyRenamed", func() {
 		cfTunnel, err := fakeCF.Tunnels().Create(ctx, cloudflare.CreateTunnelInput{Name: "adopt-me", ConfigSrc: "cloudflare"})
 		Expect(err).NotTo(HaveOccurred())
 		tunnel := createTunnel(ctx, "adopt-tunnel", "adopt-me")
@@ -87,6 +91,24 @@ var _ = Describe("CloudflareTunnel Controller", func() {
 
 		adopted := fetchTunnel(ctx, tunnel.Name)
 		Expect(adopted.Status.TunnelId).To(Equal(cfTunnel.ID))
+		renamed, err := fakeCF.Tunnels().Get(ctx, cfTunnel.ID)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(renamed.Name).To(Equal(desiredCloudflareTunnelName(adopted)))
+		expectRecordedEvent(recorder, EventRenamedTunnel)
+	})
+
+	It("TestTunnelGeneratedNameOrphanRecovery", func() {
+		tunnel := createTunnel(ctx, "recover-tunnel", "recover-me")
+		createCredentials(ctx)
+		desiredName := desiredCloudflareTunnelName(tunnel)
+		cfTunnel, err := fakeCF.Tunnels().Create(ctx, cloudflare.CreateTunnelInput{Name: desiredName, ConfigSrc: "cloudflare"})
+		Expect(err).NotTo(HaveOccurred())
+
+		reconcileTunnel(ctx, reconciler, tunnel.Name)
+
+		recovered := fetchTunnel(ctx, tunnel.Name)
+		Expect(recovered.Status.TunnelId).To(Equal(cfTunnel.ID))
+		expectRecordedEvent(recorder, EventRecoveredTunnel)
 	})
 
 	It("TestTunnelForeignTunnelRefuses", func() {
@@ -104,6 +126,34 @@ var _ = Describe("CloudflareTunnel Controller", func() {
 		Expect(ready.Reason).To(Equal(ReasonForeignTunnel))
 	})
 
+	It("TestTunnelFinalizerAddedBeforeCloudflareCreate", func() {
+		tunnel := createTunnel(ctx, "finalizer-first-tunnel", "finalizer-first")
+		createCredentials(ctx)
+
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: tunnel.Name}})
+		Expect(err).NotTo(HaveOccurred())
+
+		current := fetchTunnel(ctx, tunnel.Name)
+		Expect(current.Finalizers).To(ContainElement(naming.Finalizer))
+		tunnels, err := fakeCF.Tunnels().List(ctx, "")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(tunnels).To(BeEmpty())
+	})
+
+	It("TestTunnelNameLengthValidation", func() {
+		tunnel := &cfztv1alpha1.CloudflareTunnel{
+			ObjectMeta: metav1.ObjectMeta{Name: "too-long-tunnel-name"},
+			Spec: cfztv1alpha1.CloudflareTunnelSpec{
+				CredentialsSecretRef: cfztv1alpha1.CredentialsSecretRef{Name: "cloudflare-credentials"},
+				TunnelName:           strings.Repeat("a", 107),
+				Cloudflared:          cfztv1alpha1.CloudflaredSpec{Namespace: "cfzt-system"},
+			},
+		}
+
+		err := k8sClient.Create(ctx, tunnel)
+		Expect(apierrors.IsInvalid(err)).To(BeTrue())
+	})
+
 	It("TestTunnelStaleStatusIDRecreates", func() {
 		tunnel := createTunnel(ctx, "stale-id-tunnel", "stale-id")
 		createCredentials(ctx)
@@ -117,7 +167,7 @@ var _ = Describe("CloudflareTunnel Controller", func() {
 		Expect(current.Status.TunnelId).NotTo(Equal("missing-cloudflare-tunnel"))
 		cfTunnel, err := fakeCF.Tunnels().Get(ctx, current.Status.TunnelId)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(cfTunnel.Name).To(Equal("stale-id"))
+		Expect(cfTunnel.Name).To(Equal(desiredCloudflareTunnelName(current)))
 	})
 
 	It("TestTunnelFinalizerBlocksForeignStatusID", func() {
@@ -319,6 +369,14 @@ func fetchTunnel(ctx context.Context, name string) *cfztv1alpha1.CloudflareTunne
 func reconcileTunnel(ctx context.Context, reconciler *CloudflareTunnelReconciler, name string) {
 	_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name}})
 	Expect(err).NotTo(HaveOccurred())
+	current := &cfztv1alpha1.CloudflareTunnel{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: name}, current); err != nil {
+		return
+	}
+	if current.DeletionTimestamp.IsZero() && len(current.Status.Conditions) == 0 {
+		_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name}})
+		Expect(err).NotTo(HaveOccurred())
+	}
 }
 
 func markDaemonSetReady(ctx context.Context, ds *appsv1.DaemonSet) {

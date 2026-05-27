@@ -103,6 +103,7 @@ func TestCloudflareLifecycle(t *testing.T) {
 	h.createTunnel()
 	tunnel := h.waitTunnelReady(resourceReadyTimeout)
 	tunnelIDBefore := tunnel.Status.TunnelId
+	h.assertTunnelName(tunnel)
 	if tunnel.Status.TokenSecretRef.Name != h.cfg.tunnelName+"-token" {
 		t.Fatalf("unexpected token Secret %q", tunnel.Status.TokenSecretRef.Name)
 	}

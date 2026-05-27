@@ -4,6 +4,7 @@ package live
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -51,6 +52,7 @@ const (
 	operatorReadyTimeout = 2 * time.Minute
 	echoReadyTimeout     = 2 * time.Minute
 	hostnameHTTPTimeout  = 2 * time.Minute
+	accessHTTPTimeout    = 5 * time.Minute
 	cleanupTimeout       = 4 * time.Minute
 	cleanupWaitTimeout   = 2 * time.Minute
 )
@@ -560,17 +562,28 @@ func (h *smokeHarness) assertAccessChallenged() {
 	httpClient := smokeHTTPClient()
 	h.t.Logf("checking unauthenticated Access response for https://%s/hostname", h.cfg.accessHostname)
 	var lastStatus int
-	h.waitFor("Access hostname challenge", hostnameHTTPTimeout, func() (bool, error) {
+	var lastLocation string
+	var lastBody string
+	var lastErr error
+	err := wait.PollUntilContextTimeout(h.ctx, 5*time.Second, accessHTTPTimeout, true, func(context.Context) (bool, error) {
 		req, err := http.NewRequestWithContext(h.ctx, http.MethodGet, "https://"+h.cfg.accessHostname+"/hostname", nil)
 		if err != nil {
 			return false, err
 		}
 		resp, err := httpClient.Do(req)
 		if err != nil {
+			lastErr = err
 			return false, nil
 		}
 		defer resp.Body.Close()
 		lastStatus = resp.StatusCode
+		lastLocation = resp.Header.Get("Location")
+		lastErr = nil
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		if readErr != nil {
+			lastErr = readErr
+		}
+		lastBody = strings.TrimSpace(string(body))
 		switch resp.StatusCode {
 		case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther, http.StatusTemporaryRedirect, http.StatusPermanentRedirect, http.StatusUnauthorized, http.StatusForbidden:
 			return true, nil
@@ -580,7 +593,11 @@ func (h *smokeHarness) assertAccessChallenged() {
 			return false, nil
 		}
 	})
-	h.t.Logf("Access hostname returned expected unauthenticated status %d", lastStatus)
+	if err != nil {
+		h.dumpDiagnostics("Access hostname challenge")
+		h.t.Fatalf("timed out waiting for Access hostname challenge: %v; last status=%d location=%q transport/read error=%v body=%q", err, lastStatus, lastLocation, lastErr, lastBody)
+	}
+	h.t.Logf("Access hostname returned expected unauthenticated status %d location=%q", lastStatus, lastLocation)
 }
 
 func (h *smokeHarness) assertOneAccessPolicy(policyID string) {
@@ -636,6 +653,19 @@ func (h *smokeHarness) assertAccessApplication(appID, policyID string) {
 
 func (h *smokeHarness) expectedAccessPolicyName() string {
 	return h.cfg.accessPolicy + "-cfzt"
+}
+
+func (h *smokeHarness) expectedTunnelName(tunnel cfztv1alpha1.CloudflareTunnel) string {
+	sum := sha256.Sum256([]byte(string(tunnel.UID)))
+	return fmt.Sprintf("%s-cfzt-%x", tunnel.Spec.TunnelName, sum[:4])
+}
+
+func (h *smokeHarness) assertTunnelName(tunnel cfztv1alpha1.CloudflareTunnel) {
+	cfTunnel, err := h.cf.Tunnels().Get(h.ctx, tunnel.Status.TunnelId)
+	if err != nil {
+		h.t.Fatalf("get Cloudflare tunnel %s: %v", tunnel.Status.TunnelId, err)
+	}
+	assertEqual(h.t, "Cloudflare tunnel name", h.expectedTunnelName(tunnel), cfTunnel.Name)
 }
 
 func containsString(values []string, want string) bool {
@@ -772,6 +802,7 @@ func (h *smokeHarness) cleanup() {
 	h.waitTunnelRouteAbsent(cleanupCtx, "tunnel route", h.cfg.tunnelRouteCIDR, cleanupWaitTimeout)
 	h.waitAccessApplicationsAbsent(cleanupCtx, cleanupWaitTimeout)
 	h.waitAccessPolicyAbsent(cleanupCtx, cleanupWaitTimeout)
+	h.deleteTunnelsByNamePrefix(cleanupCtx, h.cfg.tunnelName+"-cfzt-")
 	h.waitTunnelAbsent(cleanupCtx, cleanupWaitTimeout)
 }
 
@@ -841,13 +872,35 @@ func (h *smokeHarness) deleteAccessPoliciesByName(ctx context.Context, name stri
 	}
 }
 
+func (h *smokeHarness) deleteTunnelsByNamePrefix(ctx context.Context, prefix string) {
+	tunnels, err := h.cf.Tunnels().List(ctx, "")
+	if err != nil {
+		h.t.Errorf("cleanup: list tunnels for direct generated-name cleanup: %v", err)
+		return
+	}
+	for _, tunnel := range tunnels {
+		if !strings.HasPrefix(tunnel.Name, prefix) {
+			continue
+		}
+		h.t.Logf("cleanup: deleting lingering generated tunnel %s (%s)", tunnel.Name, tunnel.ID)
+		if err := h.cf.Tunnels().Delete(ctx, tunnel.ID); err != nil && !errors.Is(err, cloudflare.ErrNotFound) {
+			h.t.Errorf("cleanup: delete lingering generated tunnel %s: %v", tunnel.ID, err)
+		}
+	}
+}
+
 func (h *smokeHarness) waitTunnelAbsent(ctx context.Context, timeout time.Duration) {
 	h.waitForContext(ctx, "Cloudflare tunnel absent", timeout, func() (bool, error) {
-		tunnels, err := h.cf.Tunnels().List(ctx, h.cfg.tunnelName)
+		tunnels, err := h.cf.Tunnels().List(ctx, "")
 		if err != nil {
 			return false, err
 		}
-		return len(tunnels) == 0, nil
+		for _, tunnel := range tunnels {
+			if tunnel.Name == h.cfg.tunnelName || strings.HasPrefix(tunnel.Name, h.cfg.tunnelName+"-cfzt-") {
+				return false, nil
+			}
+		}
+		return true, nil
 	})
 	h.t.Log("Cloudflare tunnel absent")
 }

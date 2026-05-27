@@ -67,6 +67,7 @@ func (r *CloudflareAccessPolicyReconciler) Reconcile(ctx context.Context, req ct
 		if err := r.Update(ctx, &policy); err != nil {
 			return ctrl.Result{}, err
 		}
+		return ctrl.Result{}, nil
 	}
 
 	references, err := r.referencedBy(ctx, policy.Name)
@@ -94,6 +95,20 @@ func (r *CloudflareAccessPolicyReconciler) Reconcile(ctx context.Context, req ct
 		}
 		for _, p := range existing {
 			if p.Name == policyName {
+				cfPolicy, err := cfClient.AccessPolicies().Get(ctx, p.ID)
+				if err != nil {
+					if errors.Is(err, cloudflare.ErrUnsupportedAccessRule) {
+						return ctrl.Result{}, r.setPolicyStatus(ctx, &policy, "", "", references, false, ReasonForeignPolicy, fmt.Sprintf("Cloudflare Access policy %q already exists without local ownership record and has unsupported rules", policyName))
+					}
+					return ctrl.Result{}, err
+				}
+				if accessPolicyMatches(cfPolicy, &policy, policyName) {
+					if err := r.setPolicyStatus(ctx, &policy, cfPolicy.ID, desiredHash, references, true, ReasonReconciled, "Cloudflare Access policy identity recovered"); err != nil {
+						return ctrl.Result{}, err
+					}
+					r.Recorder.Eventf(&policy, corev1.EventTypeNormal, EventRecoveredAccessPolicy, "Recovered Cloudflare Access policy %s from exact name and rules match", cfPolicy.ID)
+					return ctrl.Result{}, nil
+				}
 				return ctrl.Result{}, r.setPolicyStatus(ctx, &policy, "", "", references, false, ReasonForeignPolicy, fmt.Sprintf("Cloudflare Access policy %q already exists without local ownership record", policyName))
 			}
 		}
@@ -101,9 +116,12 @@ func (r *CloudflareAccessPolicyReconciler) Reconcile(ctx context.Context, req ct
 		if err != nil {
 			return ctrl.Result{}, err
 		}
+		if err := r.setPolicyStatus(ctx, &policy, created.ID, desiredHash, references, true, ReasonReconciled, "Cloudflare Access policy reconciled"); err != nil {
+			return ctrl.Result{}, err
+		}
 		r.Recorder.Eventf(&policy, corev1.EventTypeNormal, EventCreatedAccessPolicy, "Created Cloudflare Access policy %s", created.ID)
 		log.V(1).Info("CloudflareAccessPolicy created", "policyID", created.ID)
-		return ctrl.Result{}, r.setPolicyStatus(ctx, &policy, created.ID, desiredHash, references, true, ReasonReconciled, "Cloudflare Access policy reconciled")
+		return ctrl.Result{}, nil
 	}
 
 	cfPolicy, err := cfClient.AccessPolicies().Get(ctx, policy.Status.PolicyId)

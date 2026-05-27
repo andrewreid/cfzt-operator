@@ -120,6 +120,37 @@ var _ = Describe("CloudflareAccessPolicy Controller", func() {
 		Expect(all[0].Name).To(Equal("foreign-policy-cfzt"))
 	})
 
+	It("TestAccessPolicyExactMatchOrphanRecovery", func() {
+		cfPolicy, err := fakeCF.AccessPolicies().Create(ctx, cloudflare.AccessPolicyInput{
+			Name:     "recover-policy-cfzt",
+			Decision: "allow",
+			Include:  []cloudflare.AccessRule{{EmailDomain: "example.com"}},
+		})
+		Expect(err).NotTo(HaveOccurred())
+		policy := createAccessPolicy(ctx, "recover-policy", "")
+
+		reconcileAccessPolicy(ctx, reconciler, policy.Name)
+
+		got := fetchAccessPolicy(ctx, policy.Name)
+		Expect(got.Status.PolicyId).To(Equal(cfPolicy.ID))
+		Expect(got.Status.ObservedRulesHash).To(HavePrefix("sha256:"))
+		Expect(meta.FindStatusCondition(got.Status.Conditions, ConditionReady).Status).To(Equal(metav1.ConditionTrue))
+		expectRecordedEvent(recorder, EventRecoveredAccessPolicy)
+	})
+
+	It("TestAccessPolicyFinalizerAddedBeforeCloudflareCreate", func() {
+		policy := createAccessPolicy(ctx, "finalizer-first-policy", "")
+
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: policy.Name}})
+		Expect(err).NotTo(HaveOccurred())
+
+		current := fetchAccessPolicy(ctx, policy.Name)
+		Expect(current.Finalizers).To(ContainElement(naming.Finalizer))
+		policies, err := fakeCF.AccessPolicies().List(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(policies).To(BeEmpty())
+	})
+
 	It("TestAccessPolicyRulesDrift", func() {
 		policy := createAccessPolicy(ctx, "drift-policy", "")
 		reconcileAccessPolicy(ctx, reconciler, policy.Name)
@@ -371,6 +402,14 @@ func fetchAccessPolicy(ctx context.Context, name string) *cfztv1alpha1.Cloudflar
 func reconcileAccessPolicy(ctx context.Context, reconciler *CloudflareAccessPolicyReconciler, name string) {
 	_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name}})
 	Expect(err).NotTo(HaveOccurred())
+	current := &cfztv1alpha1.CloudflareAccessPolicy{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: name}, current); err != nil {
+		return
+	}
+	if current.DeletionTimestamp.IsZero() && len(current.Status.Conditions) == 0 {
+		_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name}})
+		Expect(err).NotTo(HaveOccurred())
+	}
 }
 
 func createPolicyRefExposure(ctx context.Context, name, policyName string) *cfztv1alpha1.CloudflareExposure {
