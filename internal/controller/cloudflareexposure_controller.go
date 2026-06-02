@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -41,7 +42,6 @@ import (
 	"github.com/andrewreid/cfzt-operator/internal/cloudflare"
 	"github.com/andrewreid/cfzt-operator/internal/naming"
 	"github.com/andrewreid/cfzt-operator/internal/origin"
-	"github.com/andrewreid/cfzt-operator/internal/ownership"
 )
 
 // CloudflareExposureReconciler reconciles a CloudflareExposure object.
@@ -50,9 +50,13 @@ type CloudflareExposureReconciler struct {
 	HTTPRouteSourceEnabled bool
 	// SiteID is this operator process's stable failover identity (D26). It is
 	// plumbed through from --site-id at boot and read by failover-enabled
-	// reconcile paths (lease arbitration, role gate). Subtask 1 wires it
-	// through only; later Slice 7 subtasks consume it.
+	// reconcile paths (lease arbitration, role gate).
 	SiteID string
+	// Now and Rand are injection seams for the failover role gate so tests
+	// drive lease expiry and acquire jitter deterministically. Both default
+	// to wall-clock / a process-seeded source when nil.
+	Now  func() time.Time
+	Rand *rand.Rand
 }
 
 // +kubebuilder:rbac:groups=cfzt.reid.ee,resources=cloudflareexposures,verbs=get;list;watch;create;update;patch;delete
@@ -116,6 +120,21 @@ func (r *CloudflareExposureReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return r.setExposureStatusAndRequeue(ctx, &exposure, exposure.Status.Cloudflare, ReasonHostnameConflict, "hostname is claimed by more than one CloudflareExposure")
 	}
 
+	// D26 failover role gate: a failover-enabled Exposure only writes the
+	// shared Access app + public DNS CNAME when this site holds the lease.
+	// A Standby (or any non-Primary outcome) is fully handled here.
+	var failoverRequeue time.Duration
+	if exposure.Spec.Failover != nil {
+		proceed, requeue, result, done, err := r.reconcileFailoverRole(ctx, &exposure, &tunnel, cfClient)
+		if done || err != nil {
+			return result, err
+		}
+		if !proceed {
+			return result, nil
+		}
+		failoverRequeue = requeue
+	}
+
 	status := exposure.Status.Cloudflare
 	result, done, err := r.reconcileExposureAccess(ctx, &exposure, cfClient, &status)
 	if done || err != nil {
@@ -131,9 +150,9 @@ func (r *CloudflareExposureReconciler) Reconcile(ctx context.Context, req ctrl.R
 	ready := status.PublicHostnameRouteHash != "" && (!exposure.Spec.Access.Enabled || status.AccessApplicationId != "") && (!tunnel.Spec.Dns.Manage || status.DnsRecordId != "")
 	if !ready {
 		log.V(1).Info("CloudflareExposure waiting for tunnel route", "hostname", exposure.Spec.Hostname)
-		return ctrl.Result{}, r.setExposureStatus(ctx, &exposure, status, false, ReasonAccessAppPending, "waiting for tunnel ingress route hash")
+		return requeueResult(failoverRequeue), r.setExposureStatus(ctx, &exposure, status, false, ReasonAccessAppPending, "waiting for tunnel ingress route hash")
 	}
-	return ctrl.Result{}, r.setExposureStatus(ctx, &exposure, status, true, ReasonReconciled, "Exposure reconciled")
+	return requeueResult(failoverRequeue), r.setExposureStatus(ctx, &exposure, status, true, ReasonReconciled, "Exposure reconciled")
 }
 
 func (r *CloudflareExposureReconciler) reconcileExposureAccess(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, cfClient cloudflare.Client, status *cfztv1alpha1.ExposureCloudflareStatus) (ctrl.Result, bool, error) {
@@ -193,7 +212,7 @@ func (r *CloudflareExposureReconciler) reconcileExposureDNS(ctx context.Context,
 				result, statusErr := r.setExposureStatusAndRequeue(ctx, exposure, *status, ReasonForeignResource, err.Error())
 				return result, true, statusErr
 			}
-			return ctrl.Result{}, true, r.setExposureStatusAndBackoff(ctx, exposure, *status, ReasonDNSWriteFailed, err.Error())
+			return ctrl.Result{}, true, r.setExposureStatusAndBackoff(ctx, exposure, *status, err.Error())
 		}
 		status.DnsRecordId = record.ID
 		switch action {
@@ -247,13 +266,13 @@ func (r *CloudflareExposureReconciler) reconcileAccess(ctx context.Context, expo
 	if err != nil {
 		return nil, accessApplicationReconcileUnchanged, err
 	}
+	owner := exposureOwner(exposure)
 	want := cloudflare.AccessApplicationInput{
 		Name:       naming.AccessAppName(exposure.Spec.DisplayName, exposure.Name),
 		Domain:     exposure.Spec.Hostname,
 		PolicyUUID: policyUUID,
-		Tags:       ownership.From(exposure.UID).Tags(),
+		Tags:       owner.Tags(),
 	}
-	owner := ownership.From(exposure.UID)
 	var owned *cloudflare.AccessApplication
 	for _, app := range apps {
 		if !owner.MatchesTags(app.Tags) {
@@ -393,19 +412,19 @@ func (r *CloudflareExposureReconciler) reconcileDNS(ctx context.Context, exposur
 	if err != nil {
 		return nil, dnsReconcileUnchanged, err
 	}
+	owner := exposureOwner(exposure)
 	want := cloudflare.DNSRecordInput{
 		ZoneID:  zone.ID,
 		Name:    exposure.Spec.Hostname,
 		Type:    "CNAME",
 		Content: tunnel.Status.TunnelId + ".cfargotunnel.com",
 		Proxied: true,
-		Comment: ownership.From(exposure.UID).Comment(),
+		Comment: owner.Comment(),
 	}
 	records, err := cfClient.DNSRecords().List(ctx, zone.ID, exposure.Spec.Hostname, "CNAME")
 	if err != nil {
 		return nil, dnsReconcileUnchanged, err
 	}
-	owner := ownership.From(exposure.UID)
 	var owned *cloudflare.DNSRecord
 	for _, record := range records {
 		if !owner.MatchesComment(record.Comment) {
@@ -434,7 +453,11 @@ func (r *CloudflareExposureReconciler) reconcileDelete(ctx context.Context, expo
 	if !controllerutil.ContainsFinalizer(exposure, naming.Finalizer) {
 		return ctrl.Result{}, nil
 	}
-	if exposure.Status.Cloudflare.AccessApplicationId == "" && exposure.Status.Cloudflare.DnsRecordId == "" {
+	failover := exposure.Spec.Failover != nil
+	// Non-failover Exposures with nothing written can drop the finalizer
+	// without fetching credentials. Failover Exposures always take the
+	// cleanup path so a Primary's lease record is removed before the CR goes.
+	if !failover && exposure.Status.Cloudflare.AccessApplicationId == "" && exposure.Status.Cloudflare.DnsRecordId == "" {
 		controllerutil.RemoveFinalizer(exposure, naming.Finalizer)
 		return ctrl.Result{}, r.Update(ctx, exposure)
 	}
@@ -445,6 +468,19 @@ func (r *CloudflareExposureReconciler) reconcileDelete(ctx context.Context, expo
 	cfClient, err := r.CloudflareClient(ctx, credentialsRefFromTunnel(&tunnel))
 	if err != nil {
 		return r.setExposureStatusAndRequeue(ctx, exposure, exposure.Status.Cloudflare, ReasonCredentialsMissing, err.Error())
+	}
+	if failover {
+		// Remove this site's lease (no-op if a peer owns it), then leave the
+		// shared Access app + public CNAME untouched unless this site is the
+		// Primary — a Standby's deletion must not tear down the surface a
+		// peer is still serving.
+		if err := r.deleteOwnedLeaseIfPresent(ctx, exposure, cfClient); err != nil {
+			return ctrl.Result{}, err
+		}
+		if !isPrimary(exposure) {
+			controllerutil.RemoveFinalizer(exposure, naming.Finalizer)
+			return ctrl.Result{}, r.Update(ctx, exposure)
+		}
 	}
 	deletedDNS, err := r.deleteOwnedDNSIfPresent(ctx, exposure, cfClient)
 	if err != nil {
@@ -478,7 +514,7 @@ func (r *CloudflareExposureReconciler) deleteOwnedAccessIfPresent(ctx context.Co
 	if err != nil {
 		return false, err
 	}
-	owner := ownership.From(exposure.UID)
+	owner := exposureOwner(exposure)
 	deleted := false
 	for _, app := range apps {
 		if app.ID != exposure.Status.Cloudflare.AccessApplicationId {
@@ -518,7 +554,7 @@ func (r *CloudflareExposureReconciler) deleteOwnedDNSIfPresent(ctx context.Conte
 	if err != nil {
 		return false, err
 	}
-	owner := ownership.From(exposure.UID)
+	owner := exposureOwner(exposure)
 	for _, record := range records {
 		if record.ID != exposure.Status.Cloudflare.DnsRecordId {
 			continue
@@ -548,11 +584,14 @@ func (r *CloudflareExposureReconciler) setExposureStatus(ctx context.Context, ex
 	})
 }
 
-func (r *CloudflareExposureReconciler) setExposureStatusAndBackoff(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, cfStatus cfztv1alpha1.ExposureCloudflareStatus, reason, message string) error {
-	if err := r.setExposureStatus(ctx, exposure, cfStatus, false, reason, message); err != nil {
+// setExposureStatusAndBackoff records a DNS/Cloudflare write failure and
+// returns it as an error so controller-runtime applies exponential backoff
+// (requeue policy: transient CF failures back off, waiting states requeue 30s).
+func (r *CloudflareExposureReconciler) setExposureStatusAndBackoff(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, cfStatus cfztv1alpha1.ExposureCloudflareStatus, message string) error {
+	if err := r.setExposureStatus(ctx, exposure, cfStatus, false, ReasonDNSWriteFailed, message); err != nil {
 		return err
 	}
-	return fmt.Errorf("%s: %s", reason, message)
+	return fmt.Errorf("%s: %s", ReasonDNSWriteFailed, message)
 }
 
 func (r *CloudflareExposureReconciler) setExposureStatusAndRequeue(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, cfStatus cfztv1alpha1.ExposureCloudflareStatus, reason, message string) (ctrl.Result, error) {
