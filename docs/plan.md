@@ -361,9 +361,8 @@ Completed on 2026-06-02 (Slice 7 review remediation, PR #7):
   the controller records the honored token and never mutates the annotation
   (GitOps replay-safe).
 - Reject `spec.failover` on the chart-default `--site-id`
-  (`FailoverRequiresDistinctSiteID`); reject same-namespace duplicate
-  `spec.failover.group` (`FailoverGroupConflict`, per-namespace scope so a
-  cross-cluster pair sharing a namespace name is not false-flagged).
+  (`FailoverRequiresDistinctSiteID`); reject same-cluster duplicate
+  `spec.failover.group` (`FailoverGroupConflict`, cluster-wide — see round 3).
 - Deletion proves live lease ownership (`holdsLiveLease`) before tearing down
   the shared CNAME/Access, never the stale persisted role.
 - Metrics gained a `site_id` label. New envtests:
@@ -376,6 +375,16 @@ Completed on 2026-06-02 (Slice 7 review remediation, PR #7):
   removes every record this site owns (all duplicates, never a peer's). The
   duplicate-unaware `readLease`/`errLeaseForeign` were removed. New envtest
   `TestFailoverDeleteWithDuplicateLeasesFailsSafe`.
+- Review round 3: the round-1 namespace-scoped group guard was a production
+  hole — the lease name has no namespace and all Exposures in a cluster share
+  one `--site-id`, so two same-group members in one cluster share a lease and
+  each read it as self-owned. Reverted to **cluster-wide** group uniqueness
+  (`hasFailoverGroupConflict` no longer filters by namespace; spec wording back
+  to "same cluster"). Deleted `exposure_failover_twosite_test.go` (it
+  co-located two same-group CRs in one apiserver, which the invariant forbids);
+  its scenarios are covered by the single-reconciler + seeded-peer suite, and
+  the one unique bit (a Primary adopting a peer-created group-owned CNAME) is
+  retained as `TestFailoverPrimaryAdoptsPeerGroupCNAME`.
 
 Next: Slice 7 complete (review remediation landed). MVP slices 1-7 in;
 remaining work is release hardening and CI on PR #7.

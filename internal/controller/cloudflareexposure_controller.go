@@ -341,13 +341,17 @@ func (r *CloudflareExposureReconciler) hasDuplicateHostname(ctx context.Context,
 	return false, nil
 }
 
-// hasFailoverGroupConflict reports whether another CloudflareExposure in the
-// same namespace shares this Exposure's spec.failover.group. Two such Exposures
-// would contend over the same lease record and group ownership identity (D26),
-// so both must back off without touching Cloudflare. Scope is per-namespace:
-// across clusters the two group members live in separate apiservers (and may
-// share a namespace name), so a cluster-wide check would false-positive a
-// legitimate cross-cluster pair when both are observed in one test apiserver.
+// hasFailoverGroupConflict reports whether another CloudflareExposure anywhere
+// in this cluster shares this Exposure's spec.failover.group. The lease name
+// (_cfzt-lease.<hash8(group)>.<zone>) carries no namespace or hostname, and all
+// Exposures in a cluster share one operator process / --site-id, so two members
+// of the same group in one cluster would resolve to the same lease record and
+// each read lease.Site == its own site-id — both treating it as self-owned with
+// no mutual exclusion. The invariant is therefore one group member per cluster
+// (D26); both contending Exposures back off without touching Cloudflare. This is
+// cluster-wide, not per-namespace: the legitimate cross-cluster pair lives in
+// separate apiservers, so each operator lists only its own cluster and never
+// trips.
 func (r *CloudflareExposureReconciler) hasFailoverGroupConflict(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure) (bool, error) {
 	if exposure.Spec.Failover == nil {
 		return false, nil
@@ -357,7 +361,7 @@ func (r *CloudflareExposureReconciler) hasFailoverGroupConflict(ctx context.Cont
 		return false, err
 	}
 	for _, other := range others {
-		if other.UID != exposure.UID && other.Namespace == exposure.Namespace && other.DeletionTimestamp.IsZero() {
+		if other.UID != exposure.UID && other.DeletionTimestamp.IsZero() {
 			return true, nil
 		}
 	}

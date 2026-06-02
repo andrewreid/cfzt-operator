@@ -289,6 +289,34 @@ var _ = Describe("CloudflareExposure failover role gate", func() {
 		expectRecordedEvent(exposureRecorder, EventPromotedToPrimary)
 	})
 
+	It("TestFailoverPrimaryAdoptsPeerGroupCNAME", func() {
+		// A peer (other site) previously created the shared, group-owned CNAME.
+		// When this site promotes it must UPDATE that record to its own tunnel —
+		// the mutation guard accepts the group ID from the other site — not
+		// create a duplicate or trip HostnameConflict.
+		tunnel := readyTunnel(ctx, tunnelReconciler, "fo-adopt", "fo-adopt")
+		cfTunnel := fetchTunnel(ctx, tunnel.Name)
+		exposure := createFailoverExposure(ctx, "fo-adopt-app", tunnel.Name, "fo-adopt.example.com", "fo-adopt-grp")
+		_, err := fakeCF.DNSRecords().Create(ctx, cloudflare.DNSRecordInput{
+			ZoneID:  zoneID,
+			Name:    "fo-adopt.example.com",
+			Type:    "CNAME",
+			Content: "peer-tunnel.cfargotunnel.com",
+			Proxied: true,
+			Comment: ownership.FromFailoverGroup("fo-adopt-grp").Comment(),
+		})
+		Expect(err).NotTo(HaveOccurred())
+		seedLease("fo-adopt-grp", sitePeer, "peer-tunnel", testNow.Add(-1*time.Second))
+
+		reconcileExposure(ctx, exposureRec, exposure)
+
+		Expect(fetchExposure(ctx, exposure.Name).Status.Failover.Role).To(Equal(string(dr.RolePrimary)))
+		records, err := fakeCF.DNSRecords().List(ctx, zoneID, "fo-adopt.example.com", "CNAME")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(records).To(HaveLen(1), "must adopt the peer's group-owned CNAME, not duplicate it")
+		Expect(records[0].Content).To(Equal(cfTunnel.Status.TunnelId + ".cfargotunnel.com"))
+	})
+
 	It("TestFailoverReturnedPrimaryStandsDown", func() {
 		tunnel := readyTunnel(ctx, tunnelReconciler, "fo-return", "fo-return")
 		exposure := createFailoverExposure(ctx, "fo-return-app", tunnel.Name, "fo-return.example.com", "fo-return-grp")
