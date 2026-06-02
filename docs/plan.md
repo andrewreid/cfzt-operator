@@ -10,7 +10,7 @@ Slice 5 (`CloudflareTunnelRoute` CRD, D25) added under `## 3. Slice plan` after 
 
 Slice 7 — DR failover (≡ `spec.md` Slice 6, D26) added under `## 3. Slice plan` — active-passive multi-cluster DR via per-Exposure `spec.failover` + a Cloudflare DNS TXT lease is now in scope per `spec.md ## Decisions` D26 (which supersedes the old "multi-cluster out of scope" D9). The plan's "Slice 6" label is the engineering-only Pre-MVP cleanup; the DR product slice is "Slice 7" here to avoid a local numbering collision (spec calls it Slice 6).
 
-Slice 8 — Path-scoped Access applications (≡ `spec.md` Slice 7, D27) added under `## 3. Slice plan` — one `CloudflareExposure` can own multiple Cloudflare Access self-hosted applications for the same hostname, including path-specific applications with different ordered policy bindings. DNS and tunnel ingress remain one-hostname-per-Exposure.
+Slice 8a/8b — Path-scoped Access applications (≡ `spec.md` Slice 7a/7b, D27) added under `## 3. Slice plan` — `CloudflareExposure.spec.access.applications[]` becomes the only Access-enabled shape, then one Exposure can own multiple Cloudflare Access self-hosted applications for the same hostname, including path-specific applications with different ordered policy bindings. DNS and tunnel ingress remain one-hostname-per-Exposure.
 
 Not covered: post-MVP work (annotation UX, Ingress source, WARP, Gateway, OLM, multi-cluster active-active / federation, additional Access rule types beyond Slice 4 subset). Decisions are not re-derived here — see `spec.md ## Decisions`.
 
@@ -495,7 +495,7 @@ Subtask-derived additions: `TestExposureCRDValidationSliceThreeRelaxed` also pas
 
 ### Slice 4 — Managed Access policies
 
-Per `spec.md ## Implementation slices ### Slice 4` (D24). Outcome: `CloudflareAccessPolicy` CR creates and maintains a reusable account-level Cloudflare Access policy. `CloudflareExposure.spec.access.policyRef.name` binds an Exposure to a managed policy as an alternative to `uuid`.
+Per `spec.md ## Implementation slices ### Slice 4` (D24). Outcome: `CloudflareAccessPolicy` CR creates and maintains a reusable account-level Cloudflare Access policy. Slice 4 originally binds `CloudflareExposure.spec.access.policyRef.name` as an alternative to `uuid`; Slice 8a/D27 later removes that top-level Exposure field and moves the same `{uuid, name}` ref shape under `spec.access.applications[].policies[].policyRef`.
 
 **Subtasks**
 
@@ -507,7 +507,7 @@ Per `spec.md ## Implementation slices ### Slice 4` (D24). Outcome: `CloudflareAc
 
 2. **Extend Exposure CRD: `policyRef.name` + relaxed CEL.**
    - Files: `api/v1alpha1/cloudflareexposure_types.go`.
-   - Implements: `spec.md ## CRD model` Exposure schema update (`policyRef.name`) + `## CRD validation` rewrite of the access CEL rule to exactly-one-of {uuid, name} when `access.enabled: true`.
+   - Implements: `spec.md ## CRD model` Exposure schema update (`policyRef.name`) + `## CRD validation` rewrite of the access CEL rule to exactly-one-of {uuid, name} when `access.enabled: true`. Superseded by Slice 8a/D27 for new operator versions.
    - Tests: `TestExposurePolicyRefOneOfValidation` (uuid alone OK; name alone OK; both → reject; neither → reject when enabled; neither → OK when disabled).
    - Regenerate manifests + commit.
 
@@ -536,7 +536,7 @@ Per `spec.md ## Implementation slices ### Slice 4` (D24). Outcome: `CloudflareAc
    - Implements: D21 finalizer on `CloudflareAccessPolicy`; `spec.md ## Ownership and deletion semantics` policy deletion rule. Mutation guard: only delete CF policy when `source-uid` tag matches (fall back to ID equality if SDK has no tag field).
    - Tests: `TestAccessPolicyFinalizerBlockedByExposures`, `TestAccessPolicyFinalizerUnblocks`.
 
-8. **Exposure controller: resolve `policyRef.name` → bind via `Applications.Policies.Update`.**
+8. **Exposure controller: resolve top-level `policyRef.name` → bind via `Applications.Policies.Update`.**
    - Files: extend `internal/controller/cloudflareexposure_controller.go`; add `policyToExposures` watch map.
    - Implements: `spec.md ## CRD model` Exposure responsibility 3 rewrite (uuid OR name resolution), `Reason=PolicyNotReady` when target Policy CR exists but is not yet `Ready=True` or `status.policyId` empty. D20 Slice 4 addition: Exposure `.Watches(&CloudflareAccessPolicy{}, policyToExposures)`.
    - Tests: `TestExposurePolicyRefName` (happy path), `TestExposurePolicyRefNamePolicyNotReady`, `TestExposurePolicyRefNameMissingPolicyCR` (→ `Reason=PolicyNotFound`).
@@ -555,7 +555,7 @@ Per `spec.md ## Implementation slices ### Slice 4` (D24). Outcome: `CloudflareAc
 
 - `kubectl apply` of a `CloudflareAccessPolicy` creates a CF Access policy, populates `status.policyId`, sets `Ready=True`.
 - A pre-existing CF policy with name collision and no local ID record is recovered only when its full Cloudflare policy shape exactly matches the CR; mismatches go `Ready=False, Reason=ForeignPolicy`, no mutation of the foreign policy.
-- An Exposure with `policyRef.name` binds the policy ID once the Policy CR becomes ready.
+- An Exposure with Slice 4 top-level `policyRef.name` binds the policy ID once the Policy CR becomes ready. Slice 8a migrates this to nested `applications[].policies[].policyRef.name`.
 - `kubectl delete` of a Policy CR with referencing Exposures is blocked (`Reason=BlockedByExposures`); succeeds once references are removed.
 - Editing `spec.rules` on a Policy CR rewrites the CF policy and propagates a reconcile to all referencing Exposures.
 - envtest tests pass: `TestAccessPolicyCreate`, `TestAccessPolicyExactMatchOrphanRecovery`, `TestAccessPolicyForeignRefuses`, `TestAccessPolicyRulesDrift`, `TestAccessPolicyFinalizerBlockedByExposures`, `TestAccessPolicyFinalizerUnblocks`, `TestExposurePolicyRefName`, `TestExposurePolicyRefNamePolicyNotReady`, `TestExposurePolicyRefOneOfValidation`.
@@ -1103,7 +1103,7 @@ This is the **largest reconciliation-semantics change since Slice 2** (new role 
 
 7. **Exposure controller: role gate, promotion/demotion, events, metrics.**
    - Files: `internal/controller/cloudflareexposure_controller.go`, reuse `conditions.go`, `Base`.
-   - Implements: read lease + determine role at top of reconcile (before Access/DNS steps); Standby writes `status.failover` and early-returns (no shared Access/DNS writes) while still letting the owning Tunnel reconcile its connector; Primary writes Access + DNS with the group-ID `source-uid` and runs the renewal loop; auto-promote on `now > leaseExpiresAt + jitter`; `cfzt.reid.ee/force-promote` annotation forces a CAS acquire and is cleared after success; demotion + `SplitBrainDetected`; `Ready=False, Reason=FailoverRequiresManagedDNS` when the referenced Tunnel has `dns.manage: false`. Emit `PromotedToPrimary`, `DemotedToStandby`, `LeaseAcquired`, `LeaseRenewed`, `LeaseLost`, `LeaseConflict`, `SplitBrainDetected`, `ForcePromoted`. Wire metrics `cfzt_failover_role`, `cfzt_failover_lease_renew_total`, `cfzt_failover_promotion_total`.
+   - Implements: read lease + determine role at top of reconcile (before Access/DNS steps); Standby writes `status.failover` and early-returns (no shared Access/DNS writes) while still letting the owning Tunnel reconcile its connector; Primary writes the full Access application set and DNS with the group-ID `source-uid` and runs the renewal loop; auto-promote on `now > leaseExpiresAt + jitter`; `cfzt.reid.ee/force-promote` annotation forces a CAS acquire and is cleared after success; demotion + `SplitBrainDetected`; `Ready=False, Reason=FailoverRequiresManagedDNS` when the referenced Tunnel has `dns.manage: false`. Emit `PromotedToPrimary`, `DemotedToStandby`, `LeaseAcquired`, `LeaseRenewed`, `LeaseLost`, `LeaseConflict`, `SplitBrainDetected`, `ForcePromoted`. Wire metrics `cfzt_failover_role`, `cfzt_failover_lease_renew_total`, `cfzt_failover_promotion_total`.
    - Implements: `spec.md ## DR failover` (Role state machine, Operator behaviour matrix), `## Status and conditions` (new reasons), `## Observability` (events + metrics).
    - Tests: `TestFailoverAutoPromoteOnExpiry`, `TestFailoverReturnedPrimaryStandsDown`, `TestFailoverForcePromoteAnnotation`, `TestFailoverDNSManagedRequired`.
 
@@ -1114,7 +1114,7 @@ This is the **largest reconciliation-semantics change since Slice 2** (new role 
 
 9. **Live Cloudflare smoke extension.**
    - Files: `test/live/cloudflare_smoke_test.go`, `hack/live-cloudflare-local.sh`, `.env.live.example`.
-   - Implements: `TestFailoverLifecycle` — two `--site-id` operator processes against a real Cloudflare account and a single test hostname; assert one Primary, auto-promote after killing the primary process, returning-primary self-demote, clean teardown of the lease TXT + shared CNAME + Access app. Packet routing is out of scope; CF-side lease + DNS + Access lifecycle is sufficient.
+   - Implements: `TestFailoverLifecycle` — two `--site-id` operator processes against a real Cloudflare account and a single test hostname; assert one Primary, auto-promote after killing the primary process, returning-primary self-demote, clean teardown of the lease TXT + shared CNAME + Access application set. Packet routing is out of scope; CF-side lease + DNS + Access lifecycle is sufficient.
    - Tests: `TestFailoverLifecycle`; `TestCloudflarePreflight` unchanged (lease reuses the existing `Zone:DNS:Edit` scope).
 
 10. **RBAC + Helm sync.**
@@ -1124,7 +1124,7 @@ This is the **largest reconciliation-semantics change since Slice 2** (new role 
 **Definition of done** (from `spec.md ## Implementation slices ### Slice 6`):
 
 - Two clusters apply an identical `CloudflareExposure` with matching `spec.failover.group` and distinct `--site-id` → exactly one reports `status.failover.role == Primary`; the other `Standby` with `leaseOwner` set to the primary's site ID.
-- Stopping the primary's lease renewer for `leaseSeconds + jitter` → the standby auto-promotes; the CF Access app `source-uid` remains the failover-group ID; the public DNS CNAME flips to the new tunnel ID; `PromotedToPrimary` / `LeaseAcquired` events emit.
+- Stopping the primary's lease renewer for `leaseSeconds + jitter` → the standby auto-promotes; every CF Access app `source-uid` remains the failover-group ID; the public DNS CNAME flips to the new tunnel ID; `PromotedToPrimary` / `LeaseAcquired` events emit.
 - A returning former primary self-demotes (`DemotedToStandby`) on its first reconcile and performs no Cloudflare writes for the shared hostname.
 - `cfzt.reid.ee/force-promote=true` → immediate CAS acquire regardless of expiry; controller removes the annotation after success and emits `ForcePromoted`.
 - A failover Exposure on a `dns.manage: false` tunnel → `Ready=False, Reason=FailoverRequiresManagedDNS`, no lease written.
@@ -1143,72 +1143,126 @@ Subtask-derived additions also pass: `TestFakeDNSRecordIDStable`, `TestFakeDNSCA
 - **Renewal goroutine lifecycle.** The renewal loop must stop cleanly on demotion, CR delete, and manager shutdown to avoid a demoted process renewing a lease it no longer owns. Cover demotion-stops-renewal in envtest.
 - **Scope creep.** Active-active, automatic primary restoration, cross-zone failover, and LB-based failover are explicitly out (D26). Resist widening.
 
-### Slice 8 — Path-scoped Access applications (spec Slice 7, D27)
+### Slice 8a — Access application API foundation (spec Slice 7a, D27)
 
-Per `spec.md ## Implementation slices ### Slice 7` and D27. Outcome: one `CloudflareExposure` can own multiple Cloudflare Access self-hosted applications for one hostname, including path-specific applications with different ordered policy bindings. DNS and tunnel ingress stay one-hostname-per-Exposure; path scoping is Cloudflare Access application state.
+Per `spec.md ## Implementation slices ### Slice 7a` and D27. Outcome: `CloudflareExposure.spec.access.applications[]` becomes the only Access-enabled API shape, the old top-level `spec.access.policyRef` is rejected with a migration error, and a one-entry application list preserves the root Access app behaviour before multi-app fan-out is added.
 
-This is a reconciliation-semantics change, not just a CRD expansion. It changes the Access app desired-state shape from one app/one policy to N apps/N ordered policy links, plus deletion of removed app entries. Keep the old shorthand path fully compatible.
+This is intentionally a breaking migration for the new operator version. Do not keep a compatibility reconcile path for top-level `policyRef`; it creates two sources of truth and keeps the status model split for no operational win.
+
+Before implementation, keep the D27 Cloudflare spike result visible in the work item. The 2026-06-02 live spike with temporary Access apps confirmed:
+
+- Path primary domains such as `<host>/v1/health` are accepted.
+- Middle wildcards such as `<host>/foo*/bar` are accepted.
+- Multiple apps sharing the same bare primary `domain` are rejected by Cloudflare.
+- `List(domain=<host>, Exact=true)` returns only the bare-host app; broad `List(domain=<host>)` sees the bare and path apps.
+
+Therefore implementation must not use `Exact=true` for path-app discovery. Use broad hostname listing, or list-all plus client-side canonical filtering if the SDK/API shape requires it.
 
 **Subtasks**
 
+0. **Preserve the live spike as evidence.**
+   - Files: `test/live/cloudflare_smoke_test.go` or a small `hack/` script if the smoke harness is not ready yet.
+   - Implements: create temporary policy/apps using the live-smoke credentials, assert the Cloudflare behaviours above, and assert cleanup leaves zero temporary apps/policies.
+   - Tests: `TestCloudflareAccessApplicationPathDiscoverySpike` or equivalent script output committed only if it is deterministic and secret-free.
+
 1. **CRD/API fields + generated output.**
    - Files: `api/v1alpha1/cloudflareexposure_types.go`, generated deepcopy, CRDs, Helm CRD copy.
-   - Implements: `AccessApplicationTarget`, `AccessApplicationPolicyBinding`, `ExposureAccessApplicationStatus`; `spec.access.applications[]` as a map list keyed by `name`; `status.cloudflare.accessApplications[]` as a map list keyed by `name`; legacy `status.cloudflare.accessApplicationId` retained for the shorthand app only.
-   - Validation: `access.enabled=true` requires exactly one of legacy `policyRef` or non-empty `applications[]`; explicit `applications[]` requires `spec.hostname` to be set in the CR; nested policy bindings require exactly one of `{uuid, name}`; domains must be equal to `spec.hostname` or start with `spec.hostname + "/"`; reject schemes, ports, query strings, fragments, empty policies, and duplicate canonical target coverage.
-   - Tests: `TestExposureAccessApplicationsCRDValidation`, plus existing `TestExposurePolicyRefOneOfValidation` stays green for legacy manifests.
+   - Implements: `AccessApplicationTarget`, `AccessApplicationPolicyBinding`, `ExposureAccessApplicationStatus`; `spec.access.applications[]` as a map list keyed by `name`; `status.cloudflare.accessApplications[]` as a map list keyed by `name`; remove `status.cloudflare.accessApplicationId` from current readiness/drift semantics.
+   - Validation: `access.enabled=true` requires explicit `spec.hostname` and non-empty `applications[]`; top-level `spec.access.policyRef` is rejected if present with `access.policyRef was removed in v1alpha1; use access.applications[]`; nested policy bindings require exactly one of `{uuid, name}`; domains must equal `spec.hostname` or start with `spec.hostname + "/"`; reject empty policies.
+   - Tests: `TestExposureAccessApplicationsCRDValidation`, `TestExposurePolicyRefRemovedValidation`, existing Slice 2/4 Access tests migrated to the new one-entry app list.
 
 2. **Access target canonicalization + hashes.**
    - Files: new small helper under `internal/controller` or `internal/accessapp` if reuse pressure appears.
-   - Implements: canonical domain target parsing, `<host>` and `<host>/*` duplicate treatment, deterministic sorted-domain hash for status/no-op comparison, ordered-policy hash preserving policy precedence.
+   - Implements: canonical domain target parsing, `<host>` and `<host>/*` duplicate treatment, D27 path/glob grammar, deterministic sorted-domain hash for status/no-op comparison, ordered-policy hash preserving policy precedence.
    - Tests: `TestAccessTargetCanonicalization`, `TestAccessTargetRejectsUnsupportedURLParts`, `TestAccessTargetHashesDeterministic`.
 
 3. **`internal/cloudflare` Access app interface and fake.**
    - Files: `internal/cloudflare/access_applications.go`, `fake.go`, `fake_test.go`.
    - Implements: change `AccessApplicationInput` to `Domains []string` and `PolicyUUIDs []string`; read shape returns all self-hosted domains and ordered policy UUIDs; fake create/update/delete models multiple domains and ordered policy links exactly.
-   - Tests: `TestFakeAccessApplicationMultipleDomainsAndPolicies`, `TestFakeAccessApplicationsEnsuresTagsImplicitly`, existing single-policy fake tests adapted to the legacy desired-shape builder.
+   - Tests: `TestFakeAccessApplicationMultipleDomainsAndPolicies`, `TestFakeAccessApplicationsEnsuresTagsImplicitly`, existing single-policy fake tests adapted to the new one-entry desired-shape builder.
 
 4. **Real Cloudflare SDK mapping.**
    - Files: `internal/cloudflare/real.go`, `real_test.go`.
-   - Implements: map `Domains []string` to SDK `SelfHostedDomains`; map `PolicyUUIDs []string` to policy-link unions with `Precedence` equal to list index; read back `self_hosted_domains` and policy IDs from list/create/update responses. Verify exact SDK surface via Cloudflare MCP or local `cloudflare-go/v4` types before coding.
+   - Implements: map the first canonical domain to primary `domain`; map `Domains []string` to SDK `SelfHostedDomains`; map `PolicyUUIDs []string` to policy-link unions with `Precedence` equal to list index; read back `domain`, `self_hosted_domains`, and policy IDs from list/create/update responses. Verify exact SDK surface via Cloudflare MCP or local `cloudflare-go/v4` types before coding.
    - Tests: `TestRealAccessApplicationMapsSelfHostedDomainsAndPrecedence`; existing `accessAppFrom*Response` tests updated for multiple domains and policies.
 
-5. **Exposure desired-state builder.**
+5. **Exposure desired-state builder for the migrated root app.**
    - Files: `internal/controller/cloudflareexposure_controller.go` plus a focused helper if needed.
-   - Implements: legacy `policyRef` builds one app named `<displayName|metadata.name>-cfzt` with domain `[spec.hostname]`; explicit `applications[]` builds names from `<displayName|metadata.name>-<app.name>-cfzt`, truncating the base and appending a stable hash when required to fit Cloudflare limits; resolves all `policyRef.uuid`/`policyRef.name` bindings before writes; propagates `PolicyNotFound` and `PolicyNotReady`.
-   - Tests: `TestExposureAccessApplicationsPolicyRefNameNotReady`, `TestExposureAccessApplicationsResolveNestedPolicyRefs`, existing `TestExposurePolicyRefName` remains the legacy path.
+   - Implements: build desired apps only from `applications[]`; initially require exactly one app entry for this slice if that materially reduces reconciliation blast radius; generate names from `<displayName|metadata.name>-<app.name>-cfzt`; resolve all nested `policyRef.uuid`/`policyRef.name` bindings before writes; propagate `PolicyNotFound` and `PolicyNotReady`. Do not invent hidden truncation until the Cloudflare app-name limit is verified; prefer validation over silent renaming.
+   - Tests: `TestExposureAccessApplicationsPolicyRefNameNotReady`, `TestExposureAccessApplicationsResolveNestedPolicyRefs`, `TestExposurePolicyRefNameMigratedToNestedBinding`.
 
-6. **Exposure reconcile create/update/delete for app sets.**
+6. **Single-app reconcile and status migration.**
    - Files: `internal/controller/cloudflareexposure_controller.go`.
-   - Implements: list apps for the hostname, match owned apps by source-uid and desired canonical targets, create missing apps, update name/domain/policy/tag drift, delete status-tracked owned apps removed from spec, and delete all status-tracked owned apps when `access.enabled` flips false. Keep status writes deterministic.
-   - Tests: `TestExposureAccessApplicationsCreate`, `TestExposureAccessApplicationsPolicyOrderDrift`, `TestExposureAccessApplicationRemovedDeletesOnlyOwnedApp`, `TestExposureAccessDisabledDeletesAllOwnedApps`.
+   - Implements: reconcile the one desired app through the new `Domains []string` / `PolicyUUIDs []string` client shape; set/read `status.cloudflare.accessApplications[]`; readiness gates on the map status plus live owned app. `status.cloudflare.accessApplicationId` is no longer used.
+   - Tests: `TestExposureAccessApplicationsSingleRootCreate`, `TestExposureAccessApplicationsSingleRootDrift`, `TestExposureAccessDisabledDeletesAllOwnedApps`.
 
-7. **Ownership, conflict, and finalizer paths.**
-   - Files: `internal/controller/cloudflareexposure_controller.go`, `conditions.go` if reason/event constants need expansion.
-   - Implements: exact canonical Access target conflict detection; `HostnameConflict` on foreign-tagged app for `<host>`/`<host>/*` or any exact desired path; no mutation of foreign apps; finalizer deletes all owned status-tracked apps and leaves foreign-tagged apps alone.
-   - Tests: `TestExposureAccessApplicationsForeignTargetConflict`, `TestExposureFinalizerDeletesAllAccessApps`, `TestExposureFinalizerLeavesForeignAccessApps`.
-
-8. **AccessPolicy cross-watch and reference accounting.**
+7. **AccessPolicy cross-watch and reference accounting.**
    - Files: `internal/controller/cloudflareaccesspolicy_controller.go`, Exposure/Policy mapper helpers.
-   - Implements: `referencedBy` and `referencedByCount` include both legacy `spec.access.policyRef.name` and nested `spec.access.applications[].policies[].policyRef.name`; AccessPolicy watcher enqueues Exposures with nested refs; deletion remains blocked by either reference shape.
+   - Implements: `referencedBy` and `referencedByCount` include nested `spec.access.applications[].policies[].policyRef.name`; AccessPolicy watcher enqueues Exposures with nested refs; deletion remains blocked by nested references.
    - Tests: `TestAccessPolicyReferencedByNestedApplications`, `TestAccessPolicyFinalizerBlockedByNestedExposure`, `TestExposureReconcilesWhenNestedPolicyBecomesReady`.
 
-9. **Docs and examples.**
+**Definition of done**
+
+- Top-level `spec.access.policyRef` is rejected by CRD validation with the migration message.
+- A one-entry `access.applications[]` root app reconciles one Cloudflare Access application with expected primary `domain`, `self_hosted_domains`, ordered policy links, ownership tags, deterministic `accessApplications[]` status, and no duplicate writes on reapply.
+- Nested managed policy refs block with `PolicyNotFound` / `PolicyNotReady` until the target Policy CR is ready, then bind the resolved `status.policyId`.
+- Existing Slice 2/4 tests are migrated to the new API; no compatibility-only legacy tests remain.
+- `make manifests generate && git diff --exit-code`, `go test ./...`, and `helm lint charts/cfzt-operator` are clean.
+- The live spike or smoke leaves no temporary Access apps or policies behind.
+
+**Risks**
+
+- **Half-migration ambiguity.** Keeping top-level `policyRef` accepted would make user migration optional and force the controller to maintain two status paths. Reject it early and loudly.
+- **SDK shape drift.** Verify `cloudflare-go/v4` request/response structs at coding time; keep all SDK mapping behind `internal/cloudflare`.
+- **Name length guesswork.** Do not freeze truncate+hash until the Cloudflare app-name limit is confirmed. A validation error is better than an undocumented rename.
+
+### Slice 8b — Multi-app path-scoped Access sets (spec Slice 7b, D27)
+
+Per `spec.md ## Implementation slices ### Slice 7b` and D27. Outcome: one `CloudflareExposure` owns a full set of Cloudflare Access self-hosted applications for one hostname, including path-specific applications with different ordered policy bindings. DNS and tunnel ingress stay one-hostname-per-Exposure; path scoping is Cloudflare Access application state.
+
+**Subtasks**
+
+1. **Enable multi-entry desired-state building.**
+   - Files: `internal/controller/cloudflareexposure_controller.go` plus the Slice 8a helper.
+   - Implements: remove any temporary one-app limit; build one desired app per `applications[]` entry; primary `domain` is the first canonical domain in the entry; `self_hosted_domains` is the full canonical domain set.
+   - Tests: `TestExposureAccessApplicationsBuildRootAndPaths`, `TestExposureAccessApplicationsRejectDuplicateCanonicalCoverage`.
+
+2. **Remote discovery for path apps.**
+   - Files: `internal/cloudflare/access_applications.go`, `internal/controller/cloudflareexposure_controller.go`.
+   - Implements: list Access apps broadly by hostname or list-all when needed, then client-side filter by canonical `domain` and `self_hosted_domains` under `spec.hostname`. Never use `Exact=true` for D27 discovery.
+   - Tests: `TestAccessApplicationDiscoveryIncludesPathApps`, `TestExposureAccessApplicationsBroadListFiltersForeignHosts`.
+
+3. **Validate-all-before-mutate conflict pass.**
+   - Files: `internal/controller/cloudflareexposure_controller.go`.
+   - Implements: canonicalize every desired and relevant remote target; if any exact target is foreign-tagged, set `Ready=False, Reason=HostnameConflict` and perform no Access, DNS, or tunnel-ingress mutation in that reconcile.
+   - Tests: `TestExposureAccessApplicationsForeignTargetConflict`, `TestExposureAccessApplicationsForeignConflictNoPartialMutation`.
+
+4. **Exposure reconcile create/update/delete for app sets.**
+   - Files: `internal/controller/cloudflareexposure_controller.go`.
+   - Implements: list apps for the hostname, match owned apps by source-uid and desired canonical targets, create missing apps, update name/domain/policy/tag drift, delete status-tracked owned apps removed from spec, and delete all status-tracked owned apps when `access.enabled` flips false. Keep status writes deterministic.
+   - Tests: `TestExposureAccessApplicationsCreateRootAndPaths`, `TestExposureAccessApplicationsPolicyOrderDrift`, `TestExposureAccessApplicationRemovedDeletesOnlyOwnedApp`, `TestExposureAccessDisabledDeletesAllOwnedApps`.
+
+5. **Ownership, finalizer, and failover paths.**
+   - Files: `internal/controller/cloudflareexposure_controller.go`, `conditions.go` if reason/event constants need expansion.
+   - Implements: finalizer deletes all owned status-tracked apps and leaves foreign-tagged apps alone; `access.enabled: false` cleanup removes all owned apps; failover Primary validates and writes the full app set with failover-group `source-uid`; Standby writes none of it.
+   - Tests: `TestExposureFinalizerDeletesAllAccessApps`, `TestExposureFinalizerLeavesForeignAccessApps`, `TestFailoverAccessApplicationsPrimaryWritesFullSet`, `TestFailoverAccessApplicationsStandbyWritesNone`.
+
+6. **Docs and examples.**
    - Files: `README.md` if public examples are being kept current in the same PR, plus `docs/architecture.md` if it still describes exactly one Access app per Exposure.
    - Implements: ntfy-style root authenticated app + public path app example; explicitly recommend root plus specific path overrides, not root plus redundant `/*` unless live smoke proves it.
    - Tests: docs are covered by normal markdown/static CI only if present.
 
-10. **Live Cloudflare smoke.**
+7. **Live Cloudflare smoke.**
     - Files: `test/live/cloudflare_smoke_test.go`, `hack/live-cloudflare-local.sh` only if a new mode/env var is needed.
-    - Implements: create root authenticated Access app and path bypass app for one hostname; assert the specific path bypasses while root and unrelated paths follow root policy; teardown all Access apps.
+    - Implements: create root authenticated Access app and path bypass app for one hostname; assert the specific path bypasses while root and unrelated paths follow root policy; teardown all temporary Access apps/policies and assert none remain.
     - Tests: `TestCloudflareAccessApplicationPathPolicies`.
 
 **Definition of done**
 
-- Legacy Exposure manifests with `spec.access.policyRef` still reconcile one Access app, still populate `status.cloudflare.accessApplicationId`, and all existing Slice 2/4 Access tests remain green.
 - Explicit `access.applications[]` reconciles root + path Access apps for one hostname, with expected `self_hosted_domains`, ordered policy links, ownership tags, deterministic status entries, and no duplicate writes on reapply.
 - Removing an app entry deletes only that owned app; disabling Access deletes all owned Access apps; finalizer deletes all owned Access apps and preserves foreign-tagged apps.
-- Nested managed policy refs block with `PolicyNotFound` / `PolicyNotReady` until the target Policy CR is ready, then bind the resolved `status.policyId`.
 - Foreign exact target collision gives `Ready=False, Reason=HostnameConflict`; no Access app, DNS record, or tunnel ingress write is attempted as part of resolving the conflict.
+- Failover Primary owns the entire app set with failover-group tags; Standby never writes the shared Access app set.
 - `make manifests generate && git diff --exit-code`, `go test ./...`, and `helm lint charts/cfzt-operator` are clean.
 - Live smoke `TestCloudflareAccessApplicationPathPolicies` passes against real Cloudflare.
 
@@ -1218,7 +1272,8 @@ This is a reconciliation-semantics change, not just a CRD expansion. It changes 
 - **Policy precedence misunderstanding.** The operator preserves listed policy order inside each app, but Cloudflare evaluates action classes first. Document that order cannot force Allow ahead of Bypass/Service Auth.
 - **Deletion blast radius.** Removed app entries are real deletes. Only delete status-tracked, ownership-tag-matching apps; never infer deletion solely from a same-name or same-domain remote object.
 - **Duplicate target ambiguity.** Treat `<host>` and `<host>/*` as duplicate desired coverage to avoid users creating two apps that both claim the root. Keep different specific paths independent.
-- **Status migration.** Existing CRs only have `accessApplicationId`. The legacy path must continue to use it; explicit app-list status starts empty and is populated on first reconcile without requiring manual migration.
+- **Cloudflare discovery blind spot.** `Exact=true` misses path apps. Broad/list-all discovery with client-side canonical filtering is mandatory, even if the exact query looks neater.
+- **Failover partial writes.** DR promotion must validate the whole app set before mutating anything. A Primary that creates the root app and then discovers a foreign path app leaves a mess.
 
 ## 4. Bootstrap subtasks (scaffold absent)
 
@@ -1268,7 +1323,7 @@ Slice 4 end-to-end:
 
 - Slice 1–3 smoke remain green.
 - Apply a `CloudflareAccessPolicy` per `spec.md ## CRD model ### CloudflareAccessPolicy` (decision `allow`, include rule `emailDomain: <your-domain>`). Wait for `Ready=True`; confirm `status.policyId` set and the policy appears in the Cloudflare dashboard with the expected `<base>-cfzt` name.
-- Apply a `CloudflareExposure` with `spec.access.policyRef.name: <policy-cr-name>`. Confirm `Ready=True` and the Access app binds the resolved UUID. `curl -v https://<hostname>` → Access challenge; authenticate, confirm origin response.
+- Before Slice 8a/D27, apply a `CloudflareExposure` with `spec.access.policyRef.name: <policy-cr-name>`. After Slice 8a/D27, apply the same reference under `spec.access.applications[].policies[].policyRef.name`. Confirm `Ready=True` and the Access app binds the resolved UUID. `curl -v https://<hostname>` -> Access challenge; authenticate, confirm origin response.
 - `kubectl edit cloudflareaccesspolicy <name>` — change an include rule. Within one reconcile, dashboard shows updated rule; all referencing Exposures re-bind cleanly.
 - `kubectl delete cloudflareaccesspolicy <name>` while an Exposure references it — confirm `Ready=False, Reason=BlockedByExposures`, policy CR not deleted, CF policy still present. Remove the referencing Exposure; confirm policy CR + CF policy are then deleted.
 - Negative: create a CF Access policy by hand in the dashboard named `<policy-cr-name>-cfzt`, then apply the matching `CloudflareAccessPolicy` CR — confirm `Ready=False, Reason=ForeignPolicy`, dashboard policy untouched.
