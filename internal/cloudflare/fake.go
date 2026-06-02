@@ -430,6 +430,47 @@ func (d *fakeDNSRecords) Delete(_ context.Context, zoneID, id string) error {
 	return nil
 }
 
+// CreateCAS enforces the failover-lease acquire invariant: at most one record
+// at a (zoneID, name, type) triple at a time. Two goroutines racing through
+// fake state under one shared FakeClient will see exactly one succeed and the
+// other receive ErrDNSCASConflict, mirroring the CAS-by-record_id contract of
+// the live Cloudflare DNS API.
+func (d *fakeDNSRecords) CreateCAS(_ context.Context, in DNSRecordInput) (*DNSRecord, error) {
+	d.fc.mu.Lock()
+	defer d.fc.mu.Unlock()
+	for _, existing := range d.fc.dnsRecords {
+		if existing.ZoneID == in.ZoneID && existing.Name == in.Name && existing.Type == in.Type {
+			return nil, ErrDNSCASConflict
+		}
+	}
+	id := uuid.New().String()
+	record := &DNSRecord{ID: id}
+	applyDNSRecord(record, in)
+	d.fc.dnsRecords[id] = record
+	copy := *record
+	return &copy, nil
+}
+
+// UpdateCAS enforces the failover-lease renewal invariant: the caller may
+// only mutate the record it observed. If the live record at the target triple
+// no longer carries expectedID — because a peer has acquired, the record was
+// removed, or the triple itself changed — the update is rejected so the
+// caller falls back to a re-read instead of clobbering the new owner's state.
+func (d *fakeDNSRecords) UpdateCAS(_ context.Context, expectedID string, in DNSRecordInput) (*DNSRecord, error) {
+	d.fc.mu.Lock()
+	defer d.fc.mu.Unlock()
+	record, ok := d.fc.dnsRecords[expectedID]
+	if !ok {
+		return nil, ErrDNSCASConflict
+	}
+	if record.ZoneID != in.ZoneID || record.Name != in.Name || record.Type != in.Type {
+		return nil, ErrDNSCASConflict
+	}
+	applyDNSRecord(record, in)
+	copy := *record
+	return &copy, nil
+}
+
 type fakeZones struct {
 	fc *FakeClient
 }
