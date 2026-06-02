@@ -2,13 +2,15 @@
 
 ## 1. Context
 
-Operational plan for shipping the cfzt-operator MVP in five slices (Tunnel/connector → Exposure → sourceRef derivation → managed Access policies → private network CIDR routes). Source of truth for architecture, decisions D1–D25, CRD shapes, RBAC, and DoD lists is `spec.md`. Operating handbook (bootstrap, commands, delegation, code rules) is `AGENTS.md`. This plan turns those into ordered, single-session subtasks with cited spec sections and test names.
+Operational plan for shipping the cfzt-operator MVP in five product slices (Tunnel/connector → Exposure → sourceRef derivation → managed Access policies → private network CIDR routes), plus an interstitial engineering cleanup slice and a DR-failover slice. Source of truth for architecture, decisions D1–D26, CRD shapes, RBAC, and DoD lists is `spec.md`. Operating handbook (bootstrap, commands, delegation, code rules) is `AGENTS.md`. This plan turns those into ordered, single-session subtasks with cited spec sections and test names.
 
 Slice 4 (`CloudflareAccessPolicy` CRD, D24) added under `## 3. Slice plan` after Slice 3 ships — managed Access policies are now in scope per `spec.md ## Decisions` D24.
 
 Slice 5 (`CloudflareTunnelRoute` CRD, D25) added under `## 3. Slice plan` after Slice 4 ships — private network CIDR routes are now in scope per `spec.md ## Decisions` D25.
 
-Not covered: post-MVP work (annotation UX, Ingress source, WARP, Gateway, OLM, multi-cluster, additional Access rule types beyond Slice 4 subset). Decisions are not re-derived here — see `spec.md ## Decisions`.
+Slice 7 — DR failover (≡ `spec.md` Slice 6, D26) added under `## 3. Slice plan` — active-passive multi-cluster DR via per-Exposure `spec.failover` + a Cloudflare DNS TXT lease is now in scope per `spec.md ## Decisions` D26 (which supersedes the old "multi-cluster out of scope" D9). The plan's "Slice 6" label is the engineering-only Pre-MVP cleanup; the DR product slice is "Slice 7" here to avoid a local numbering collision (spec calls it Slice 6).
+
+Not covered: post-MVP work (annotation UX, Ingress source, WARP, Gateway, OLM, multi-cluster active-active / federation, additional Access rule types beyond Slice 4 subset). Decisions are not re-derived here — see `spec.md ## Decisions`.
 
 ## 2. Current state
 
@@ -1051,6 +1053,93 @@ Subtask-derived additions: `TestEnqueueNamedExtracts`,
 - Subtask 15/16 package + harness split must not leak internal types into
   `test/live/`. Keep `test/live/cloudflare_smoke_test.go` import paths
   stable; `internal/ownership` is reachable only via `h.cf.*` wrapper.
+
+### Slice 7 — DR failover (spec Slice 6, D26)
+
+> **Numbering note.** `spec.md ## Implementation slices` labels this **Slice 6 — DR failover** (the next *product* slice after Slice 5 routes). This plan already used "Slice 6" for the interstitial engineering-only "Pre-MVP cleanup" slice above, so the plan calls the DR work **Slice 7** to avoid a local collision. They are the same body of work: plan Slice 7 ≡ spec Slice 6.
+
+Per `spec.md ## Implementation slices ### Slice 6` and `spec.md ## DR failover` (D26). Outcome: `CloudflareExposure.spec.failover` lets the same Exposure, applied to two clusters (each with its own `--site-id` and its own `CloudflareTunnel`), cooperate over one hostname via a Cloudflare DNS TXT lease. Exactly one cluster is Primary and serves traffic; the standby auto-promotes on lease expiry; a recovered former primary stands down without thrashing CF state.
+
+This is the **largest reconciliation-semantics change since Slice 2** (new role gate at the top of the Exposure reconcile, new cross-cluster ownership identity, new CAS write path). Per `AGENTS.md ## Delegation Policy` it is orchestrator-led: architecture model plans the lease/role state machine and the ownership-tag relaxation, scoped coders implement each package, reviewer audits the finalizer/promotion/demotion paths before merge.
+
+**Preconditions / dependencies**
+
+- Builds on Slice 2 (Exposure controller: DNS CNAME + Access app writes, ownership tagging) and the Slice 6 cleanup (centralised ownership-tag handling in `internal/ownership`, shared reconciler `Base`). Land the cleanup first — the role gate and the `FromFailoverGroup` ownership path are far easier on the post-cleanup reconciler shape.
+- Verify the `cloudflare-go/v4` DNS record read exposes `record_id` and the update path can be conditioned on it (Cloudflare MCP at implementation time). If the SDK cannot express a record_id precondition directly, emulate optimistic concurrency by re-reading and comparing `record_id` immediately before the write inside the rate-limited client — isolate the choice inside `internal/cloudflare/dns.go`.
+
+**Subtasks**
+
+1. **`--site-id` flag + Helm value + boot validation + plumbing.**
+   - Files: `cmd/main.go` (register `--site-id`, fail-fast on empty), `charts/cfzt-operator/values.yaml` + `templates/deployment.yaml` (`site.id` with a sane default so existing single-site installs upgrade cleanly), Exposure controller struct gains `SiteID string`.
+   - Implements: `spec.md ## DR failover` (Site identity), D26 (mandatory `--site-id`).
+   - Tests: `TestFailoverSiteIDMandatoryAtBoot` (empty `--site-id` → fatal start-up); chart `helm template` renders the flag from `site.id`.
+
+2. **`CloudflareExposure` `spec.failover` + `status.failover` types + validation.**
+   - Files: `api/v1alpha1/cloudflareexposure_types.go` (add `FailoverSpec{Group, LeaseSeconds}`, `ExposureFailoverStatus{Role, SiteID, LeaseOwner, LeaseExpiresAt, LeaseRenewedAt, LastRoleTransitionAt, ObservedPrimaryTunnelID}`), regenerate deepcopy + CRD.
+   - Implements: `spec.md ## CRD model` (CloudflareExposure failover fields), `## CRD validation` (`spec.failover.group` RFC 1123 label min 3 / max 63 required when block present; `spec.failover.leaseSeconds` default 60 / min 30 / max 600), `Role` printcolumn.
+   - Tests: CRD validation cases (good group, too-short group, bad chars, leaseSeconds bounds, group required when block present); deepcopy round-trip. Run `make manifests generate` + `make helm-sync-crds`; commit generated output.
+
+3. **`internal/cloudflare` DNS: record_id + CAS Update; fake models CAS.**
+   - Files: `internal/cloudflare/dns.go`, `client.go`, `fake.go`, `real.go`.
+   - Implements: surface DNS `record_id` on list/get; add a CAS-capable Update (update conditioned on `record_id`). `fake.go` models CAS-by-record_id over shared in-memory CF state so two managers in one test process race realistically.
+   - Tests: `TestFakeDNSRecordIDStable`, `TestFakeDNSCASUpdateRejectsStaleRecordID`, `TestFakeDNSCASCreateConflict`.
+
+4. **`internal/dr/` package: lease, CAS, role state machine.**
+   - Files: `internal/dr/lease.go` (parse/serialise `v=1 site=… tunnel=… exp=… renewed=…`, record-name hashing `_cfzt-lease.<hash8(group)>.<zone>`), `internal/dr/cas.go` (CAS retry loop, bounded backoff + jitter, `LeaseConflict` after N attempts), `internal/dr/role.go` (role state machine `Unknown→Standby→Primary→Standby`, renewal cadence `leaseSeconds/2`).
+   - Implements: `spec.md ## DR failover` (Lease record, CAS protocol, Role state machine, Split-brain bounding).
+   - Tests: `TestFailoverLeaseAcquire`, `TestFailoverLeaseRenew`, `TestFailoverCASConflictRetries`, lease parse/serialise round-trip, record-name hashing stable, jitter within bounds.
+
+5. **`internal/ownership`: failover-group identity.**
+   - Files: `internal/ownership/owner.go`, `comment.go`, `accesstag.go`.
+   - Implements: `FromFailoverGroup(groupID)` constructor reusing the existing comment/tag render primitives; `MatchesComment` / `MatchesTags` accept either a per-CR uid OR a failover-group ID.
+   - Tests: `TestFailoverOwnershipTagAcceptsGroupID`, plus existing owner round-trip tests still green.
+
+6. **`internal/naming`: lease TXT name helper.**
+   - Files: `internal/naming/names.go`.
+   - Implements: `FailoverLeaseTXTName(groupID, zone string) string`.
+   - Tests: `TestFailoverLeaseTXTName` (hash stable, bounded length, zone suffix).
+
+7. **Exposure controller: role gate, promotion/demotion, events, metrics.**
+   - Files: `internal/controller/cloudflareexposure_controller.go`, reuse `conditions.go`, `Base`.
+   - Implements: read lease + determine role at top of reconcile (before Access/DNS steps); Standby writes `status.failover` and early-returns (no shared Access/DNS writes) while still letting the owning Tunnel reconcile its connector; Primary writes Access + DNS with the group-ID `source-uid` and runs the renewal loop; auto-promote on `now > leaseExpiresAt + jitter`; `cfzt.reid.ee/force-promote` annotation forces a CAS acquire and is cleared after success; demotion + `SplitBrainDetected`; `Ready=False, Reason=FailoverRequiresManagedDNS` when the referenced Tunnel has `dns.manage: false`. Emit `PromotedToPrimary`, `DemotedToStandby`, `LeaseAcquired`, `LeaseRenewed`, `LeaseLost`, `LeaseConflict`, `SplitBrainDetected`, `ForcePromoted`. Wire metrics `cfzt_failover_role`, `cfzt_failover_lease_renew_total`, `cfzt_failover_promotion_total`.
+   - Implements: `spec.md ## DR failover` (Role state machine, Operator behaviour matrix), `## Status and conditions` (new reasons), `## Observability` (events + metrics).
+   - Tests: `TestFailoverAutoPromoteOnExpiry`, `TestFailoverReturnedPrimaryStandsDown`, `TestFailoverForcePromoteAnnotation`, `TestFailoverDNSManagedRequired`.
+
+8. **envtest: two-manager-in-process coverage.**
+   - Files: Exposure controller envtest suite.
+   - Implements: start two controller-runtime managers in one test process with distinct `--site-id`, both pointing at one shared fake `CloudflareClient` (CAS-by-record_id + shared CF state). Assert exactly one Primary, lease handoff on renewer stop, returning-primary self-demote, force-promote, mutation guards accept the group ID.
+   - Tests: all Slice 7 `TestFailover*` envtest cases above run green together.
+
+9. **Live Cloudflare smoke extension.**
+   - Files: `test/live/cloudflare_smoke_test.go`, `hack/live-cloudflare-local.sh`, `.env.live.example`.
+   - Implements: `TestFailoverLifecycle` — two `--site-id` operator processes against a real Cloudflare account and a single test hostname; assert one Primary, auto-promote after killing the primary process, returning-primary self-demote, clean teardown of the lease TXT + shared CNAME + Access app. Packet routing is out of scope; CF-side lease + DNS + Access lifecycle is sufficient.
+   - Tests: `TestFailoverLifecycle`; `TestCloudflarePreflight` unchanged (lease reuses the existing `Zone:DNS:Edit` scope).
+
+10. **RBAC + Helm sync.**
+    - Files: no new RBAC rows (lease is a CF DNS record; `--site-id` is a flag; existing `cloudflareexposures{,/status}` rows cover the new fields). Regenerate CRD + sync chart; `helm lint`.
+    - Tests: `make manifests generate && git diff --exit-code` clean; `helm lint charts/cfzt-operator` clean.
+
+**Definition of done** (from `spec.md ## Implementation slices ### Slice 6`):
+
+- Two clusters apply an identical `CloudflareExposure` with matching `spec.failover.group` and distinct `--site-id` → exactly one reports `status.failover.role == Primary`; the other `Standby` with `leaseOwner` set to the primary's site ID.
+- Stopping the primary's lease renewer for `leaseSeconds + jitter` → the standby auto-promotes; the CF Access app `source-uid` remains the failover-group ID; the public DNS CNAME flips to the new tunnel ID; `PromotedToPrimary` / `LeaseAcquired` events emit.
+- A returning former primary self-demotes (`DemotedToStandby`) on its first reconcile and performs no Cloudflare writes for the shared hostname.
+- `cfzt.reid.ee/force-promote=true` → immediate CAS acquire regardless of expiry; controller removes the annotation after success and emits `ForcePromoted`.
+- A failover Exposure on a `dns.manage: false` tunnel → `Ready=False, Reason=FailoverRequiresManagedDNS`, no lease written.
+- Empty `--site-id` is a fatal manager start-up error.
+- envtest tests pass: `TestFailoverLeaseAcquire`, `TestFailoverLeaseRenew`, `TestFailoverAutoPromoteOnExpiry`, `TestFailoverReturnedPrimaryStandsDown`, `TestFailoverCASConflictRetries`, `TestFailoverForcePromoteAnnotation`, `TestFailoverOwnershipTagAcceptsGroupID`, `TestFailoverDNSManagedRequired`, `TestFailoverSiteIDMandatoryAtBoot`.
+- Live smoke `TestFailoverLifecycle` green; `ci.yaml` green; `helm lint` clean; manual: `dig TXT _cfzt-lease.<hash>.<zone> @1.1.1.1` shows the lease owner + TTL.
+
+Subtask-derived additions also pass: `TestFakeDNSRecordIDStable`, `TestFakeDNSCASUpdateRejectsStaleRecordID`, `TestFakeDNSCASCreateConflict`, `TestFailoverLeaseTXTName`.
+
+**Risks**
+
+- **Split-brain window.** Lease TTL + jitter bounds the dual-writer window. Mitigated by the partitioned primary's cloudflared also dropping its edge connection (CF stops routing to the stale tunnel ID) and by CAS-by-record_id preventing simultaneous acquire. Default `leaseSeconds: 60`; document the trade-off.
+- **SDK record_id precondition (D13).** If `cloudflare-go/v4` cannot condition an update on `record_id`, fall back to read-compare-write immediately before the call inside the rate-limited client. Isolate in `internal/cloudflare/dns.go`; cover with the fake CAS tests.
+- **Ownership identity switch.** Failover Exposures tag CF resources with the group ID, not the per-CR uid. The `MatchesComment`/`MatchesTags` relaxation must not loosen the guard for non-failover Exposures — `TestFailoverOwnershipTagAcceptsGroupID` plus existing `TestOwnerMatchesForeign` guard both directions.
+- **Force-promote misuse.** The annotation bypasses expiry; split-brain risk is the operator's. Controller clears it post-acquire so it cannot persist in GitOps and re-trigger every reconcile.
+- **Renewal goroutine lifecycle.** The renewal loop must stop cleanly on demotion, CR delete, and manager shutdown to avoid a demoted process renewing a lease it no longer owns. Cover demotion-stops-renewal in envtest.
+- **Scope creep.** Active-active, automatic primary restoration, cross-zone failover, and LB-based failover are explicitly out (D26). Resist widening.
 
 ## 4. Bootstrap subtasks (scaffold absent)
 
