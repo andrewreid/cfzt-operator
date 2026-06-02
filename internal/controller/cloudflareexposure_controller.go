@@ -48,6 +48,11 @@ import (
 type CloudflareExposureReconciler struct {
 	Base
 	HTTPRouteSourceEnabled bool
+	// SiteID is this operator process's stable failover identity (D26). It is
+	// plumbed through from --site-id at boot and read by failover-enabled
+	// reconcile paths (lease arbitration, role gate). Subtask 1 wires it
+	// through only; later Slice 7 subtasks consume it.
+	SiteID string
 }
 
 // +kubebuilder:rbac:groups=cfzt.reid.ee,resources=cloudflareexposures,verbs=get;list;watch;create;update;patch;delete
