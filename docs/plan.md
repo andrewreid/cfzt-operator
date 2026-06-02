@@ -335,8 +335,36 @@ Completed on 2026-06-02:
     chart already in sync; `make manifests generate` clean, `helm lint` clean,
     `go test ./...` green.
 
-Next: Slice 7 complete. MVP slices 1-7 landed; remaining work is release
-hardening and any follow-up from review.
+Completed on 2026-06-02 (Slice 7 review remediation, PR #7):
+- Reshaped D26 from a false "CAS-by-record_id" claim to an honest
+  best-effort lease (Cloudflare DNS has no conditional write nor TXT
+  uniqueness). Spec + code now describe an optimistic, eventually-consistent
+  coordination hint whose safety rests on the data plane (single CNAME → one
+  tunnel target; a failed primary drops its cloudflared edge connection),
+  not on lease atomicity. User signed off on the D26 amendment.
+- Deleted `CreateCAS`/`UpdateCAS`/`ErrDNSCASConflict`; `Create`/`Update` are
+  now TXT-aware and the fake models real semantics (duplicate TXT allowed).
+- `internal/dr` dropped `CASRetry`; added `Resolve` — deterministic
+  duplicate-lease tie-break (unexpired, lowest site-id wins; winner deletes
+  others, loser deletes own). The role gate detects `>1` group-owned record,
+  resolves, requeues, and read-back-verifies every acquire/renew, bounding
+  the dual-writer window to ~one reconcile; foreign/unparseable → fail closed.
+- force-promote is now a one-shot token vs `status.failover.lastForcePromoteToken`;
+  the controller records the honored token and never mutates the annotation
+  (GitOps replay-safe).
+- Reject `spec.failover` on the chart-default `--site-id`
+  (`FailoverRequiresDistinctSiteID`); reject same-namespace duplicate
+  `spec.failover.group` (`FailoverGroupConflict`, per-namespace scope so a
+  cross-cluster pair sharing a namespace name is not false-flagged).
+- Deletion proves live lease ownership (`holdsLiveLease`) before tearing down
+  the shared CNAME/Access, never the stale persisted role.
+- Metrics gained a `site_id` label. New envtests:
+  `TestFailoverDuplicateLeaseResolves`, `TestFailoverGroupConflict`,
+  `TestFailoverRequiresDistinctSiteID`, `TestFailoverDeleteRequiresLiveOwnership`,
+  force-promote replay guard, plus `internal/dr` `Resolve` table tests.
+
+Next: Slice 7 complete (review remediation landed). MVP slices 1-7 in;
+remaining work is release hardening and CI on PR #7.
 
 ## 3. Slice plan
 
