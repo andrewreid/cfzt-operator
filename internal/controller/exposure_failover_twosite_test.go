@@ -165,13 +165,15 @@ var _ = Describe("CloudflareExposure failover across two sites", func() {
 
 		// Site B force-promotes against site A's live lease.
 		current := fetchExposureNS(ctx, nsB)
-		current.Annotations = map[string]string{annotationForcePromote: "true"}
+		current.Annotations = map[string]string{annotationForcePromote: "emergency-1"}
 		Expect(k8sClient.Update(ctx, current)).To(Succeed())
 		reconcileExposure(ctx, recB, current)
 
 		refreshedB := fetchExposureNS(ctx, nsB)
 		Expect(refreshedB.Status.Failover.Role).To(Equal(string(dr.RolePrimary)))
-		Expect(refreshedB.Annotations).NotTo(HaveKey(annotationForcePromote))
+		// Token recorded; annotation untouched (GitOps-safe replay guard).
+		Expect(refreshedB.Status.Failover.LastForcePromoteToken).To(Equal("emergency-1"))
+		Expect(refreshedB.Annotations).To(HaveKeyWithValue(annotationForcePromote, "emergency-1"))
 		site, _ := leaseSite()
 		Expect(site).To(Equal(siteB))
 		content, _ := cname()

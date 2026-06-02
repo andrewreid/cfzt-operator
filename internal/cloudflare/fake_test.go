@@ -205,26 +205,26 @@ func TestFakeDNSRecordIdempotent(t *testing.T) {
 func TestFakeDNSRecordIDStable(t *testing.T) {
 	ctx := context.Background()
 	fake := cloudflare.NewFake()
-	created, err := fake.DNSRecords().CreateCAS(ctx, cloudflare.DNSRecordInput{
+	created, err := fake.DNSRecords().Create(ctx, cloudflare.DNSRecordInput{
 		ZoneID:  "zone-1",
 		Name:    "_cfzt-lease.deadbeef.example.com",
 		Type:    "TXT",
 		Content: "v=1 site=primary tunnel=t-1 exp=200 renewed=100",
 	})
 	if err != nil {
-		t.Fatalf("CreateCAS returned error: %v", err)
+		t.Fatalf("Create returned error: %v", err)
 	}
-	updated, err := fake.DNSRecords().UpdateCAS(ctx, created.ID, cloudflare.DNSRecordInput{
+	updated, err := fake.DNSRecords().Update(ctx, created.ID, cloudflare.DNSRecordInput{
 		ZoneID:  "zone-1",
 		Name:    "_cfzt-lease.deadbeef.example.com",
 		Type:    "TXT",
 		Content: "v=1 site=primary tunnel=t-1 exp=260 renewed=130",
 	})
 	if err != nil {
-		t.Fatalf("UpdateCAS returned error: %v", err)
+		t.Fatalf("Update returned error: %v", err)
 	}
 	if updated.ID != created.ID {
-		t.Fatalf("UpdateCAS rotated record id: got %q, want stable %q", updated.ID, created.ID)
+		t.Fatalf("Update rotated record id: got %q, want stable %q", updated.ID, created.ID)
 	}
 	listed, err := fake.DNSRecords().List(ctx, "zone-1", "_cfzt-lease.deadbeef.example.com", "TXT")
 	if err != nil {
@@ -235,7 +235,12 @@ func TestFakeDNSRecordIDStable(t *testing.T) {
 	}
 }
 
-func TestFakeDNSCASCreateConflict(t *testing.T) {
+// TestFakeDNSCreateAllowsDuplicateTXT documents that the fake models real
+// Cloudflare semantics: TXT records are not unique at (zone,name,type), so two
+// Create calls produce two distinct records. The D26 failover controller must
+// therefore detect and resolve duplicate leases itself — the client offers no
+// create-if-absent guarantee.
+func TestFakeDNSCreateAllowsDuplicateTXT(t *testing.T) {
 	ctx := context.Background()
 	fake := cloudflare.NewFake()
 	in := cloudflare.DNSRecordInput{
@@ -244,60 +249,21 @@ func TestFakeDNSCASCreateConflict(t *testing.T) {
 		Type:    "TXT",
 		Content: "v=1 site=primary tunnel=t-1 exp=200 renewed=100",
 	}
-	if _, err := fake.DNSRecords().CreateCAS(ctx, in); err != nil {
-		t.Fatalf("first CreateCAS returned error: %v", err)
+	first, err := fake.DNSRecords().Create(ctx, in)
+	if err != nil {
+		t.Fatalf("first Create returned error: %v", err)
 	}
 	in.Content = "v=1 site=standby tunnel=t-2 exp=300 renewed=150"
-	if _, err := fake.DNSRecords().CreateCAS(ctx, in); !errors.Is(err, cloudflare.ErrDNSCASConflict) {
-		t.Fatalf("second CreateCAS = %v, want ErrDNSCASConflict", err)
+	second, err := fake.DNSRecords().Create(ctx, in)
+	if err != nil {
+		t.Fatalf("second Create returned error: %v", err)
+	}
+	if first.ID == second.ID {
+		t.Fatalf("expected distinct record IDs, got %q twice", first.ID)
 	}
 	listed, _ := fake.DNSRecords().List(ctx, "zone-1", "_cfzt-lease.deadbeef.example.com", "TXT")
-	if len(listed) != 1 {
-		t.Fatalf("List len = %d, want 1 (loser must not have written)", len(listed))
-	}
-}
-
-func TestFakeDNSCASUpdateRejectsStaleRecordID(t *testing.T) {
-	ctx := context.Background()
-	fake := cloudflare.NewFake()
-	in := cloudflare.DNSRecordInput{
-		ZoneID:  "zone-1",
-		Name:    "_cfzt-lease.deadbeef.example.com",
-		Type:    "TXT",
-		Content: "v=1 site=primary tunnel=t-1 exp=200 renewed=100",
-	}
-	first, err := fake.DNSRecords().CreateCAS(ctx, in)
-	if err != nil {
-		t.Fatalf("CreateCAS returned error: %v", err)
-	}
-	staleID := first.ID
-	if err := fake.DNSRecords().Delete(ctx, "zone-1", first.ID); err != nil {
-		t.Fatalf("Delete returned error: %v", err)
-	}
-	winner, err := fake.DNSRecords().CreateCAS(ctx, cloudflare.DNSRecordInput{
-		ZoneID:  "zone-1",
-		Name:    "_cfzt-lease.deadbeef.example.com",
-		Type:    "TXT",
-		Content: "v=1 site=standby tunnel=t-2 exp=300 renewed=150",
-	})
-	if err != nil {
-		t.Fatalf("second CreateCAS returned error: %v", err)
-	}
-	if winner.ID == staleID {
-		t.Fatalf("winner reused stale id %q", staleID)
-	}
-	loserUpdate, err := fake.DNSRecords().UpdateCAS(ctx, staleID, cloudflare.DNSRecordInput{
-		ZoneID:  "zone-1",
-		Name:    "_cfzt-lease.deadbeef.example.com",
-		Type:    "TXT",
-		Content: "v=1 site=primary tunnel=t-1 exp=400 renewed=200",
-	})
-	if !errors.Is(err, cloudflare.ErrDNSCASConflict) {
-		t.Fatalf("UpdateCAS stale = %v, %v; want ErrDNSCASConflict", loserUpdate, err)
-	}
-	listed, _ := fake.DNSRecords().List(ctx, "zone-1", "_cfzt-lease.deadbeef.example.com", "TXT")
-	if len(listed) != 1 || listed[0].ID != winner.ID || listed[0].Content != "v=1 site=standby tunnel=t-2 exp=300 renewed=150" {
-		t.Fatalf("post-conflict state = %#v; want winner record untouched", listed)
+	if len(listed) != 2 {
+		t.Fatalf("List len = %d, want 2 (duplicate TXT allowed, mirrors real Cloudflare)", len(listed))
 	}
 }
 

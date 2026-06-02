@@ -276,6 +276,13 @@ spec:
                   Failover is this site's view of the D26 failover lease. Empty
                   (zero-valued) when spec.failover is unset.
                 properties:
+                  lastForcePromoteToken:
+                    description: |-
+                      LastForcePromoteToken is the most recent cfzt.reid.ee/force-promote
+                      annotation value this site has honored. A force-promote fires only
+                      when the annotation token differs from this, so a GitOps re-apply of
+                      the same token does not replay the emergency promotion (D26).
+                    type: string
                   lastRoleTransitionAt:
                     description: |-
                       LastRoleTransitionAt records the most recent Role change observed

@@ -33,9 +33,11 @@ const (
 	ReasonReconciled         = "Reconciled"
 
 	// D26 failover reasons.
-	ReasonStandby                    = "Standby"
-	ReasonLeaseConflict              = "LeaseConflict"
-	ReasonFailoverRequiresManagedDNS = "FailoverRequiresManagedDNS"
+	ReasonStandby                        = "Standby"
+	ReasonLeaseConflict                  = "LeaseConflict"
+	ReasonFailoverRequiresManagedDNS     = "FailoverRequiresManagedDNS"
+	ReasonFailoverRequiresDistinctSiteID = "FailoverRequiresDistinctSiteID"
+	ReasonFailoverGroupConflict          = "FailoverGroupConflict"
 
 	EventCreatedTunnel         = "CreatedTunnel"
 	EventRecoveredTunnel       = "RecoveredTunnel"

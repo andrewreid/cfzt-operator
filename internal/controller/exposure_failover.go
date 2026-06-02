@@ -19,25 +19,31 @@ import (
 	"github.com/andrewreid/cfzt-operator/internal/ownership"
 )
 
-// annotationForcePromote, when set to "true" on a failover Exposure, makes a
-// Standby attempt a CAS acquire regardless of lease expiry. The controller
-// removes the annotation after a successful acquisition so it cannot persist
-// in GitOps and re-trigger every reconcile.
+// annotationForcePromote carries a caller-chosen one-shot token (timestamp,
+// nonce, UUID — any non-empty value). A Standby attempts an acquire regardless
+// of expiry only when the token differs from status.failover.lastForcePromoteToken.
+// The controller records the honored token in status and never mutates the
+// annotation, so a GitOps re-apply of the same token does not replay (D26).
 const annotationForcePromote = "cfzt.reid.ee/force-promote"
+
+// defaultSiteID is the chart's single-site upgrade default (values.site.id).
+// A failover Exposure on a process still running this identity is refused:
+// two clusters on the default would share one lease identity and each see the
+// other's lease as self-owned (review feedback). Keep in sync with the chart.
+const defaultSiteID = "cfzt-default-site"
 
 // failoverAcquireJitter bounds the per-site promotion delay so two standbys
 // racing to acquire an expired lease do not collide in the same instant
 // (spec.md ## DR failover ### Split-brain bounding, ±5s).
 const failoverAcquireJitter = 5 * time.Second
 
-// errLeaseHeldByPeer signals that, on re-read inside the CAS loop, a live peer
-// already owns the lease so this site lost the acquire race. It is not a CAS
-// conflict — the controller stays Standby without error.
-var errLeaseHeldByPeer = errors.New("failover lease held by another site")
+// failoverResolveRequeue is the short requeue after the controller deletes
+// duplicate lease records, so the next reconcile acts on the converged set.
+const failoverResolveRequeue = 2 * time.Second
 
-// errLeaseForeign signals that the lease record at the computed name is not
-// owned by this failover group (foreign comment or unparseable payload). The
-// controller refuses to clobber it and surfaces LeaseConflict.
+// errLeaseForeign signals that a record at the lease name is not owned by this
+// failover group (foreign comment) or its group-owned payload does not parse.
+// The controller refuses to clobber it and fails closed (LeaseConflict).
 var errLeaseForeign = errors.New("failover lease record is foreign")
 
 // exposureOwner returns the ownership identity to stamp on the shared
@@ -81,11 +87,11 @@ func leaseSecondsOf(exposure *cfztv1alpha1.CloudflareExposure) int32 {
 	return ls
 }
 
-// reconcileFailoverRole runs the D26 lease arbitration at the top of the
-// Exposure reconcile, before any shared Access/DNS write. It returns
-// proceed=true only when this site is Primary and the caller should continue
-// to the shared writes; in every other case it has already persisted
-// status.failover and returns done=true with the controller result to use.
+// reconcileFailoverRole runs the D26 best-effort lease arbitration at the top
+// of the Exposure reconcile, before any shared Access/DNS write. It returns
+// proceed=true only when this site holds the lease (Primary) and the caller
+// should continue to the shared writes; in every other case it has already
+// persisted status.failover and returns done=true with the controller result.
 func (r *CloudflareExposureReconciler) reconcileFailoverRole(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, tunnel *cfztv1alpha1.CloudflareTunnel, cfClient cloudflare.Client) (proceed bool, requeue time.Duration, result ctrl.Result, done bool, err error) {
 	now := r.now()
 	group := exposure.Spec.Failover.Group
@@ -96,16 +102,23 @@ func (r *CloudflareExposureReconciler) reconcileFailoverRole(ctx context.Context
 		prevRole = dr.RoleUnknown
 	}
 
+	// --site-id must be distinct per cluster. The chart default would make two
+	// clusters share one lease identity (each sees the other's lease as
+	// self-owned). Refuse failover until a real site ID is set.
+	if r.SiteID == defaultSiteID {
+		fstatus := r.baseFailoverStatus(exposure, prevRole, "", nil, "")
+		return false, 0, ctrl.Result{RequeueAfter: 30 * time.Second}, true,
+			r.setFailoverStatusAndReady(ctx, exposure, fstatus, false, ReasonFailoverRequiresDistinctSiteID,
+				"spec.failover requires a distinct --site-id; the chart-default site.id is not safe for failover")
+	}
+
 	// Failover requires managed DNS: with dns.manage=false there is no lease
 	// substrate. Surface the config error, write no lease.
 	if !tunnel.Spec.Dns.Manage {
 		fstatus := r.baseFailoverStatus(exposure, prevRole, "", nil, "")
-		statusErr := r.setFailoverStatusAndReady(ctx, exposure, fstatus, false, ReasonFailoverRequiresManagedDNS,
-			"spec.failover requires the referenced CloudflareTunnel to set dns.manage: true")
-		if statusErr != nil {
-			return false, 0, ctrl.Result{}, true, statusErr
-		}
-		return false, 0, ctrl.Result{RequeueAfter: 30 * time.Second}, true, nil
+		return false, 0, ctrl.Result{RequeueAfter: 30 * time.Second}, true,
+			r.setFailoverStatusAndReady(ctx, exposure, fstatus, false, ReasonFailoverRequiresManagedDNS,
+				"spec.failover requires the referenced CloudflareTunnel to set dns.manage: true")
 	}
 
 	zone, err := cfClient.Zones().Resolve(ctx, exposure.Spec.Hostname)
@@ -114,21 +127,27 @@ func (r *CloudflareExposureReconciler) reconcileFailoverRole(ctx context.Context
 	}
 	leaseName := naming.FailoverLeaseTXTName(group, zone.Name)
 
-	observed, _, readErr := r.readLease(ctx, cfClient, zone.ID, leaseName, exposure)
-	if readErr != nil && !errors.Is(readErr, errLeaseForeign) {
-		return false, 0, ctrl.Result{}, true, r.setExposureStatusAndBackoff(ctx, exposure, exposure.Status.Cloudflare, fmt.Sprintf("read failover lease: %v", readErr))
+	records, foreign, err := r.listGroupLeases(ctx, cfClient, zone.ID, leaseName, exposure)
+	if err != nil {
+		return false, 0, ctrl.Result{}, true, r.setExposureStatusAndBackoff(ctx, exposure, exposure.Status.Cloudflare, fmt.Sprintf("read failover lease: %v", err))
 	}
-	if errors.Is(readErr, errLeaseForeign) {
-		fstatus := r.baseFailoverStatus(exposure, dr.RoleStandby, "", nil, "")
-		r.Recorder.Eventf(exposure, corev1.EventTypeWarning, EventLeaseConflict, "Failover lease record %s is not owned by this group", leaseName)
-		statusErr := r.setFailoverStatusAndReady(ctx, exposure, fstatus, false, ReasonLeaseConflict, "failover lease record is owned by a foreign resource")
-		if statusErr != nil {
-			return false, 0, ctrl.Result{}, true, statusErr
-		}
-		return false, 0, ctrl.Result{RequeueAfter: 30 * time.Second}, true, nil
+	if foreign {
+		return r.failClosed(ctx, exposure, leaseName)
+	}
+	if len(records) > 1 {
+		return r.resolveDuplicateLeases(ctx, cfClient, zone, exposure, records, now)
 	}
 
-	force := exposure.Annotations[annotationForcePromote] == "true"
+	var observed *dr.Lease
+	var currentID *string
+	if len(records) == 1 {
+		observed = &records[0].Lease
+		id := records[0].ID
+		currentID = &id
+	}
+
+	forceToken := exposure.Annotations[annotationForcePromote]
+	force := forceToken != "" && forceToken != exposure.Status.Failover.LastForcePromoteToken
 
 	decision := dr.Decide(dr.Inputs{
 		Now:           now,
@@ -148,106 +167,123 @@ func (r *CloudflareExposureReconciler) reconcileFailoverRole(ctx context.Context
 
 	switch decision.Action {
 	case dr.ActionWait:
-		fstatus := r.baseFailoverStatus(exposure, dr.RoleStandby, decision.LeaseOwner, leaseExpiryPtr(decision.LeaseExpiresAt), observedTunnel)
-		r.recordRole(exposure, dr.RoleStandby)
-		statusErr := r.setFailoverStatusAndReady(ctx, exposure, fstatus, true, ReasonStandby, fmt.Sprintf("standby; lease held by %s", decision.LeaseOwner))
-		return false, 0, requeueResult(decision.Requeue), true, statusErr
+		return r.standby(ctx, exposure, decision, observedTunnel, false)
 
 	case dr.ActionSplitBrain:
-		fstatus := r.baseFailoverStatus(exposure, dr.RoleStandby, decision.LeaseOwner, leaseExpiryPtr(decision.LeaseExpiresAt), observedTunnel)
 		r.Recorder.Eventf(exposure, corev1.EventTypeWarning, EventSplitBrainDetected, "Split brain: lease for %s now held by %s, demoting", exposure.Spec.Hostname, decision.LeaseOwner)
-		r.Recorder.Eventf(exposure, corev1.EventTypeNormal, EventDemotedToStandby, "Demoted to Standby for %s", exposure.Spec.Hostname)
-		r.recordRole(exposure, dr.RoleStandby)
-		statusErr := r.setFailoverStatusAndReady(ctx, exposure, fstatus, true, ReasonStandby, fmt.Sprintf("demoted to standby; lease held by %s", decision.LeaseOwner))
-		return false, 0, requeueResult(decision.Requeue), true, statusErr
+		return r.standby(ctx, exposure, decision, observedTunnel, true)
 
-	case dr.ActionAcquire:
-		lease, claimed, claimErr := r.claimLease(ctx, cfClient, zone, leaseName, exposure, tunnel, force, now)
-		if claimErr != nil {
-			return r.handleClaimError(ctx, exposure, claimErr, prevRole, decision)
-		}
-		if !claimed {
-			fstatus := r.baseFailoverStatus(exposure, dr.RoleStandby, decision.LeaseOwner, leaseExpiryPtr(decision.LeaseExpiresAt), observedTunnel)
-			r.recordRole(exposure, dr.RoleStandby)
-			statusErr := r.setFailoverStatusAndReady(ctx, exposure, fstatus, true, ReasonStandby, fmt.Sprintf("standby; lease held by %s", decision.LeaseOwner))
-			return false, 0, requeueResult(decision.Requeue), true, statusErr
-		}
-		// Acquired the lease — this site is now Primary.
-		if force {
-			if err := r.clearForcePromote(ctx, exposure); err != nil {
-				return false, 0, ctrl.Result{}, true, err
-			}
-			r.Recorder.Eventf(exposure, corev1.EventTypeNormal, EventForcePromoted, "Force-promoted to Primary for %s", exposure.Spec.Hostname)
-		}
-		r.Recorder.Eventf(exposure, corev1.EventTypeNormal, EventLeaseAcquired, "Acquired failover lease for %s", exposure.Spec.Hostname)
-		r.Recorder.Eventf(exposure, corev1.EventTypeNormal, EventPromotedToPrimary, "Promoted to Primary for %s", exposure.Spec.Hostname)
-		failoverPromotionTotal.WithLabelValues(exposure.Namespace, exposure.Name, group).Inc()
-		r.recordRole(exposure, dr.RolePrimary)
-		fstatus := r.primaryFailoverStatus(exposure, lease)
-		if statusErr := r.setFailoverStatus(ctx, exposure, fstatus); statusErr != nil {
-			return false, 0, ctrl.Result{}, true, statusErr
-		}
-		return true, half, ctrl.Result{}, false, nil
-
-	case dr.ActionRenew:
-		lease, claimed, claimErr := r.claimLease(ctx, cfClient, zone, leaseName, exposure, tunnel, false, now)
-		if claimErr != nil || !claimed {
-			// Lost the lease we believed we held — demote without writes.
-			if claimErr != nil && !errors.Is(claimErr, errLeaseHeldByPeer) && !errors.Is(claimErr, dr.ErrLeaseConflictExhausted) && !errors.Is(claimErr, errLeaseForeign) {
-				return false, 0, ctrl.Result{}, true, r.setExposureStatusAndBackoff(ctx, exposure, exposure.Status.Cloudflare, fmt.Sprintf("renew failover lease: %v", claimErr))
-			}
-			fstatus := r.baseFailoverStatus(exposure, dr.RoleStandby, decision.LeaseOwner, leaseExpiryPtr(decision.LeaseExpiresAt), observedTunnel)
-			r.Recorder.Eventf(exposure, corev1.EventTypeWarning, EventLeaseLost, "Lost failover lease for %s", exposure.Spec.Hostname)
-			r.Recorder.Eventf(exposure, corev1.EventTypeNormal, EventDemotedToStandby, "Demoted to Standby for %s", exposure.Spec.Hostname)
-			r.recordRole(exposure, dr.RoleStandby)
-			statusErr := r.setFailoverStatusAndReady(ctx, exposure, fstatus, true, ReasonStandby, "demoted to standby; lost lease")
-			return false, 0, requeueResult(half), true, statusErr
-		}
-		r.Recorder.Eventf(exposure, corev1.EventTypeNormal, EventLeaseRenewed, "Renewed failover lease for %s", exposure.Spec.Hostname)
-		failoverLeaseRenewTotal.WithLabelValues(exposure.Namespace, exposure.Name, group).Inc()
-		r.recordRole(exposure, dr.RolePrimary)
-		fstatus := r.primaryFailoverStatus(exposure, lease)
-		if statusErr := r.setFailoverStatus(ctx, exposure, fstatus); statusErr != nil {
-			return false, 0, ctrl.Result{}, true, statusErr
-		}
-		return true, half, ctrl.Result{}, false, nil
+	case dr.ActionAcquire, dr.ActionRenew:
+		return r.writeAndVerifyLease(ctx, cfClient, zone, leaseName, exposure, tunnel, currentID, now, half, force, forceToken)
 	}
 
 	return false, 0, ctrl.Result{}, true, fmt.Errorf("unhandled failover action %d", decision.Action)
 }
 
-// handleClaimError maps a claimLease failure to the right controller outcome:
-// a lost race stays Standby, an exhausted/foreign conflict surfaces
-// LeaseConflict, and anything else returns a backoff-eligible error.
-func (r *CloudflareExposureReconciler) handleClaimError(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, claimErr error, prevRole dr.Role, decision dr.Decision) (bool, time.Duration, ctrl.Result, bool, error) {
-	group := exposure.Spec.Failover.Group
-	if errors.Is(claimErr, errLeaseHeldByPeer) {
-		fstatus := r.baseFailoverStatus(exposure, dr.RoleStandby, decision.LeaseOwner, leaseExpiryPtr(decision.LeaseExpiresAt), "")
-		r.recordRole(exposure, dr.RoleStandby)
-		statusErr := r.setFailoverStatusAndReady(ctx, exposure, fstatus, true, ReasonStandby, fmt.Sprintf("standby; lease held by %s", decision.LeaseOwner))
-		return false, 0, requeueResult(decision.Requeue), true, statusErr
+// writeAndVerifyLease performs the (non-atomic) acquire/renew write, then
+// re-reads the lease set to verify the outcome. Because the write is not
+// conditional, a peer may have written too; the read-back catches duplicates
+// (deterministic resolution) and a lost race (demote), bounding the dual-writer
+// window to about one reconcile.
+func (r *CloudflareExposureReconciler) writeAndVerifyLease(ctx context.Context, cfClient cloudflare.Client, zone *cloudflare.Zone, leaseName string, exposure *cfztv1alpha1.CloudflareExposure, tunnel *cfztv1alpha1.CloudflareTunnel, currentID *string, now time.Time, half time.Duration, force bool, forceToken string) (bool, time.Duration, ctrl.Result, bool, error) {
+	if err := r.writeLease(ctx, cfClient, zone, leaseName, exposure, tunnel, currentID, now); err != nil {
+		return false, 0, ctrl.Result{}, true, r.setExposureStatusAndBackoff(ctx, exposure, exposure.Status.Cloudflare, fmt.Sprintf("write failover lease: %v", err))
 	}
-	if errors.Is(claimErr, dr.ErrLeaseConflictExhausted) || errors.Is(claimErr, errLeaseForeign) {
-		fstatus := r.baseFailoverStatus(exposure, prevRole, decision.LeaseOwner, leaseExpiryPtr(decision.LeaseExpiresAt), "")
-		r.Recorder.Eventf(exposure, corev1.EventTypeWarning, EventLeaseConflict, "Failover lease contention for %s", exposure.Spec.Hostname)
-		statusErr := r.setFailoverStatusAndReady(ctx, exposure, fstatus, false, ReasonLeaseConflict, "could not acquire failover lease after retries")
-		if statusErr != nil {
-			return false, 0, ctrl.Result{}, true, statusErr
-		}
-		return false, 0, ctrl.Result{RequeueAfter: 30 * time.Second}, true, nil
+
+	records, foreign, err := r.listGroupLeases(ctx, cfClient, zone.ID, leaseName, exposure)
+	if err != nil {
+		return false, 0, ctrl.Result{}, true, r.setExposureStatusAndBackoff(ctx, exposure, exposure.Status.Cloudflare, fmt.Sprintf("verify failover lease: %v", err))
 	}
-	_ = group
-	return false, 0, ctrl.Result{}, true, r.setExposureStatusAndBackoff(ctx, exposure, exposure.Status.Cloudflare, fmt.Sprintf("acquire failover lease: %v", claimErr))
+	if foreign {
+		return r.failClosed(ctx, exposure, leaseName)
+	}
+	if len(records) > 1 {
+		// A peer wrote concurrently; resolve deterministically and converge.
+		return r.resolveDuplicateLeases(ctx, cfClient, zone, exposure, records, now)
+	}
+	if len(records) != 1 || records[0].Lease.Site != r.SiteID {
+		// We lost the race: someone else's record survived. Demote.
+		r.Recorder.Eventf(exposure, corev1.EventTypeWarning, EventLeaseLost, "Lost failover lease for %s", exposure.Spec.Hostname)
+		demoteDecision := dr.Decision{LeaseOwner: leaseOwnerOf(records), Requeue: half}
+		return r.standby(ctx, exposure, demoteDecision, leaseTunnelOf(records), true)
+	}
+
+	// We hold the lease — Primary.
+	lease := records[0].Lease
+	wasPrimary := dr.Role(exposure.Status.Failover.Role) == dr.RolePrimary
+	if force {
+		r.Recorder.Eventf(exposure, corev1.EventTypeNormal, EventForcePromoted, "Force-promoted to Primary for %s", exposure.Spec.Hostname)
+	}
+	if !wasPrimary {
+		r.Recorder.Eventf(exposure, corev1.EventTypeNormal, EventLeaseAcquired, "Acquired failover lease for %s", exposure.Spec.Hostname)
+		r.Recorder.Eventf(exposure, corev1.EventTypeNormal, EventPromotedToPrimary, "Promoted to Primary for %s", exposure.Spec.Hostname)
+		failoverPromotionTotal.WithLabelValues(exposure.Namespace, exposure.Name, exposure.Spec.Failover.Group, r.SiteID).Inc()
+	} else {
+		r.Recorder.Eventf(exposure, corev1.EventTypeNormal, EventLeaseRenewed, "Renewed failover lease for %s", exposure.Spec.Hostname)
+		failoverLeaseRenewTotal.WithLabelValues(exposure.Namespace, exposure.Name, exposure.Spec.Failover.Group, r.SiteID).Inc()
+	}
+	r.recordRole(exposure, dr.RolePrimary)
+	fstatus := r.primaryFailoverStatus(exposure, lease)
+	if force {
+		fstatus.LastForcePromoteToken = forceToken
+	}
+	if statusErr := r.setFailoverStatus(ctx, exposure, fstatus); statusErr != nil {
+		return false, 0, ctrl.Result{}, true, statusErr
+	}
+	return true, half, ctrl.Result{}, false, nil
 }
 
-// claimLease attempts to take or renew the failover lease through the
-// CAS-capable DNS writer, re-reading the record on every attempt so a stale
-// record_id never clobbers a peer's acquire. force bypasses the peer-liveness
-// check (emergency promotion). Returns claimed=false only via the
-// errLeaseHeldByPeer sentinel.
-func (r *CloudflareExposureReconciler) claimLease(ctx context.Context, cfClient cloudflare.Client, zone *cloudflare.Zone, leaseName string, exposure *cfztv1alpha1.CloudflareExposure, tunnel *cfztv1alpha1.CloudflareTunnel, force bool, now time.Time) (dr.Lease, bool, error) {
+// standby persists a Standby status snapshot and returns done. demote=true
+// emits the DemotedToStandby event (used by split-brain and lost-race paths).
+func (r *CloudflareExposureReconciler) standby(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, decision dr.Decision, observedTunnel string, demote bool) (bool, time.Duration, ctrl.Result, bool, error) {
+	if demote {
+		r.Recorder.Eventf(exposure, corev1.EventTypeNormal, EventDemotedToStandby, "Demoted to Standby for %s", exposure.Spec.Hostname)
+	}
+	fstatus := r.baseFailoverStatus(exposure, dr.RoleStandby, decision.LeaseOwner, leaseExpiryPtr(decision.LeaseExpiresAt), observedTunnel)
+	r.recordRole(exposure, dr.RoleStandby)
+	msg := fmt.Sprintf("standby; lease held by %s", decision.LeaseOwner)
+	if decision.LeaseOwner == "" {
+		msg = "standby"
+	}
+	statusErr := r.setFailoverStatusAndReady(ctx, exposure, fstatus, true, ReasonStandby, msg)
+	return false, 0, requeueResult(decision.Requeue), true, statusErr
+}
+
+// failClosed handles an ambiguous lease (foreign comment or unparseable
+// payload at the lease name): no shared write, Ready=False, requeue.
+func (r *CloudflareExposureReconciler) failClosed(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, leaseName string) (bool, time.Duration, ctrl.Result, bool, error) {
+	r.recordRole(exposure, dr.RoleStandby)
+	r.Recorder.Eventf(exposure, corev1.EventTypeWarning, EventLeaseConflict, "Failover lease record %s is foreign or unparseable", leaseName)
+	fstatus := r.baseFailoverStatus(exposure, dr.RoleStandby, "", nil, "")
+	return false, 0, ctrl.Result{RequeueAfter: 30 * time.Second}, true,
+		r.setFailoverStatusAndReady(ctx, exposure, fstatus, false, ReasonLeaseConflict, "failover lease record is foreign or unparseable")
+}
+
+// resolveDuplicateLeases deterministically converges a >1 lease set: the
+// winner deletes the others, a non-winner deletes only its own duplicates.
+// Both sites compute the same winner, so the set converges without
+// coordination. Surfaces LeaseConflict and requeues to act on the result.
+func (r *CloudflareExposureReconciler) resolveDuplicateLeases(ctx context.Context, cfClient cloudflare.Client, zone *cloudflare.Zone, exposure *cfztv1alpha1.CloudflareExposure, records []dr.LeaseRecord, now time.Time) (bool, time.Duration, ctrl.Result, bool, error) {
+	res := dr.Resolve(records, now, r.SiteID)
+	r.Recorder.Eventf(exposure, corev1.EventTypeWarning, EventLeaseConflict, "Resolving %d duplicate failover leases for %s (winner %s)", len(records), exposure.Spec.Hostname, res.WinnerSite)
+	for _, id := range res.DeleteIDs {
+		if err := cfClient.DNSRecords().Delete(ctx, zone.ID, id); err != nil && !errors.Is(err, cloudflare.ErrNotFound) {
+			return false, 0, ctrl.Result{}, true, r.setExposureStatusAndBackoff(ctx, exposure, exposure.Status.Cloudflare, fmt.Sprintf("delete duplicate lease %s: %v", id, err))
+		}
+	}
+	r.recordRole(exposure, dr.RoleStandby)
+	fstatus := r.baseFailoverStatus(exposure, dr.RoleStandby, res.WinnerSite, nil, "")
+	if statusErr := r.setFailoverStatusAndReady(ctx, exposure, fstatus, false, ReasonLeaseConflict, "resolving duplicate failover leases"); statusErr != nil {
+		return false, 0, ctrl.Result{}, true, statusErr
+	}
+	return false, 0, ctrl.Result{RequeueAfter: failoverResolveRequeue}, true, nil
+}
+
+// writeLease writes the desired lease payload: Create when no record exists,
+// else Update the observed record by ID. Neither is conditional — convergence
+// comes from the caller's read-back + duplicate resolution.
+func (r *CloudflareExposureReconciler) writeLease(ctx context.Context, cfClient cloudflare.Client, zone *cloudflare.Zone, leaseName string, exposure *cfztv1alpha1.CloudflareExposure, tunnel *cfztv1alpha1.CloudflareTunnel, currentID *string, now time.Time) error {
 	leaseSeconds := leaseSecondsOf(exposure)
-	owner := exposureOwner(exposure)
 	desired := dr.Lease{
 		Version: dr.LeaseSchemaVersion,
 		Site:    r.SiteID,
@@ -261,75 +297,71 @@ func (r *CloudflareExposureReconciler) claimLease(ctx context.Context, cfClient 
 		Type:    "TXT",
 		Content: desired.Serialize(),
 		Proxied: false,
-		Comment: owner.Comment(),
+		Comment: exposureOwner(exposure).Comment(),
 	}
-	claimed := false
-	op := func() error {
-		records, err := cfClient.DNSRecords().List(ctx, zone.ID, leaseName, "TXT")
-		if err != nil {
-			return err
-		}
-		var current *cloudflare.DNSRecord
-		for i := range records {
-			if records[i].Name == leaseName {
-				current = &records[i]
-				break
-			}
-		}
-		if current == nil {
-			if _, err := cfClient.DNSRecords().CreateCAS(ctx, input); err != nil {
-				return err
-			}
-			claimed = true
-			return nil
-		}
-		if !owner.MatchesComment(current.Comment) {
-			return errLeaseForeign
-		}
-		existing, perr := dr.ParseLease(current.Content)
-		if perr != nil {
-			return errLeaseForeign
-		}
-		mine := existing.Site == r.SiteID
-		if !force && !mine && !existing.Expired(now) {
-			return errLeaseHeldByPeer
-		}
-		if _, err := cfClient.DNSRecords().UpdateCAS(ctx, current.ID, input); err != nil {
-			return err
-		}
-		claimed = true
-		return nil
+	if currentID == nil {
+		_, err := cfClient.DNSRecords().Create(ctx, input)
+		return err
 	}
-	err := dr.CASRetry(ctx, dr.DefaultRetryConfig(), r.rng(), func(e error) bool { return errors.Is(e, cloudflare.ErrDNSCASConflict) }, op)
-	if err != nil {
-		return dr.Lease{}, claimed, err
-	}
-	return desired, claimed, nil
+	_, err := cfClient.DNSRecords().Update(ctx, *currentID, input)
+	return err
 }
 
-// readLease returns the parsed lease at leaseName, or nil when absent. A
-// present-but-foreign or unparseable record returns errLeaseForeign so the
-// caller refuses to clobber it.
-func (r *CloudflareExposureReconciler) readLease(ctx context.Context, cfClient cloudflare.Client, zoneID, leaseName string, exposure *cfztv1alpha1.CloudflareExposure) (*dr.Lease, string, error) {
+// listGroupLeases returns the parsed group-owned lease records at leaseName.
+// foreign is true if any record at the lease name is not group-owned or its
+// group-owned payload does not parse — the caller fails closed in that case.
+func (r *CloudflareExposureReconciler) listGroupLeases(ctx context.Context, cfClient cloudflare.Client, zoneID, leaseName string, exposure *cfztv1alpha1.CloudflareExposure) ([]dr.LeaseRecord, bool, error) {
 	records, err := cfClient.DNSRecords().List(ctx, zoneID, leaseName, "TXT")
 	if err != nil {
-		return nil, "", err
+		return nil, false, err
 	}
 	owner := exposureOwner(exposure)
+	var out []dr.LeaseRecord
 	for i := range records {
 		if records[i].Name != leaseName {
 			continue
 		}
 		if !owner.MatchesComment(records[i].Comment) {
-			return nil, records[i].ID, errLeaseForeign
+			return nil, true, nil
 		}
 		lease, perr := dr.ParseLease(records[i].Content)
 		if perr != nil {
-			return nil, records[i].ID, errLeaseForeign
+			return nil, true, nil
 		}
-		return &lease, records[i].ID, nil
+		out = append(out, dr.LeaseRecord{ID: records[i].ID, Lease: lease})
 	}
-	return nil, "", nil
+	return out, false, nil
+}
+
+func leaseOwnerOf(records []dr.LeaseRecord) string {
+	if len(records) == 1 {
+		return records[0].Lease.Site
+	}
+	return ""
+}
+
+func leaseTunnelOf(records []dr.LeaseRecord) string {
+	if len(records) == 1 {
+		return records[0].Lease.Tunnel
+	}
+	return ""
+}
+
+// readLease returns the single parsed group-owned lease at leaseName, or nil
+// when absent. A foreign or unparseable record returns errLeaseForeign. Used
+// by the deletion path; the role gate uses listGroupLeases.
+func (r *CloudflareExposureReconciler) readLease(ctx context.Context, cfClient cloudflare.Client, zoneID, leaseName string, exposure *cfztv1alpha1.CloudflareExposure) (*dr.Lease, string, error) {
+	records, foreign, err := r.listGroupLeases(ctx, cfClient, zoneID, leaseName, exposure)
+	if err != nil {
+		return nil, "", err
+	}
+	if foreign {
+		return nil, "", errLeaseForeign
+	}
+	if len(records) == 0 {
+		return nil, "", nil
+	}
+	return &records[0].Lease, records[0].ID, nil
 }
 
 // deleteOwnedLeaseIfPresent removes the failover lease TXT record when this
@@ -363,27 +395,9 @@ func (r *CloudflareExposureReconciler) deleteOwnedLeaseIfPresent(ctx context.Con
 	return nil
 }
 
-func (r *CloudflareExposureReconciler) clearForcePromote(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure) error {
-	latest := &cfztv1alpha1.CloudflareExposure{}
-	key := types.NamespacedName{Namespace: exposure.Namespace, Name: exposure.Name}
-	if err := r.Get(ctx, key, latest); err != nil {
-		return err
-	}
-	if latest.Annotations == nil {
-		return nil
-	}
-	if _, ok := latest.Annotations[annotationForcePromote]; !ok {
-		return nil
-	}
-	delete(latest.Annotations, annotationForcePromote)
-	if err := r.Update(ctx, latest); err != nil {
-		return err
-	}
-	delete(exposure.Annotations, annotationForcePromote)
-	return nil
-}
-
 // baseFailoverStatus builds a Standby/Unknown-style failover status snapshot.
+// It preserves the persisted lastForcePromoteToken so the replay guard holds
+// across role transitions.
 func (r *CloudflareExposureReconciler) baseFailoverStatus(exposure *cfztv1alpha1.CloudflareExposure, role dr.Role, leaseOwner string, expiresAt *metav1.Time, observedTunnel string) cfztv1alpha1.ExposureFailoverStatus {
 	prev := exposure.Status.Failover
 	fstatus := cfztv1alpha1.ExposureFailoverStatus{
@@ -393,6 +407,7 @@ func (r *CloudflareExposureReconciler) baseFailoverStatus(exposure *cfztv1alpha1
 		LeaseExpiresAt:          expiresAt,
 		ObservedPrimaryTunnelID: observedTunnel,
 		LastRoleTransitionAt:    prev.LastRoleTransitionAt,
+		LastForcePromoteToken:   prev.LastForcePromoteToken,
 	}
 	if prev.Role != string(role) {
 		now := metav1.NewTime(r.now())
@@ -411,9 +426,10 @@ func (r *CloudflareExposureReconciler) primaryFailoverStatus(exposure *cfztv1alp
 	return fstatus
 }
 
-// recordRole publishes the current role to the failover role gauge.
+// recordRole publishes the current role to the failover role gauge, labelled
+// with this site's identity so central scraping can attribute the reading.
 func (r *CloudflareExposureReconciler) recordRole(exposure *cfztv1alpha1.CloudflareExposure, role dr.Role) {
-	failoverRoleGauge.WithLabelValues(exposure.Namespace, exposure.Name, exposure.Spec.Failover.Group).Set(failoverRoleValue(string(role)))
+	failoverRoleGauge.WithLabelValues(exposure.Namespace, exposure.Name, exposure.Spec.Failover.Group, r.SiteID).Set(failoverRoleValue(string(role)))
 }
 
 func (r *CloudflareExposureReconciler) setFailoverStatus(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, fstatus cfztv1alpha1.ExposureFailoverStatus) error {

@@ -13,20 +13,23 @@ var (
 	// 0=Unknown, 1=Standby, 2=Primary. A gauge (not a per-role series) keeps
 	// the cardinality bounded and makes "is exactly one site Primary" a
 	// trivial sum across clusters scraping into the same store.
+	// site_id is included so a store scraping two clusters can attribute a
+	// Primary/Standby reading to the site that emitted it; without it
+	// namespace/name/group collide across clusters (review feedback).
 	failoverRoleGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "cfzt_failover_role",
 		Help: "Current DR failover role for a CloudflareExposure (0=Unknown, 1=Standby, 2=Primary).",
-	}, []string{"namespace", "name", "group"})
+	}, []string{"namespace", "name", "group", "site_id"})
 
 	failoverLeaseRenewTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "cfzt_failover_lease_renew_total",
 		Help: "Total successful DR failover lease renewals by this site.",
-	}, []string{"namespace", "name", "group"})
+	}, []string{"namespace", "name", "group", "site_id"})
 
 	failoverPromotionTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "cfzt_failover_promotion_total",
 		Help: "Total DR failover promotions to Primary by this site.",
-	}, []string{"namespace", "name", "group"})
+	}, []string{"namespace", "name", "group", "site_id"})
 )
 
 func init() {

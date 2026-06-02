@@ -179,6 +179,12 @@ type ExposureFailoverStatus struct {
 	// ObservedPrimaryTunnelID is the Cloudflare tunnel ID the current
 	// Primary published in the lease record (split-brain diagnostic).
 	ObservedPrimaryTunnelID string `json:"observedPrimaryTunnelId,omitempty"`
+
+	// LastForcePromoteToken is the most recent cfzt.reid.ee/force-promote
+	// annotation value this site has honored. A force-promote fires only
+	// when the annotation token differs from this, so a GitOps re-apply of
+	// the same token does not replay the emergency promotion (D26).
+	LastForcePromoteToken string `json:"lastForcePromoteToken,omitempty"`
 }
 
 // CloudflareExposureStatus defines the observed state of CloudflareExposure.

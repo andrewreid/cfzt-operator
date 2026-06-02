@@ -81,6 +81,25 @@ var _ = Describe("CloudflareExposure failover role gate", func() {
 		Expect(err).NotTo(HaveOccurred())
 	}
 
+	// seedLeasePeerOverwrite replaces the existing lease record's payload with
+	// a peer-owned lease (Update, not Create) so no duplicate is produced —
+	// simulating a peer legitimately taking over the single lease record.
+	seedLeasePeerOverwrite := func(group, site, tunnelID string, expires time.Time) {
+		name := naming.FailoverLeaseTXTName(group, zoneName)
+		records, err := fakeCF.DNSRecords().List(ctx, zoneID, name, "TXT")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(records).To(HaveLen(1))
+		lease := dr.Lease{Version: dr.LeaseSchemaVersion, Site: site, Tunnel: tunnelID, Renewed: expires.Add(-60 * time.Second), Expires: expires}
+		_, err = fakeCF.DNSRecords().Update(ctx, records[0].ID, cloudflare.DNSRecordInput{
+			ZoneID:  zoneID,
+			Name:    name,
+			Type:    "TXT",
+			Content: lease.Serialize(),
+			Comment: ownership.FromFailoverGroup(group).Comment(),
+		})
+		Expect(err).NotTo(HaveOccurred())
+	}
+
 	readLease := func(group string) (dr.Lease, bool) {
 		records, err := fakeCF.DNSRecords().List(ctx, zoneID, naming.FailoverLeaseTXTName(group, zoneName), "TXT")
 		Expect(err).NotTo(HaveOccurred())
@@ -171,20 +190,29 @@ var _ = Describe("CloudflareExposure failover role gate", func() {
 		// Peer holds a LIVE lease; only force-promote can override it.
 		seedLease("fo-force-grp", sitePeer, "peer-tunnel", testNow.Add(5*time.Minute))
 		current := fetchExposure(ctx, exposure.Name)
-		current.Annotations = map[string]string{annotationForcePromote: "true"}
+		current.Annotations = map[string]string{annotationForcePromote: "token-1"}
 		Expect(k8sClient.Update(ctx, current)).To(Succeed())
 
 		reconcileExposure(ctx, exposureRec, current)
 
 		refreshed := fetchExposure(ctx, exposure.Name)
 		Expect(refreshed.Status.Failover.Role).To(Equal(string(dr.RolePrimary)))
-		// Annotation cleared after successful acquire.
-		Expect(refreshed.Annotations).NotTo(HaveKey(annotationForcePromote))
+		// Token recorded in status; annotation is NOT mutated (GitOps-safe).
+		Expect(refreshed.Annotations).To(HaveKeyWithValue(annotationForcePromote, "token-1"))
+		Expect(refreshed.Status.Failover.LastForcePromoteToken).To(Equal("token-1"))
 		lease, found := readLease("fo-force-grp")
 		Expect(found).To(BeTrue())
 		Expect(lease.Site).To(Equal(siteSelf))
 		Expect(lease.Tunnel).To(Equal(cfTunnel.Status.TunnelId))
 		expectRecordedEvent(exposureRecorder, EventForcePromoted)
+
+		// Replay guard: a peer re-takes the lease, the same token is re-applied
+		// (as GitOps would), and the controller must NOT force-promote again.
+		seedLeasePeerOverwrite("fo-force-grp", sitePeer, "peer-tunnel", testNow.Add(5*time.Minute))
+		reconcileExposure(ctx, exposureRec, fetchExposure(ctx, exposure.Name))
+		Expect(fetchExposure(ctx, exposure.Name).Status.Failover.Role).To(Equal(string(dr.RoleStandby)))
+		leaseAfter, _ := readLease("fo-force-grp")
+		Expect(leaseAfter.Site).To(Equal(sitePeer))
 	})
 })
 
