@@ -293,6 +293,11 @@ Completed on 2026-05-22:
 
 Completed on 2026-06-02:
 - Slice 7 (DR failover, spec Slice 6, D26) subtasks 1-10:
+  - **Note:** the original subtask 3/4/7 bullets below described a
+    "CAS-by-record_id" lease that the implementation no longer uses. They
+    are **superseded by the "Slice 7 review remediation" entry dated
+    2026-06-02 further down** (best-effort lease, no CAS). The bullets here
+    have been corrected in place to match the shipped code.
   - Subtask 1: `--site-id` flag with non-empty boot validation
     (`validateSiteID`), Helm `site.id` value (default `cfzt-default-site`)
     rendered into the deployment, and `CloudflareExposureReconciler.SiteID`.
@@ -301,27 +306,30 @@ Completed on 2026-06-02:
     and `status.failover` (`role`, `siteId`, `leaseOwner`, `leaseExpiresAt`,
     `leaseRenewedAt`, `lastRoleTransitionAt`, `observedPrimaryTunnelId`),
     `Role` printcolumn, regenerated CRD/deepcopy, synced chart.
-  - Subtask 3: `internal/cloudflare` DNS `CreateCAS` / `UpdateCAS` +
-    `ErrDNSCASConflict`; fake models CAS-by-record_id over shared state; real
-    client emulates the record_id precondition with read-compare-write
-    (cloudflare-go/v4 v4.6.0 has no native precondition). TXT + CNAME bodies
-    share `dnsRecordBody`.
+  - Subtask 3: `internal/cloudflare` DNS `Create` / `Update` are TXT-aware
+    (share `dnsRecordBody` with CNAME). No CAS / conditional-write primitive —
+    Cloudflare DNS has none; the fake models real semantics (`Create` is
+    non-atomic and can yield duplicate TXT). Coordination lives in the
+    controller + `internal/dr`, not the client.
   - Subtask 4: pure `internal/dr` package — lease serde (`v=1 site=… tunnel=…
-    exp=… renewed=…`), `CASRetry` (bounded backoff + jitter,
-    `ErrLeaseConflictExhausted`), and the `Decide` role state machine
-    (Wait / Acquire / Renew / SplitBrain).
+    exp=… renewed=…`), symmetric acquire jitter, deterministic duplicate-lease
+    resolution (`Resolve`: unexpired/lowest-site-id wins), and the `Decide`
+    role state machine (Wait / Acquire / Renew / SplitBrain). No CAS retry loop.
   - Subtask 5: `ownership.FromFailoverGroup(group)` so failover Exposures tag
     the shared Access app + CNAME with the group ID; non-failover guard
     unchanged.
   - Subtask 6: `naming.FailoverLeaseTXTName(group, zone)` →
     `_cfzt-lease.<hash8(group)>.<zone>`.
   - Subtask 7: Exposure controller role gate before the shared Access/DNS
-    writes — Standby early-returns, Primary writes + renews at leaseSeconds/2,
-    force-promote annotation cleared after acquire, split-brain / lease-lost
-    demotion, `FailoverRequiresManagedDNS` on `dns.manage:false`. Events
+    writes — Standby early-returns, Primary writes + renews at leaseSeconds/2
+    with read-back verification, duplicate-lease resolution, split-brain /
+    lease-lost demotion, `FailoverRequiresManagedDNS` on `dns.manage:false`.
+    force-promote is a one-shot token vs `status.lastForcePromoteToken` (the
+    annotation is never mutated). Events
     Promoted/Demoted/LeaseAcquired/Renewed/Lost/Conflict/SplitBrain/ForcePromoted
-    and metrics `cfzt_failover_role` / `_lease_renew_total` / `_promotion_total`.
-    Delete path removes this site's lease and gates shared teardown on Primary.
+    and metrics `cfzt_failover_role` / `_lease_renew_total` / `_promotion_total`
+    (labelled with `site_id`). Delete path proves live lease ownership before
+    tearing down shared resources, failing safe under ambiguity.
   - Subtask 8: two-managers-in-one-process envtest (two namespaces, two
     tunnels, shared group, distinct `--site-id`, one shared fake CF client) —
     single Primary, lease handoff on renewer stop, returning-primary
@@ -362,6 +370,12 @@ Completed on 2026-06-02 (Slice 7 review remediation, PR #7):
   `TestFailoverDuplicateLeaseResolves`, `TestFailoverGroupConflict`,
   `TestFailoverRequiresDistinctSiteID`, `TestFailoverDeleteRequiresLiveOwnership`,
   force-promote replay guard, plus `internal/dr` `Resolve` table tests.
+- Review round 2 (review 4409975606): the finalizer ownership proof now
+  fails safe under ambiguity. `holdsLiveLease` returns true only when exactly
+  one group-owned lease exists and names this site; `deleteOwnedLeaseIfPresent`
+  removes every record this site owns (all duplicates, never a peer's). The
+  duplicate-unaware `readLease`/`errLeaseForeign` were removed. New envtest
+  `TestFailoverDeleteWithDuplicateLeasesFailsSafe`.
 
 Next: Slice 7 complete (review remediation landed). MVP slices 1-7 in;
 remaining work is release hardening and CI on PR #7.
