@@ -127,6 +127,28 @@ var _ = Describe("CRD admission", func() {
 		{"rejects overlong CloudflareTunnelRoute comment", routeWith("bad-route-comment", func(r *cfztv1alpha1.CloudflareTunnelRoute) {
 			r.Spec.Comment = "12345678901234567890123456789012345"
 		}), "comment", nil},
+		{"accepts a valid CloudflareExposure failover block", exposureWith("failover-valid", func(e *cfztv1alpha1.CloudflareExposure) {
+			e.Spec.Failover = &cfztv1alpha1.FailoverSpec{Group: "jellyfin-dr", LeaseSeconds: 60}
+		}), "", nil},
+		{"defaults failover.leaseSeconds when omitted", failoverYAMLExposure("failover-default-lease", "jellyfin-dr"), "", func(client.Object) {
+			created := &cfztv1alpha1.CloudflareExposure{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "failover-default-lease", Namespace: "default"}, created)).To(Succeed())
+			Expect(created.Spec.Failover).NotTo(BeNil())
+			Expect(created.Spec.Failover.LeaseSeconds).To(Equal(int32(60)))
+		}},
+		{"rejects failover.group below MinLength", exposureWith("failover-short-group", func(e *cfztv1alpha1.CloudflareExposure) {
+			e.Spec.Failover = &cfztv1alpha1.FailoverSpec{Group: "ab"}
+		}), "spec.failover.group", nil},
+		{"rejects failover.group with invalid characters", exposureWith("failover-bad-group", func(e *cfztv1alpha1.CloudflareExposure) {
+			e.Spec.Failover = &cfztv1alpha1.FailoverSpec{Group: "Jelly_Fin"}
+		}), "spec.failover.group", nil},
+		{"rejects failover block missing group", failoverYAMLExposure("failover-missing-group", ""), "spec.failover.group", nil},
+		{"rejects failover.leaseSeconds below minimum", exposureWith("failover-lease-low", func(e *cfztv1alpha1.CloudflareExposure) {
+			e.Spec.Failover = &cfztv1alpha1.FailoverSpec{Group: "jellyfin-dr", LeaseSeconds: 10}
+		}), "spec.failover.leaseSeconds", nil},
+		{"rejects failover.leaseSeconds above maximum", exposureWith("failover-lease-high", func(e *cfztv1alpha1.CloudflareExposure) {
+			e.Spec.Failover = &cfztv1alpha1.FailoverSpec{Group: "jellyfin-dr", LeaseSeconds: 601}
+		}), "spec.failover.leaseSeconds", nil},
 	} {
 		It(tc.name, func() {
 			err := k8sClient.Create(ctx, tc.object)
@@ -246,6 +268,32 @@ func exposureWith(name string, mutate func(*cfztv1alpha1.CloudflareExposure)) *c
 	obj := validAdmissionExposure(name)
 	mutate(obj)
 	return obj
+}
+
+// failoverYAMLExposure builds an unstructured Exposure with an explicit
+// failover block. When group is empty the failover map omits the key, so the
+// CRD's required-field check fires. When non-empty leaseSeconds is omitted to
+// exercise the +kubebuilder:default tag from the unstructured create path.
+func failoverYAMLExposure(name, group string) *unstructured.Unstructured {
+	failover := map[string]any{}
+	if group != "" {
+		failover["group"] = group
+	}
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "cfzt.reid.ee/v1alpha1",
+		"kind":       "CloudflareExposure",
+		"metadata":   map[string]any{"name": name, "namespace": "default"},
+		"spec": map[string]any{
+			"hostname":  name + ".example.com",
+			"tunnelRef": map[string]any{"name": "homelab"},
+			"origin":    map[string]any{"protocol": "http", "host": "jellyfin.default.svc.cluster.local", "port": int64(8096)},
+			"access": map[string]any{
+				"enabled":   true,
+				"policyRef": map[string]any{"uuid": "00000000-0000-4000-8000-000000000001"},
+			},
+			"failover": failover,
+		},
+	}}
 }
 
 func validAdmissionPolicy(name string) *cfztv1alpha1.CloudflareAccessPolicy {

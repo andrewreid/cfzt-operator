@@ -26,6 +26,9 @@ spec:
     - jsonPath: .spec.access.enabled
       name: Access
       type: boolean
+    - jsonPath: .status.failover.role
+      name: Role
+      type: string
     - jsonPath: .status.conditions[?(@.type=="Ready")].status
       name: Ready
       type: string
@@ -81,6 +84,37 @@ spec:
               displayName:
                 maxLength: 120
                 type: string
+              failover:
+                description: |-
+                  FailoverSpec opts a CloudflareExposure into D26 active-passive multi-cluster
+                  DR. Two Exposures applied to two clusters with matching spec.failover.group
+                  and distinct --site-id cooperate over one hostname via a Cloudflare DNS TXT
+                  lease record; exactly one cluster is Primary and writes the shared CNAME +
+                  Access app, the other warms its tunnel and waits.
+                properties:
+                  group:
+                    description: |-
+                      Group is the cross-cluster identity for this logical exposure. It is
+                      explicitly user-supplied (not derived from hostname) so renaming a
+                      hostname does not silently break the failover relationship. RFC 1123
+                      label, min 3 / max 63 chars.
+                    maxLength: 63
+                    minLength: 3
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                  leaseSeconds:
+                    default: 60
+                    description: |-
+                      LeaseSeconds is the TTL of the DNS TXT lease record. The Primary
+                      renews at leaseSeconds/2. Default 60s; min 30s (Cloudflare DNS TTL
+                      floor + safe renewer headroom); max 600s (caps split-brain window).
+                    format: int32
+                    maximum: 600
+                    minimum: 30
+                    type: integer
+                required:
+                - group
+                type: object
               hostname:
                 pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)+$
                 type: string
@@ -237,6 +271,52 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              failover:
+                description: |-
+                  Failover is this site's view of the D26 failover lease. Empty
+                  (zero-valued) when spec.failover is unset.
+                properties:
+                  lastRoleTransitionAt:
+                    description: |-
+                      LastRoleTransitionAt records the most recent Role change observed
+                      by this site.
+                    format: date-time
+                    type: string
+                  leaseExpiresAt:
+                    description: |-
+                      LeaseExpiresAt is the lease expiry read from / written to the
+                      lease TXT record.
+                    format: date-time
+                    type: string
+                  leaseOwner:
+                    description: |-
+                      LeaseOwner is the site-id last observed holding the lease (may be
+                      this site or a peer).
+                    type: string
+                  leaseRenewedAt:
+                    description: |-
+                      LeaseRenewedAt is the last successful renewal by this site as
+                      Primary; empty on Standby.
+                    format: date-time
+                    type: string
+                  observedPrimaryTunnelId:
+                    description: |-
+                      ObservedPrimaryTunnelID is the Cloudflare tunnel ID the current
+                      Primary published in the lease record (split-brain diagnostic).
+                    type: string
+                  role:
+                    description: Role is this site's current failover role.
+                    enum:
+                    - Unknown
+                    - Standby
+                    - Primary
+                    type: string
+                  siteId:
+                    description: |-
+                      SiteID is this operator process's --site-id, recorded on every
+                      status write so external operators can correlate role + identity.
+                    type: string
+                type: object
             type: object
         required:
         - spec
