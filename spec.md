@@ -67,6 +67,7 @@ These are resolved. Treat them as binding constraints, not options.
 | D24 | **`CloudflareAccessPolicy` CRD is in scope, ships in Slice 4.** Cluster-scoped CRD modelling reusable account-level Cloudflare Access policies with a structured rule subset (decisions: allow/deny/bypass/non_identity; rule types: email, email_domain, ip, everyone, service_token, geo; rule groups: include/exclude/require). `CloudflareExposure.spec.access.policyRef` gains a `name` field that references a managed Policy CR; exactly one of `{uuid, name}` is required when `access.enabled: true`. Name-colliding pre-existing CF policies are NOT auto-adopted (mirrors D9): `Reason=ForeignPolicy`. Deletion of a Policy CR is blocked while ≥1 `CloudflareExposure` references it (`Reason=BlockedByExposures`). Policy ownership is recorded via `status.policyId`; the CF-side policy carries `managed-by=cfzt-operator` and `source-uid=<CloudflareAccessPolicy.uid>` in its tags/decoration field (verify via Cloudflare MCP at implementation time — fall back to ID-only tracking like tunnels if no taggable field exists). |
 | D25 | **`CloudflareTunnelRoute` CRD is in scope, ships in Slice 5.** Cluster-scoped CRD modelling a single Cloudflare Tunnel private-network route (CIDR → tunnel binding). One CR → one CF route. `spec.tunnelRef.name` references a `CloudflareTunnel`; `spec.network` is a single IPv4 or IPv6 CIDR; `spec.virtualNetworkId` is optional. When unset, the operator omits `virtual_network_id` from Cloudflare route create/update/list calls and lets Cloudflare apply the account default VNet; it does not manage or resolve VNets in Slice 5. `spec.comment` is optional human text, capped to fit beside the compact operator ownership tag in Cloudflare's 100-character route comment. Ownership is recorded via `status.routeId`; the CF-side route `comment` MUST carry `managed-by=cfzt source-uid=<CloudflareTunnelRoute.uid>`. Pre-existing CF routes with the same target CIDR/VNet and no matching source-uid are NOT auto-adopted: `Reason=ForeignRoute`. Tunnel deletion is blocked while ≥1 `CloudflareTunnelRoute` references the tunnel: `Reason=BlockedByRoutes`. WARP / Cloudflare One Client Split Tunnels, Gateway network policies, private DNS, and packet-level validation remain deferred — this CRD only registers the route on the tunnel side. |
 | D26 | **Multi-cluster DR is in scope as a per-Exposure opt-in (supersedes D9).** Active-active and cross-cluster federation remain out of scope. Every operator process carries a **mandatory `--site-id`** (Helm `values.site.id`, sane default for clean single-site upgrades). Each cluster runs its own `CloudflareTunnel` (own `metadata.uid`, own generated name, own tunnel ID, own cloudflared DaemonSet), preserving the per-tunnel single-writer invariants (D11+D12+D19) **inside each cluster**. Cross-cluster coordination for a `CloudflareExposure` with `spec.failover` set is mediated by a Cloudflare **DNS TXT lease record** at `_cfzt-lease.<hash8(failover.group)>.<zone>`, using optimistic concurrency via the DNS `record_id` (compare-and-swap). Exactly one site holds the lease and is **Primary**; it alone writes the public DNS CNAME and the Access application for the hostname. Promotion is **automatic on lease TTL expiry**; an emergency `cfzt.reid.ee/force-promote` annotation overrides. A recovered former primary that finds the lease held by another site **demotes itself to Standby** and does not auto-steal back. For failover-enabled Exposures the `source-uid` on the shared Access application and public DNS CNAME is the **failover-group ID**, not the per-CR `uid`; ownership-tag verification accepts that group ID from either cluster. `dns.manage: true` on the referenced `CloudflareTunnel` is **required**; the lease TXT reuses the existing `Zone:DNS:Edit` scope. The collision-safety mechanics of the superseded D9 (generated tunnel names + `status.tunnelId`, source-uid tags on Access apps and DNS records, untagged ingress rules per D11) remain in force unchanged. |
+| D27 | **Path-scoped Access applications are in scope as an explicit per-Exposure app list (Slice 7).** `CloudflareExposure.spec.access.applications[]` models the Cloudflare Access self-hosted applications owned by one Exposure. Each entry owns one Access application, one or more `self_hosted_domains` values equal to `spec.hostname` or a path under it, and an ordered list of policy refs. Existing `spec.access.policyRef` remains as the backward-compatible shorthand for a single root Access application; when `applications[]` is set, `policyRef` must be empty. The explicit app-list form requires `spec.hostname` to be set in the CR; HTTPRoute-derived hostnames remain supported only for the legacy shorthand path. The Exposure still owns exactly one tunnel ingress route and one DNS CNAME for `spec.hostname`; path scoping is an Access-app concern, not a tunnel-config concern. Cloudflare Access path matching is specificity-based: a root target (`ntfy.reid.ee`) already covers the hostname and paths, while more-specific targets (`ntfy.reid.ee/v1/health`) override it. Users should not add both `ntfy.reid.ee` and `ntfy.reid.ee/*` unless live Cloudflare smoke proves a real need; the operator canonicalizes those as duplicate coverage for conflict detection. |
 
 ## Design philosophy
 
@@ -79,8 +80,8 @@ The translation pipeline is:
 ```text
 CloudflareExposure
   -> Cloudflare published route (added to tunnel-config doc)
-  -> Cloudflare Access application
-  -> Cloudflare Access policy binding
+  -> Cloudflare Access application(s)
+  -> Cloudflare Access policy binding(s)
   -> Cloudflare DNS CNAME (when D2 manage=true)
 ```
 
@@ -105,6 +106,7 @@ Supported:
 - Managed `CloudflareAccessPolicy` CRD with structured rule subset (D24 — Slice 4).
 - Cluster-scoped `CloudflareTunnelRoute` CRD: private network CIDR-to-tunnel routes (D25 — Slice 5).
 - Active-passive multi-cluster DR via per-Exposure `spec.failover` + DNS TXT lease (D26 — Slice 6).
+- Path-scoped Cloudflare Access applications under one `CloudflareExposure` hostname (D27 — Slice 7).
 - External (non-K8s) origins (D16).
 - `Ready` and `Progressing` conditions on all CRDs (D8).
 - Finalizers for owned Cloudflare resources.
@@ -136,10 +138,10 @@ The operator models the manual Cloudflare Zero Trust dashboard workflow for a se
    - Private origin URL, e.g. `http://jellyfin.media.svc.cluster.local:8096`.
    - Attached to a Cloudflare Tunnel.
 
-2. Create a Cloudflare Access application protecting that hostname.
+2. Create one or more Cloudflare Access applications protecting that hostname or specific paths under it.
    - Application name, e.g. `Jellyfin`.
-   - Bound to `jellyfin.reid.ee`.
-   - Attached to a policy, e.g. `family-only`.
+   - Bound to `jellyfin.reid.ee` or a path target such as `jellyfin.reid.ee/public-*`.
+   - Attached to one or more ordered policies, e.g. `family-only`.
 
 The operator treats these as separate Cloudflare resources reconciled from one `CloudflareExposure`.
 
@@ -337,7 +339,7 @@ spec:
   access:
     enabled: true
     policyRef:
-      # exactly one of {uuid, name} when access.enabled: true
+      # legacy shorthand: exactly one of {uuid, name} when access.enabled: true
       uuid: 0123abcd-4567-89ef-0123-456789abcdef    # bind a Cloudflare-managed policy by UUID
       # name: family-only                            # OR reference a CloudflareAccessPolicy CR (Slice 4, D24)
   failover:                          # optional; Slice 6 (D26). Cross-cluster active-passive DR.
@@ -345,7 +347,8 @@ spec:
     leaseSeconds: 60                 # optional; default 60, min 30, max 600
 status:
   cloudflare:
-    accessApplicationId: ""
+    accessApplicationId: ""        # legacy shorthand app ID; retained for compatibility
+    accessApplications: []         # Slice 7 (D27); explicit app IDs, keyed by name
     publicHostnameRouteHash: ""      # SHA of the rule the tunnel reconciler placed
     dnsRecordId: ""                  # only when D2 manage=true
   failover:                          # populated only when spec.failover is set (Slice 6, D26)
@@ -358,6 +361,43 @@ status:
     observedPrimaryTunnelId: ""      # tunnel ID recorded in the lease record
   conditions: []
 ```
+
+For path-scoped Access rules, use the explicit application list instead of the legacy `policyRef` shorthand:
+
+```yaml
+apiVersion: cfzt.reid.ee/v1alpha1
+kind: CloudflareExposure
+metadata:
+  name: ntfy
+  namespace: ntfy
+spec:
+  displayName: ntfy
+  hostname: ntfy.reid.ee
+  tunnelRef:
+    name: oci-dr-tunnel
+  origin:
+    protocol: http
+    host: ntfy.ntfy.svc.cluster.local
+    port: 80
+  access:
+    enabled: true
+    applications:
+      - name: root
+        domains:
+          - ntfy.reid.ee
+        policies:
+          - policyRef:
+              name: ntfy-auth-required
+      - name: public-endpoints
+        domains:
+          - ntfy.reid.ee/alerts-*
+          - ntfy.reid.ee/v1/health
+        policies:
+          - policyRef:
+              name: public-australia-only
+```
+
+Do not add a redundant `ntfy.reid.ee/*` application beside `ntfy.reid.ee` unless live Cloudflare validation proves the root application does not cover a required path. Cloudflare Access path matching gives more-specific path applications precedence over the root application; policy order within one application is separate from path specificity across applications.
 
 Kubebuilder markers:
 
@@ -374,17 +414,19 @@ Kubebuilder markers:
 
 1. Resolve the referenced `CloudflareTunnel` and read its credentials.
 2. Validate origin and hostname.
-3. Ensure the Access application exists for `spec.hostname` when `access.enabled: true`. Resolve the bound policy UUID:
-   - `policyRef.uuid` set → use verbatim (D3).
-   - `policyRef.name` set → `Get` the named `CloudflareAccessPolicy`; if its `status.policyId` is empty or `Ready=False`, surface `Ready=False, Reason=PolicyNotReady` on this Exposure and requeue. Otherwise use `status.policyId`.
-   - Bind the resolved UUID via `Applications.Policies.Update` (D24, Slice 4).
+3. Ensure the desired Access application(s) exist when `access.enabled: true`:
+   - Legacy shorthand (`spec.access.policyRef`) builds one root application named `<displayName | metadata.name>-cfzt` with `self_hosted_domains: [spec.hostname]`.
+   - Explicit D27 form (`spec.access.applications[]`) builds one application per list entry, named from `<displayName | metadata.name>-<applications[].name>-cfzt` when it fits Cloudflare limits; otherwise the naming helper truncates the base and appends a stable hash. `self_hosted_domains` is copied from the entry's `domains[]`.
+   - For every policy binding, `policyRef.uuid` is used verbatim; `policyRef.name` resolves the named `CloudflareAccessPolicy`. Missing, deleting, not-Ready, or stale-generation Policy CRs surface `Reason=PolicyNotFound` / `Reason=PolicyNotReady` and requeue.
+   - Bind policies in the listed order using Cloudflare application policy precedence. Cloudflare still evaluates action classes in its documented order (Bypass and Service Auth before Block/Allow), so list order cannot force Allow ahead of Bypass/Service Auth.
+   - Delete status-tracked owned Access applications that are no longer desired. Never delete or mutate foreign-tagged apps.
 4. Ensure the proxied DNS CNAME exists for `spec.hostname` → `<tunnelId>.cfargotunnel.com` when the tunnel has `dns.manage: true`.
 5. Enqueue the referenced `CloudflareTunnel` so the tunnel reconciler updates the ingress doc (D11).
 6. Read back the route placement from the tunnel's `status.routes[]` and record `publicHostnameRouteHash` in this Exposure's status.
 7. Set `Ready=True` once Access (if enabled), DNS (if managed), and the published route are all in their desired state.
-8. On deletion, run a finalizer (`cfzt.reid.ee/finalizer`) that removes DNS record + Access app, then enqueues the tunnel for ingress-doc update.
+8. On deletion, run a finalizer (`cfzt.reid.ee/finalizer`) that removes DNS record + every owned Access app, then enqueues the tunnel for ingress-doc update.
 
-`access.enabled: false` skips Access application creation; the hostname is reachable without auth.
+`access.enabled: false` skips Access application creation and removes any status-tracked owned Access apps if Access is disabled after previously being enabled; the hostname is reachable without auth.
 
 When `spec.failover` is set (Slice 6, D26), the controller first reads the DNS TXT lease and determines its role **before** steps 3–4. A **Standby** writes `status.failover` and returns without touching the Access application or public DNS CNAME; a **Primary** proceeds through steps 3–4, using the failover-group ID as the `source-uid` on the Access app and DNS record, and runs a lease-renewal loop. Promotion, demotion, and split-brain handling are specified in `## DR failover`.
 
@@ -516,11 +558,13 @@ CRD fields are validated by `+kubebuilder:validation:*` markers and `x-kubernete
 - `spec.access.enabled`: bool, default `false`.
 - `spec.access.policyRef.uuid`: optional, pattern UUID v4.
 - `spec.access.policyRef.name`: optional, RFC 1123 subdomain pattern, maxLength 253 (refers to a `CloudflareAccessPolicy` `metadata.name`).
-- CEL on `spec.access`: when `enabled: true`, exactly one of `policyRef.uuid` or `policyRef.name` must be set:
+- `spec.access.applications`: optional map list keyed by `name` (Slice 7, D27). When this list is non-empty, `spec.hostname` is required; HTTPRoute-derived hostnames are not accepted for explicit app targets.
+- `spec.access.applications[].name`: required RFC 1123 label; used only for deterministic K8s/status identity and generated Access app name suffix.
+- `spec.access.applications[].domains`: non-empty set list. Every value must equal `spec.hostname` or start with `spec.hostname + "/"`; schemes, ports, query strings, fragments, and domains outside the Exposure hostname are rejected. `<hostname>` and `<hostname>/*` canonicalize to the same coverage for duplicate detection.
+- `spec.access.applications[].policies`: non-empty ordered list. Each entry carries `policyRef.uuid` or `policyRef.name` with the same validation as the legacy shorthand.
+- CEL on `spec.access`: when `enabled: true`, exactly one of the legacy shorthand (`policyRef` with exactly one of `{uuid, name}`) or non-empty `applications[]` must be set. When `applications[]` is set, top-level `policyRef` must be empty. Each nested policy binding also requires exactly one of `{uuid, name}`.
 
-  ```
-  +kubebuilder:validation:XValidation:rule="!has(self.access) || !self.access.enabled || (has(self.access.policyRef) && ((has(self.access.policyRef.uuid) && size(self.access.policyRef.uuid) > 0) != (has(self.access.policyRef.name) && size(self.access.policyRef.name) > 0)))",message="access.policyRef requires exactly one of uuid or name when access.enabled is true"
-  ```
+- Controller-side validation rejects duplicate canonical `applications[].domains[]` coverage, because CEL cannot compare all cross-entry canonical path variants cleanly.
 
 - `spec.failover.group` (Slice 6, D26): required when `spec.failover` is present; RFC 1123 label pattern (`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`); minLength 3, maxLength 63.
 - `spec.failover.leaseSeconds` (Slice 6, D26): optional int, default 60, minimum 30, maximum 600.
@@ -708,7 +752,7 @@ The operator is conservative. It only mutates Cloudflare resources whose ownersh
 **Ownership rules** (see D9 for rationale on tunnels):
 
 - **Tunnels: generated name + status ID.** Desired Cloudflare name is `<spec.tunnelName>-cfzt-<hash8(metadata.uid)>`. `CloudflareTunnel.status.tunnelId` is the authoritative ownership record once present. On reconcile: if `status.tunnelId` is set, `Get(id)` confirms the tunnel exists and the name is either desired or legacy `spec.tunnelName`; legacy names are renamed in place to the generated name, preserving tunnel ID and token. If `status.tunnelId` is unset, exactly one generated-name tunnel is recovered into status; legacy unsuffixed matches remain `Ready=False, Reason=ForeignTunnel`. Pre-existing generated-name collisions are unlikely but still treated conservatively if ambiguous. cloudflare-go/v4 v4.6.0 does not surface a tunnel `comment` field, so no CF-side tag is written for tunnels.
-- **Access applications**: `tags` field carries `managed-by=cfzt-operator` and chunked `source-uid-<n>=...` values for `CloudflareExposure.uid`. Name = `<displayName-or-metadata.name>-cfzt`.
+- **Access applications**: `tags` field carries `managed-by=cfzt-operator` and chunked `source-uid-<n>=...` values for `CloudflareExposure.uid` or failover group ID (D26). Legacy shorthand name = `<displayName-or-metadata.name>-cfzt`; explicit D27 app-list names are derived from `<displayName-or-metadata.name>-<applications[].name>-cfzt`, with stable truncation + hash when needed to fit Cloudflare limits.
 - **DNS records**: `comment` field carries `managed-by=cfzt-operator source-uid=<CloudflareExposure.uid>`.
 - **Ingress rules: not tagged.** The entire doc is overwritten each reconcile from K8s desired state.
 - **Access policies** (Slice 4, D24): `CloudflareAccessPolicy.status.policyId` is the authoritative ownership record. Before mutation or deletion, the controller verifies the tracked Cloudflare policy name still matches `<spec.policyName | metadata.name>-cfzt`; the suffix is always appended for collision protection. If status is empty and a same-name policy already exists, the operator recovers it only when the full Cloudflare policy shape exactly matches the CR; mismatches remain `Reason=ForeignPolicy`.
@@ -716,7 +760,7 @@ The operator is conservative. It only mutates Cloudflare resources whose ownersh
 
 **Mutation rule.** Before update or delete of an Access app, DNS record, or TunnelRoute, the operator MUST verify the resource's `source-uid` matches a current local CR of the expected kind. Mismatch or missing tag → `Ready=False, Reason=ForeignResource` or route-specific `ForeignRoute`, no destructive action. Tunnels and Access policies follow the ID-based rules above instead.
 
-**Hostname conflict rule.** If an Access app or DNS record already exists for a hostname and its `source-uid` does not match the reconciling Exposure → `Ready=False, Reason=HostnameConflict`. Do not touch the conflicting resource. Requeue after 30 seconds. (Ingress-rule conflicts inside the doc are resolved at build time: builder errors if two Exposures claim the same hostname, surfacing on both as `HostnameConflict`.)
+**Hostname / Access target conflict rule.** If a DNS record already exists for the hostname, or an Access app already exists for any desired `self_hosted_domains` target, and its `source-uid` does not match the reconciling Exposure → `Ready=False, Reason=HostnameConflict`. Do not touch the conflicting resource. Requeue after 30 seconds. For Access apps, conflict detection is exact canonical target matching: `<host>` and `<host>/*` are the same canonical target, but `<host>/alerts-*` and `<host>/v1/health` are separate targets. (Ingress-rule conflicts inside the doc are resolved at build time: builder errors if two Exposures claim the same hostname, surfacing on both as `HostnameConflict`.)
 
 **Tunnel deletion rule.** A `CloudflareTunnel` with ≥1 referencing `CloudflareExposure` cannot complete deletion. The tunnel finalizer holds, sets `Ready=False, Reason=BlockedByExposures`. A `CloudflareTunnel` with ≥1 referencing `CloudflareTunnelRoute` (Slice 5, D25) is similarly blocked with `Ready=False, Reason=BlockedByRoutes`. Both blocks must clear before deletion completes.
 
@@ -737,7 +781,7 @@ Every CRD exposes exactly two conditions:
 - `Ready` — desired state fully realised. `Status: True/False/Unknown`. `Reason` and `Message` carry detail.
 - `Progressing` — at least one reconcile step is in flight or backing off.
 
-`status.cloudflare.*` carries CF resource IDs and route hashes. `CloudflareTunnel.status.ingressDocHash` records the last desired tunnel-config document hash so no-op reconciles can skip redundant writes. IDs are authoritative for ownership in the operator's local view; CF-side `source-uid` tags are the defence-in-depth check before mutation.
+`status.cloudflare.*` carries CF resource IDs and route hashes. `status.cloudflare.accessApplicationId` is retained for the legacy single-app shorthand. Slice 7 (D27) adds `status.cloudflare.accessApplications[]` as a map list keyed by `name`, with each entry carrying the Access app ID plus canonical domain and policy hashes. `CloudflareTunnel.status.ingressDocHash` records the last desired tunnel-config document hash so no-op reconciles can skip redundant writes. IDs are authoritative for ownership in the operator's local view; CF-side `source-uid` tags are the defence-in-depth check before mutation.
 
 `Reason` values (non-exhaustive):
 
@@ -846,8 +890,8 @@ Reference `cloudflare-go/v4` types and methods, not raw URLs. Use the [Cloudflar
 | Update DNS record | `client.DNS.Records.Update(ctx, id, ...)` |
 | Delete DNS record | `client.DNS.Records.Delete(ctx, id, ...)` |
 | List Access apps | `client.ZeroTrust.Access.Applications.List(ctx, ...)` |
-| Create Access app | `client.ZeroTrust.Access.Applications.New(ctx, ...)` |
-| Bind policy to app | `client.ZeroTrust.Access.Applications.Policies.Update(ctx, app, policy, ...)` |
+| Create Access app | `client.ZeroTrust.Access.Applications.New(ctx, ...)` (`self_hosted_domains` + ordered policy links) |
+| Update / bind policies to Access app | `client.ZeroTrust.Access.Applications.Update(ctx, id, ...)` (`policies[]` with precedence; D27 replaces separate single-policy binding calls) |
 | List Access policies (account-level) | `client.ZeroTrust.Access.Policies.List(ctx, ...)` (Slice 4) |
 | Get Access policy | `client.ZeroTrust.Access.Policies.Get(ctx, id, ...)` (Slice 4) |
 | Create Access policy | `client.ZeroTrust.Access.Policies.New(ctx, ...)` (Slice 4) |
@@ -1240,6 +1284,34 @@ The implementer ships in slices. Each slice has a measurable definition of done.
 - envtest tests pass: `TestFailoverLeaseAcquire`, `TestFailoverLeaseRenew`, `TestFailoverAutoPromoteOnExpiry`, `TestFailoverReturnedPrimaryStandsDown`, `TestFailoverCASConflictRetries`, `TestFailoverForcePromoteAnnotation`, `TestFailoverOwnershipTagAcceptsGroupID`, `TestFailoverDNSManagedRequired`, `TestFailoverSiteIDMandatoryAtBoot`.
 - Live smoke (`TestFailoverLifecycle`): two `--site-id` processes against a real Cloudflare account and a single test hostname assert one primary, auto-promote on primary kill, and returning-primary self-demote.
 - `ci.yaml` green; `helm lint` clean; manual: `dig TXT _cfzt-lease.<hash>.<zone> @1.1.1.1` shows the current lease owner and TTL.
+
+### Slice 7 — Path-scoped Access applications
+
+**Outcome**: `CloudflareExposure.spec.access.applications[]` lets one Exposure own multiple Cloudflare Access self-hosted applications for one hostname, including path-specific applications with different policy bindings. DNS and tunnel ingress remain one-hostname-per-Exposure. See D27.
+
+**Steps**:
+
+1. `CloudflareExposure` API: add `AccessApplicationTarget`, `AccessApplicationPolicyBinding`, and `ExposureAccessApplicationStatus` types; add validation markers/CEL for legacy-shorthand-or-explicit-app-list exclusivity, app-list map key, domain expression shape, non-empty policy lists, nested policyRef one-of, and status map list. Regenerate manifests + deepcopy; sync Helm CRDs.
+2. Access target canonicalization helper: canonicalize domain targets, treat `<hostname>` and `<hostname>/*` as duplicate coverage, reject schemes/ports/query/fragment/foreign hostnames, and compute deterministic domain/policy hashes for status + no-op comparison.
+3. `internal/cloudflare` Access app surface: change write input from single `Domain` / `PolicyUUID` to `Domains []string` / ordered `PolicyUUIDs []string`; map real SDK requests to `self_hosted_domains` plus policy link `precedence`; keep fake behavior and read-side policy/domain comparison deterministic.
+4. Exposure controller: build desired app targets from either legacy `policyRef` or explicit `applications[]`; resolve every nested managed policy ref; create/update/delete exact desired Access apps; delete status-tracked owned apps removed from spec or when Access is disabled; set `accessApplicationId` only for the legacy app and `accessApplications[]` for explicit apps.
+5. Ownership and conflicts: keep one `source-uid` tag set per Access app; mutation/deletion guard stays tag-based; exact canonical Access target conflicts surface as `Ready=False, Reason=HostnameConflict` without touching the foreign app.
+6. Cross-controller wiring: AccessPolicy controller reference discovery includes nested `applications[].policies[].policyRef.name`; Exposure watches on AccessPolicy changes enqueue Exposures that reference nested policy names; AccessPolicy deletion remains blocked while any legacy or nested Exposure ref exists.
+7. Docs/examples: add a path-scoped `ntfy` example. Recommend one root app plus more-specific path apps; do not recommend a redundant root wildcard beside the root hostname unless live Cloudflare smoke proves the need.
+8. Live Cloudflare smoke: root authenticated app plus bypass path app for one hostname; assert the specific path bypasses while root/other paths follow the root policy.
+
+**Definition of done**:
+
+- Legacy `spec.access.policyRef` manifests keep working and continue to populate `status.cloudflare.accessApplicationId`.
+- An Exposure with explicit `access.applications[]` creates root + path Access apps for one hostname, with each app carrying the expected `self_hosted_domains`, ordered policy links, ownership tags, and status entry.
+- Updating policy order or app domains rewrites only the affected owned Access app; reapply is a no-op.
+- Removing an `applications[]` entry deletes only that owned Access app; disabling Access deletes all status-tracked owned Access apps.
+- Nested `policyRef.name` reports `PolicyNotFound` / `PolicyNotReady` until the target `CloudflareAccessPolicy` is ready, then binds the resolved policy ID.
+- A foreign Access app on an exact canonical desired target (`<host>` equivalent to `<host>/*`) causes `Ready=False, Reason=HostnameConflict` and no mutation.
+- Finalizer deletes all owned Access apps and leaves foreign-tagged apps untouched.
+- envtest tests pass: `TestExposureAccessApplicationsCRDValidation`, `TestExposureAccessApplicationsCreate`, `TestExposureAccessApplicationsPolicyOrderDrift`, `TestExposureAccessApplicationRemovedDeletesOnlyOwnedApp`, `TestExposureAccessApplicationsPolicyRefNameNotReady`, `TestExposureAccessApplicationsForeignTargetConflict`, `TestExposureFinalizerDeletesAllAccessApps`.
+- Unit tests pass: `TestAccessTargetCanonicalization`, `TestFakeAccessApplicationMultipleDomainsAndPolicies`, `TestRealAccessApplicationMapsSelfHostedDomainsAndPrecedence`.
+- Live smoke path-scope scenario green; `ci.yaml` green; `helm lint` clean.
 
 ### Post-MVP
 
