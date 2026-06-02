@@ -499,14 +499,18 @@ func (r *CloudflareExposureReconciler) reconcileDelete(ctx context.Context, expo
 		return r.setExposureStatusAndRequeue(ctx, exposure, exposure.Status.Cloudflare, ReasonCredentialsMissing, err.Error())
 	}
 	if failover {
-		// Remove this site's lease (no-op if a peer owns it), then leave the
-		// shared Access app + public CNAME untouched unless this site is the
-		// Primary — a Standby's deletion must not tear down the surface a
-		// peer is still serving.
+		// Prove CURRENT lease ownership from the live record, not the persisted
+		// status.failover.role: a returned primary whose peer has since acquired
+		// the lease must not tear down the surface the peer is now serving.
+		holdsLease, err := r.holdsLiveLease(ctx, exposure, cfClient)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		// Remove this site's own lease record (no-op if a peer owns it).
 		if err := r.deleteOwnedLeaseIfPresent(ctx, exposure, cfClient); err != nil {
 			return ctrl.Result{}, err
 		}
-		if !isPrimary(exposure) {
+		if !holdsLease {
 			controllerutil.RemoveFinalizer(exposure, naming.Finalizer)
 			return ctrl.Result{}, r.Update(ctx, exposure)
 		}

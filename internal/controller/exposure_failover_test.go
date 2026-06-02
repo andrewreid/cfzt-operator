@@ -6,8 +6,10 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 
 	cfztv1alpha1 "github.com/andrewreid/cfzt-operator/api/v1alpha1"
@@ -167,6 +169,39 @@ var _ = Describe("CloudflareExposure failover role gate", func() {
 		// Next reconcile acts on the converged single record -> Primary.
 		reconcileExposure(ctx, exposureRec, fetchExposure(ctx, exposure.Name))
 		Expect(fetchExposure(ctx, exposure.Name).Status.Failover.Role).To(Equal(string(dr.RolePrimary)))
+	})
+
+	It("TestFailoverDeleteRequiresLiveOwnership", func() {
+		tunnel := readyTunnel(ctx, tunnelReconciler, "fo-del", "fo-del")
+		exposure := createFailoverExposure(ctx, "fo-del-app", tunnel.Name, "fo-del.example.com", "fo-del-grp")
+		seedLease("fo-del-grp", sitePeer, "peer-tunnel", testNow.Add(-1*time.Second))
+
+		// This site auto-promotes and writes the shared CNAME.
+		reconcileExposure(ctx, exposureRec, exposure)
+		Expect(fetchExposure(ctx, exposure.Name).Status.Failover.Role).To(Equal(string(dr.RolePrimary)))
+		cnames, err := fakeCF.DNSRecords().List(ctx, zoneID, "fo-del.example.com", "CNAME")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cnames).To(HaveLen(1))
+
+		// A peer then steals the live lease (single record, future expiry). This
+		// site's status still says Primary (stale).
+		seedLeasePeerOverwrite("fo-del-grp", sitePeer, "peer-tunnel", testNow.Add(5*time.Minute))
+
+		// Delete this CR: it must NOT remove the shared CNAME the peer now owns.
+		current := fetchExposure(ctx, exposure.Name)
+		Expect(k8sClient.Delete(ctx, current)).To(Succeed())
+		reconcileExposure(ctx, exposureRec, current)
+
+		cnamesAfter, err := fakeCF.DNSRecords().List(ctx, zoneID, "fo-del.example.com", "CNAME")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cnamesAfter).To(HaveLen(1), "stale-primary delete must not tear down the peer's shared CNAME")
+		// Peer's lease is untouched.
+		lease, found := readLease("fo-del-grp")
+		Expect(found).To(BeTrue())
+		Expect(lease.Site).To(Equal(sitePeer))
+		// Finalizer removed (CR can be garbage-collected).
+		err = k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: exposure.Name}, &cfztv1alpha1.CloudflareExposure{})
+		Expect(apierrors.IsNotFound(err)).To(BeTrue())
 	})
 
 	It("TestFailoverDNSManagedRequired", func() {

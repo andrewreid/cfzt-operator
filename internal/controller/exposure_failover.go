@@ -57,10 +57,31 @@ func exposureOwner(exposure *cfztv1alpha1.CloudflareExposure) ownership.Owner {
 	return ownership.From(exposure.UID)
 }
 
-// isPrimary reports whether this site currently holds the failover lease for
-// the Exposure per its last-persisted role.
-func isPrimary(exposure *cfztv1alpha1.CloudflareExposure) bool {
-	return exposure.Status.Failover.Role == string(dr.RolePrimary)
+// holdsLiveLease reports whether the live failover lease record currently names
+// this site. Read immediately before a finalizer tears down shared resources,
+// so a stale status.failover.role never causes this site to remove a CNAME /
+// Access app a peer has since taken over. A foreign/unparseable record or read
+// error is treated as "not ours" (fail safe: never delete shared on ambiguity).
+func (r *CloudflareExposureReconciler) holdsLiveLease(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, cfClient cloudflare.Client) (bool, error) {
+	if exposure.Spec.Failover == nil {
+		return false, nil
+	}
+	zone, err := cfClient.Zones().Resolve(ctx, exposure.Spec.Hostname)
+	if err != nil {
+		if errors.Is(err, cloudflare.ErrNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	leaseName := naming.FailoverLeaseTXTName(exposure.Spec.Failover.Group, zone.Name)
+	lease, _, err := r.readLease(ctx, cfClient, zone.ID, leaseName, exposure)
+	if err != nil {
+		if errors.Is(err, errLeaseForeign) {
+			return false, nil
+		}
+		return false, err
+	}
+	return lease != nil && lease.Site == r.SiteID, nil
 }
 
 func (r *CloudflareExposureReconciler) now() time.Time {
