@@ -71,6 +71,9 @@ type smokeConfig struct {
 	publicHostname          string
 	accessHostname          string
 	conflictHostname        string
+	failoverHostname        string
+	failoverGroup           string
+	siteID                  string
 	tunnelRouteCIDR         string
 	tunnelRouteConflictCIDR string
 	chartRef                string
@@ -119,6 +122,9 @@ func loadSmokeConfig(t *testing.T) smokeConfig {
 		publicHostname:          "public-" + runSuffix + "." + testZone,
 		accessHostname:          "access-" + runSuffix + "." + testZone,
 		conflictHostname:        "conflict-" + runSuffix + "." + testZone,
+		failoverHostname:        "failover-" + runSuffix + "." + testZone,
+		failoverGroup:           "cfzt-smoke-fo-" + runSuffix,
+		siteID:                  envDefault("SITE_ID", "cfzt-smoke-"+runSuffix),
 		tunnelRouteCIDR:         routeCIDR,
 		tunnelRouteConflictCIDR: routeConflictCIDR,
 		chartRef:                envDefault("CHART_REF", "oci://ghcr.io/andrewreid/charts/cfzt-operator"),
@@ -196,6 +202,7 @@ func (h *smokeHarness) installOperator() {
 		"--set", "image.tag=" + h.cfg.imageTag,
 		"--set", "image.pullPolicy=Never",
 		"--set", "replicaCount=1",
+		"--set", "site.id=" + h.cfg.siteID,
 		"--wait",
 		"--timeout", "2m"}
 	if !isLocalChartRef(h.cfg.chartRef) {
