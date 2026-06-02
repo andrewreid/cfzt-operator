@@ -41,11 +41,6 @@ const failoverAcquireJitter = 5 * time.Second
 // duplicate lease records, so the next reconcile acts on the converged set.
 const failoverResolveRequeue = 2 * time.Second
 
-// errLeaseForeign signals that a record at the lease name is not owned by this
-// failover group (foreign comment) or its group-owned payload does not parse.
-// The controller refuses to clobber it and fails closed (LeaseConflict).
-var errLeaseForeign = errors.New("failover lease record is foreign")
-
 // exposureOwner returns the ownership identity to stamp on the shared
 // Cloudflare resources for an Exposure. Failover Exposures use the
 // cross-cluster group ID (D26) so either site's writes pass the mutation
@@ -57,11 +52,16 @@ func exposureOwner(exposure *cfztv1alpha1.CloudflareExposure) ownership.Owner {
 	return ownership.From(exposure.UID)
 }
 
-// holdsLiveLease reports whether the live failover lease record currently names
-// this site. Read immediately before a finalizer tears down shared resources,
-// so a stale status.failover.role never causes this site to remove a CNAME /
-// Access app a peer has since taken over. A foreign/unparseable record or read
-// error is treated as "not ours" (fail safe: never delete shared on ambiguity).
+// holdsLiveLease reports whether this site is the proven sole owner of the live
+// failover lease. Read immediately before a finalizer tears down shared
+// resources, so a stale status.failover.role never causes this site to remove a
+// CNAME / Access app a peer has since taken over.
+//
+// It is true ONLY when exactly one group-owned lease record exists and it names
+// this site. A duplicate set (>1), an absent lease, a foreign/unparseable
+// record, or a read error all yield false: under ambiguity there is no proven
+// owner, so the finalizer must fail safe and leave shared resources alone (the
+// surviving site resolves the duplicate on its next reconcile).
 func (r *CloudflareExposureReconciler) holdsLiveLease(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, cfClient cloudflare.Client) (bool, error) {
 	if exposure.Spec.Failover == nil {
 		return false, nil
@@ -74,14 +74,14 @@ func (r *CloudflareExposureReconciler) holdsLiveLease(ctx context.Context, expos
 		return false, err
 	}
 	leaseName := naming.FailoverLeaseTXTName(exposure.Spec.Failover.Group, zone.Name)
-	lease, _, err := r.readLease(ctx, cfClient, zone.ID, leaseName, exposure)
+	records, foreign, err := r.listGroupLeases(ctx, cfClient, zone.ID, leaseName, exposure)
 	if err != nil {
-		if errors.Is(err, errLeaseForeign) {
-			return false, nil
-		}
 		return false, err
 	}
-	return lease != nil && lease.Site == r.SiteID, nil
+	if foreign || len(records) != 1 {
+		return false, nil
+	}
+	return records[0].Lease.Site == r.SiteID, nil
 }
 
 func (r *CloudflareExposureReconciler) now() time.Time {
@@ -368,26 +368,9 @@ func leaseTunnelOf(records []dr.LeaseRecord) string {
 	return ""
 }
 
-// readLease returns the single parsed group-owned lease at leaseName, or nil
-// when absent. A foreign or unparseable record returns errLeaseForeign. Used
-// by the deletion path; the role gate uses listGroupLeases.
-func (r *CloudflareExposureReconciler) readLease(ctx context.Context, cfClient cloudflare.Client, zoneID, leaseName string, exposure *cfztv1alpha1.CloudflareExposure) (*dr.Lease, string, error) {
-	records, foreign, err := r.listGroupLeases(ctx, cfClient, zoneID, leaseName, exposure)
-	if err != nil {
-		return nil, "", err
-	}
-	if foreign {
-		return nil, "", errLeaseForeign
-	}
-	if len(records) == 0 {
-		return nil, "", nil
-	}
-	return &records[0].Lease, records[0].ID, nil
-}
-
-// deleteOwnedLeaseIfPresent removes the failover lease TXT record when this
-// site currently owns it (lease site == this --site-id). A Standby never
-// deletes a peer's lease.
+// deleteOwnedLeaseIfPresent removes every lease TXT record this site owns
+// (lease site == this --site-id), including any duplicates from a create race.
+// It never deletes a peer's record and tolerates concurrent deletion.
 func (r *CloudflareExposureReconciler) deleteOwnedLeaseIfPresent(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, cfClient cloudflare.Client) error {
 	if exposure.Spec.Failover == nil {
 		return nil
@@ -400,18 +383,20 @@ func (r *CloudflareExposureReconciler) deleteOwnedLeaseIfPresent(ctx context.Con
 		return err
 	}
 	leaseName := naming.FailoverLeaseTXTName(exposure.Spec.Failover.Group, zone.Name)
-	lease, recordID, err := r.readLease(ctx, cfClient, zone.ID, leaseName, exposure)
+	records, foreign, err := r.listGroupLeases(ctx, cfClient, zone.ID, leaseName, exposure)
 	if err != nil {
-		if errors.Is(err, errLeaseForeign) {
-			return nil
-		}
 		return err
 	}
-	if lease == nil || lease.Site != r.SiteID {
+	if foreign {
 		return nil
 	}
-	if err := cfClient.DNSRecords().Delete(ctx, zone.ID, recordID); err != nil && !errors.Is(err, cloudflare.ErrNotFound) {
-		return err
+	for _, rec := range records {
+		if rec.Lease.Site != r.SiteID {
+			continue
+		}
+		if err := cfClient.DNSRecords().Delete(ctx, zone.ID, rec.ID); err != nil && !errors.Is(err, cloudflare.ErrNotFound) {
+			return err
+		}
 	}
 	return nil
 }

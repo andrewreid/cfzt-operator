@@ -204,6 +204,45 @@ var _ = Describe("CloudflareExposure failover role gate", func() {
 		Expect(apierrors.IsNotFound(err)).To(BeTrue())
 	})
 
+	It("TestFailoverDeleteWithDuplicateLeasesFailsSafe", func() {
+		tunnel := readyTunnel(ctx, tunnelReconciler, "fo-deldup", "fo-deldup")
+		exposure := createFailoverExposure(ctx, "fo-deldup-app", tunnel.Name, "fo-deldup.example.com", "fo-deldup-grp")
+		seedLease("fo-deldup-grp", sitePeer, "peer-tunnel", testNow.Add(-1*time.Second))
+
+		// This site promotes and writes the shared CNAME (lease becomes its own).
+		reconcileExposure(ctx, exposureRec, exposure)
+		Expect(fetchExposure(ctx, exposure.Name).Status.Failover.Role).To(Equal(string(dr.RolePrimary)))
+
+		// A create race leaves a second, peer-owned lease record alongside this
+		// site's — an ambiguous duplicate set with no proven single owner.
+		seedLease("fo-deldup-grp", sitePeer, "peer-tunnel", testNow.Add(5*time.Minute))
+		leaseName := naming.FailoverLeaseTXTName("fo-deldup-grp", zoneName)
+		dupRecords, err := fakeCF.DNSRecords().List(ctx, zoneID, leaseName, "TXT")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(dupRecords).To(HaveLen(2))
+
+		// Delete this CR. status.failover.role is stale Primary, but the live
+		// lease set is ambiguous, so the finalizer must fail safe: leave the
+		// shared CNAME alone and remove only this site's own lease record.
+		current := fetchExposure(ctx, exposure.Name)
+		Expect(k8sClient.Delete(ctx, current)).To(Succeed())
+		reconcileExposure(ctx, exposureRec, current)
+
+		cnamesAfter, err := fakeCF.DNSRecords().List(ctx, zoneID, "fo-deldup.example.com", "CNAME")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cnamesAfter).To(HaveLen(1), "ambiguous-duplicate delete must not tear down the shared CNAME")
+		// Only the peer's lease record remains (this site's own duplicate is gone).
+		remaining, err := fakeCF.DNSRecords().List(ctx, zoneID, leaseName, "TXT")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(remaining).To(HaveLen(1))
+		lease, perr := dr.ParseLease(remaining[0].Content)
+		Expect(perr).NotTo(HaveOccurred())
+		Expect(lease.Site).To(Equal(sitePeer))
+		// Finalizer removed despite the fail-safe shared-resource skip.
+		err = k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: exposure.Name}, &cfztv1alpha1.CloudflareExposure{})
+		Expect(apierrors.IsNotFound(err)).To(BeTrue())
+	})
+
 	It("TestFailoverDNSManagedRequired", func() {
 		tunnel := readyTunnel(ctx, tunnelReconciler, "fo-nodns", "fo-nodns")
 		tunnel.Spec.Dns.Manage = false
