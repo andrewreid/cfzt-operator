@@ -291,7 +291,52 @@ Completed on 2026-05-22:
   budgets for faster failure, and documents the 30s conflict requeue floor in
   the wait helper.
 
-Next: Slice 6 final verification.
+Completed on 2026-06-02:
+- Slice 7 (DR failover, spec Slice 6, D26) subtasks 1-10:
+  - Subtask 1: `--site-id` flag with non-empty boot validation
+    (`validateSiteID`), Helm `site.id` value (default `cfzt-default-site`)
+    rendered into the deployment, and `CloudflareExposureReconciler.SiteID`.
+  - Subtask 2: `CloudflareExposure.spec.failover` (`group` RFC 1123 label
+    min 3 / max 63 required; `leaseSeconds` default 60 / min 30 / max 600)
+    and `status.failover` (`role`, `siteId`, `leaseOwner`, `leaseExpiresAt`,
+    `leaseRenewedAt`, `lastRoleTransitionAt`, `observedPrimaryTunnelId`),
+    `Role` printcolumn, regenerated CRD/deepcopy, synced chart.
+  - Subtask 3: `internal/cloudflare` DNS `CreateCAS` / `UpdateCAS` +
+    `ErrDNSCASConflict`; fake models CAS-by-record_id over shared state; real
+    client emulates the record_id precondition with read-compare-write
+    (cloudflare-go/v4 v4.6.0 has no native precondition). TXT + CNAME bodies
+    share `dnsRecordBody`.
+  - Subtask 4: pure `internal/dr` package — lease serde (`v=1 site=… tunnel=…
+    exp=… renewed=…`), `CASRetry` (bounded backoff + jitter,
+    `ErrLeaseConflictExhausted`), and the `Decide` role state machine
+    (Wait / Acquire / Renew / SplitBrain).
+  - Subtask 5: `ownership.FromFailoverGroup(group)` so failover Exposures tag
+    the shared Access app + CNAME with the group ID; non-failover guard
+    unchanged.
+  - Subtask 6: `naming.FailoverLeaseTXTName(group, zone)` →
+    `_cfzt-lease.<hash8(group)>.<zone>`.
+  - Subtask 7: Exposure controller role gate before the shared Access/DNS
+    writes — Standby early-returns, Primary writes + renews at leaseSeconds/2,
+    force-promote annotation cleared after acquire, split-brain / lease-lost
+    demotion, `FailoverRequiresManagedDNS` on `dns.manage:false`. Events
+    Promoted/Demoted/LeaseAcquired/Renewed/Lost/Conflict/SplitBrain/ForcePromoted
+    and metrics `cfzt_failover_role` / `_lease_renew_total` / `_promotion_total`.
+    Delete path removes this site's lease and gates shared teardown on Primary.
+  - Subtask 8: two-managers-in-one-process envtest (two namespaces, two
+    tunnels, shared group, distinct `--site-id`, one shared fake CF client) —
+    single Primary, lease handoff on renewer stop, returning-primary
+    self-demote, force-promote, group-ID mutation guard across sites.
+  - Subtask 9: live `TestFailoverLifecycle` (one operator, peer simulated via
+    the CF API) — acquire as Primary, self-demote on peer takeover,
+    auto-promote on peer expiry, clean teardown; `hack/live-cloudflare-local.sh
+    failover` subcommand; `--set site.id` wired into the smoke install.
+  - Subtask 10: no new RBAC (lease is a CF DNS record, `--site-id` is a flag,
+    existing `cloudflareexposures{,/status}` rows cover the new fields); CRD +
+    chart already in sync; `make manifests generate` clean, `helm lint` clean,
+    `go test ./...` green.
+
+Next: Slice 7 complete. MVP slices 1-7 landed; remaining work is release
+hardening and any follow-up from review.
 
 ## 3. Slice plan
 
