@@ -111,6 +111,64 @@ var _ = Describe("CloudflareExposure failover role gate", func() {
 		return lease, true
 	}
 
+	It("TestFailoverGroupConflict", func() {
+		tunnel := readyTunnel(ctx, tunnelReconciler, "fo-grp", "fo-grp")
+		a := createFailoverExposure(ctx, "fo-grp-a", tunnel.Name, "fo-grp-a.example.com", "dup-group")
+		b := createFailoverExposure(ctx, "fo-grp-b", tunnel.Name, "fo-grp-b.example.com", "dup-group")
+
+		reconcileExposureExpectRequeueAfter30(ctx, exposureRec, a)
+		reconcileExposureExpectRequeueAfter30(ctx, exposureRec, b)
+
+		for _, name := range []string{a.Name, b.Name} {
+			cur := fetchExposure(ctx, name)
+			ready := meta.FindStatusCondition(cur.Status.Conditions, ConditionReady)
+			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+			Expect(ready.Reason).To(Equal(ReasonFailoverGroupConflict))
+		}
+		// No lease written for the contended group.
+		_, found := readLease("dup-group")
+		Expect(found).To(BeFalse())
+	})
+
+	It("TestFailoverRequiresDistinctSiteID", func() {
+		exposureRec.SiteID = defaultSiteID
+		tunnel := readyTunnel(ctx, tunnelReconciler, "fo-defsite", "fo-defsite")
+		exposure := createFailoverExposure(ctx, "fo-defsite-app", tunnel.Name, "fo-defsite.example.com", "fo-defsite-grp")
+
+		reconcileExposureExpectRequeueAfter30(ctx, exposureRec, exposure)
+
+		cur := fetchExposure(ctx, exposure.Name)
+		ready := meta.FindStatusCondition(cur.Status.Conditions, ConditionReady)
+		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+		Expect(ready.Reason).To(Equal(ReasonFailoverRequiresDistinctSiteID))
+		_, found := readLease("fo-defsite-grp")
+		Expect(found).To(BeFalse())
+	})
+
+	It("TestFailoverDuplicateLeaseResolves", func() {
+		tunnel := readyTunnel(ctx, tunnelReconciler, "fo-dup", "fo-dup")
+		cfTunnel := fetchTunnel(ctx, tunnel.Name)
+		exposure := createFailoverExposure(ctx, "fo-dup-app", tunnel.Name, "fo-dup.example.com", "fo-dup-grp")
+		// Two group-owned lease records exist (a create race). site-self sorts
+		// lexicographically below "zpeer", so this site is the deterministic
+		// winner and keeps its record.
+		seedLease("fo-dup-grp", siteSelf, cfTunnel.Status.TunnelId, testNow.Add(5*time.Minute))
+		seedLease("fo-dup-grp", "zpeer", "peer-tunnel", testNow.Add(5*time.Minute))
+
+		// First reconcile resolves duplicates (deletes the loser) and requeues.
+		reconcileExposure(ctx, exposureRec, exposure)
+		records, err := fakeCF.DNSRecords().List(ctx, zoneID, naming.FailoverLeaseTXTName("fo-dup-grp", zoneName), "TXT")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(records).To(HaveLen(1))
+		lease, perr := dr.ParseLease(records[0].Content)
+		Expect(perr).NotTo(HaveOccurred())
+		Expect(lease.Site).To(Equal(siteSelf))
+
+		// Next reconcile acts on the converged single record -> Primary.
+		reconcileExposure(ctx, exposureRec, fetchExposure(ctx, exposure.Name))
+		Expect(fetchExposure(ctx, exposure.Name).Status.Failover.Role).To(Equal(string(dr.RolePrimary)))
+	})
+
 	It("TestFailoverDNSManagedRequired", func() {
 		tunnel := readyTunnel(ctx, tunnelReconciler, "fo-nodns", "fo-nodns")
 		tunnel.Spec.Dns.Manage = false

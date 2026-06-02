@@ -125,6 +125,12 @@ func (r *CloudflareExposureReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// A Standby (or any non-Primary outcome) is fully handled here.
 	var failoverRequeue time.Duration
 	if exposure.Spec.Failover != nil {
+		if conflict, err := r.hasFailoverGroupConflict(ctx, &exposure); err != nil {
+			return ctrl.Result{}, err
+		} else if conflict {
+			r.Recorder.Eventf(&exposure, corev1.EventTypeWarning, EventLeaseConflict, "spec.failover.group %q is used by more than one CloudflareExposure in this cluster", exposure.Spec.Failover.Group)
+			return r.setExposureStatusAndRequeue(ctx, &exposure, exposure.Status.Cloudflare, ReasonFailoverGroupConflict, "spec.failover.group is shared by more than one CloudflareExposure in this cluster")
+		}
 		proceed, requeue, result, done, err := r.reconcileFailoverRole(ctx, &exposure, &tunnel, cfClient)
 		if done || err != nil {
 			return result, err
@@ -329,6 +335,29 @@ func (r *CloudflareExposureReconciler) hasDuplicateHostname(ctx context.Context,
 			continue
 		}
 		if other.Spec.TunnelRef.Name == exposure.Spec.TunnelRef.Name && other.Spec.Hostname == exposure.Spec.Hostname {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// hasFailoverGroupConflict reports whether another CloudflareExposure in the
+// same namespace shares this Exposure's spec.failover.group. Two such Exposures
+// would contend over the same lease record and group ownership identity (D26),
+// so both must back off without touching Cloudflare. Scope is per-namespace:
+// across clusters the two group members live in separate apiservers (and may
+// share a namespace name), so a cluster-wide check would false-positive a
+// legitimate cross-cluster pair when both are observed in one test apiserver.
+func (r *CloudflareExposureReconciler) hasFailoverGroupConflict(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure) (bool, error) {
+	if exposure.Spec.Failover == nil {
+		return false, nil
+	}
+	others, err := listExposuresByFailoverGroup(ctx, r.Client, exposure.Spec.Failover.Group)
+	if err != nil {
+		return false, err
+	}
+	for _, other := range others {
+		if other.UID != exposure.UID && other.Namespace == exposure.Namespace && other.DeletionTimestamp.IsZero() {
 			return true, nil
 		}
 	}
