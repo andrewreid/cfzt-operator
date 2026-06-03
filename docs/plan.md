@@ -293,7 +293,103 @@ Completed on 2026-05-22:
   budgets for faster failure, and documents the 30s conflict requeue floor in
   the wait helper.
 
-Next: Slice 6 final verification.
+Completed on 2026-06-02:
+- Slice 7 (DR failover, spec Slice 6, D26) subtasks 1-10:
+  - **Note:** the original subtask 3/4/7 bullets below described a
+    "CAS-by-record_id" lease that the implementation no longer uses. They
+    are **superseded by the "Slice 7 review remediation" entry dated
+    2026-06-02 further down** (best-effort lease, no CAS). The bullets here
+    have been corrected in place to match the shipped code.
+  - Subtask 1: `--site-id` flag with non-empty boot validation
+    (`validateSiteID`), Helm `site.id` value (default `cfzt-default-site`)
+    rendered into the deployment, and `CloudflareExposureReconciler.SiteID`.
+  - Subtask 2: `CloudflareExposure.spec.failover` (`group` RFC 1123 label
+    min 3 / max 63 required; `leaseSeconds` default 60 / min 30 / max 600)
+    and `status.failover` (`role`, `siteId`, `leaseOwner`, `leaseExpiresAt`,
+    `leaseRenewedAt`, `lastRoleTransitionAt`, `observedPrimaryTunnelId`),
+    `Role` printcolumn, regenerated CRD/deepcopy, synced chart.
+  - Subtask 3: `internal/cloudflare` DNS `Create` / `Update` are TXT-aware
+    (share `dnsRecordBody` with CNAME). No CAS / conditional-write primitive —
+    Cloudflare DNS has none; the fake models real semantics (`Create` is
+    non-atomic and can yield duplicate TXT). Coordination lives in the
+    controller + `internal/dr`, not the client.
+  - Subtask 4: pure `internal/dr` package — lease serde (`v=1 site=… tunnel=…
+    exp=… renewed=…`), symmetric acquire jitter, deterministic duplicate-lease
+    resolution (`Resolve`: unexpired/lowest-site-id wins), and the `Decide`
+    role state machine (Wait / Acquire / Renew / SplitBrain). No CAS retry loop.
+  - Subtask 5: `ownership.FromFailoverGroup(group)` so failover Exposures tag
+    the shared Access app + CNAME with the group ID; non-failover guard
+    unchanged.
+  - Subtask 6: `naming.FailoverLeaseTXTName(group, zone)` →
+    `_cfzt-lease.<hash8(group)>.<zone>`.
+  - Subtask 7: Exposure controller role gate before the shared Access/DNS
+    writes — Standby early-returns, Primary writes + renews at leaseSeconds/2
+    with read-back verification, duplicate-lease resolution, split-brain /
+    lease-lost demotion, `FailoverRequiresManagedDNS` on `dns.manage:false`.
+    force-promote is a one-shot token vs `status.lastForcePromoteToken` (the
+    annotation is never mutated). Events
+    Promoted/Demoted/LeaseAcquired/Renewed/Lost/Conflict/SplitBrain/ForcePromoted
+    and metrics `cfzt_failover_role` / `_lease_renew_total` / `_promotion_total`
+    (labelled with `site_id`). Delete path proves live lease ownership before
+    tearing down shared resources, failing safe under ambiguity.
+  - Subtask 8: two-managers-in-one-process envtest (two namespaces, two
+    tunnels, shared group, distinct `--site-id`, one shared fake CF client) —
+    single Primary, lease handoff on renewer stop, returning-primary
+    self-demote, force-promote, group-ID mutation guard across sites.
+  - Subtask 9: live `TestFailoverLifecycle` (one operator, peer simulated via
+    the CF API) — acquire as Primary, self-demote on peer takeover,
+    auto-promote on peer expiry, clean teardown; `hack/live-cloudflare-local.sh
+    failover` subcommand; `--set site.id` wired into the smoke install.
+  - Subtask 10: no new RBAC (lease is a CF DNS record, `--site-id` is a flag,
+    existing `cloudflareexposures{,/status}` rows cover the new fields); CRD +
+    chart already in sync; `make manifests generate` clean, `helm lint` clean,
+    `go test ./...` green.
+
+Completed on 2026-06-02 (Slice 7 review remediation, PR #7):
+- Reshaped D26 from a false "CAS-by-record_id" claim to an honest
+  best-effort lease (Cloudflare DNS has no conditional write nor TXT
+  uniqueness). Spec + code now describe an optimistic, eventually-consistent
+  coordination hint whose safety rests on the data plane (single CNAME → one
+  tunnel target; a failed primary drops its cloudflared edge connection),
+  not on lease atomicity. User signed off on the D26 amendment.
+- Deleted `CreateCAS`/`UpdateCAS`/`ErrDNSCASConflict`; `Create`/`Update` are
+  now TXT-aware and the fake models real semantics (duplicate TXT allowed).
+- `internal/dr` dropped `CASRetry`; added `Resolve` — deterministic
+  duplicate-lease tie-break (unexpired, lowest site-id wins; winner deletes
+  others, loser deletes own). The role gate detects `>1` group-owned record,
+  resolves, requeues, and read-back-verifies every acquire/renew, bounding
+  the dual-writer window to ~one reconcile; foreign/unparseable → fail closed.
+- force-promote is now a one-shot token vs `status.failover.lastForcePromoteToken`;
+  the controller records the honored token and never mutates the annotation
+  (GitOps replay-safe).
+- Reject `spec.failover` on the chart-default `--site-id`
+  (`FailoverRequiresDistinctSiteID`); reject same-cluster duplicate
+  `spec.failover.group` (`FailoverGroupConflict`, cluster-wide — see round 3).
+- Deletion proves live lease ownership (`holdsLiveLease`) before tearing down
+  the shared CNAME/Access, never the stale persisted role.
+- Metrics gained a `site_id` label. New envtests:
+  `TestFailoverDuplicateLeaseResolves`, `TestFailoverGroupConflict`,
+  `TestFailoverRequiresDistinctSiteID`, `TestFailoverDeleteRequiresLiveOwnership`,
+  force-promote replay guard, plus `internal/dr` `Resolve` table tests.
+- Review round 2 (review 4409975606): the finalizer ownership proof now
+  fails safe under ambiguity. `holdsLiveLease` returns true only when exactly
+  one group-owned lease exists and names this site; `deleteOwnedLeaseIfPresent`
+  removes every record this site owns (all duplicates, never a peer's). The
+  duplicate-unaware `readLease`/`errLeaseForeign` were removed. New envtest
+  `TestFailoverDeleteWithDuplicateLeasesFailsSafe`.
+- Review round 3: the round-1 namespace-scoped group guard was a production
+  hole — the lease name has no namespace and all Exposures in a cluster share
+  one `--site-id`, so two same-group members in one cluster share a lease and
+  each read it as self-owned. Reverted to **cluster-wide** group uniqueness
+  (`hasFailoverGroupConflict` no longer filters by namespace; spec wording back
+  to "same cluster"). Deleted `exposure_failover_twosite_test.go` (it
+  co-located two same-group CRs in one apiserver, which the invariant forbids);
+  its scenarios are covered by the single-reconciler + seeded-peer suite, and
+  the one unique bit (a Primary adopting a peer-created group-owned CNAME) is
+  retained as `TestFailoverPrimaryAdoptsPeerGroupCNAME`.
+
+Next: Slice 7 complete (review remediation landed). MVP slices 1-7 in;
+remaining work is release hardening and CI on PR #7.
 
 ## 3. Slice plan
 
@@ -1057,6 +1153,8 @@ Subtask-derived additions: `TestEnqueueNamedExtracts`,
   stable; `internal/ownership` is reachable only via `h.cf.*` wrapper.
 
 ### Slice 7 — DR failover (spec Slice 6, D26)
+
+> **⚠️ SUPERSEDED PLANNING TEXT.** This block is the *original* pre-implementation design and still describes a "CAS-by-record_id" lease (`CreateCAS` / `UpdateCAS` / "CAS Update" / "fake models CAS" / "CAS retry loop" / two-managers-in-process envtest). **None of that shipped.** Cloudflare DNS has no conditional-write precondition or TXT uniqueness, so the lease was implemented as a *best-effort, eventually-consistent* coordination record with read-back verification + deterministic duplicate resolution (`internal/dr.Resolve`), a cluster-wide group-uniqueness guard, and single-reconciler + seeded-peer envtests. For the as-built behaviour see **`## 2. Current state` → the Slice 7 review-remediation entries (rounds 1–3)** and `spec.md ## DR failover`. The text below is retained only as a historical planning record.
 
 > **Numbering note.** `spec.md ## Implementation slices` labels this **Slice 6 — DR failover** (the next *product* slice after Slice 5 routes). This plan already used "Slice 6" for the interstitial engineering-only "Pre-MVP cleanup" slice above, so the plan calls the DR work **Slice 7** to avoid a local collision. They are the same body of work: plan Slice 7 ≡ spec Slice 6.
 

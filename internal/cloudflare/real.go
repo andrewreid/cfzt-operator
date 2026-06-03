@@ -609,19 +609,16 @@ func (d *realDNSRecords) List(ctx context.Context, zoneID, name, recordType stri
 func (d *realDNSRecords) Create(ctx context.Context, in DNSRecordInput) (*DNSRecord, error) {
 	var result *DNSRecord
 	err := d.client.withRetry(ctx, func() error {
-		resp, err := d.client.api.DNS.Records.New(ctx, cfdns.RecordNewParams{
-			ZoneID: cf.F(in.ZoneID),
-			Body: cfdns.CNAMERecordParam{
-				Name:    cf.F(in.Name),
-				TTL:     cf.F(cfdns.TTL1),
-				Type:    cf.F(cfdns.CNAMERecordTypeCNAME),
-				Content: cf.F(in.Content),
-				Proxied: cf.F(in.Proxied),
-				Comment: cf.F(in.Comment),
-			},
-		})
+		body, err := dnsRecordBody(in)
 		if err != nil {
 			return err
+		}
+		resp, err := d.client.api.DNS.Records.New(ctx, cfdns.RecordNewParams{
+			ZoneID: cf.F(in.ZoneID),
+			Body:   body.(cfdns.RecordNewParamsBodyUnion),
+		})
+		if err != nil {
+			return mapAPIError(err)
 		}
 		result = dnsRecordFromResponse(in.ZoneID, resp)
 		return nil
@@ -632,16 +629,13 @@ func (d *realDNSRecords) Create(ctx context.Context, in DNSRecordInput) (*DNSRec
 func (d *realDNSRecords) Update(ctx context.Context, id string, in DNSRecordInput) (*DNSRecord, error) {
 	var result *DNSRecord
 	err := d.client.withRetry(ctx, func() error {
+		body, err := dnsRecordBody(in)
+		if err != nil {
+			return err
+		}
 		resp, err := d.client.api.DNS.Records.Update(ctx, id, cfdns.RecordUpdateParams{
 			ZoneID: cf.F(in.ZoneID),
-			Body: cfdns.CNAMERecordParam{
-				Name:    cf.F(in.Name),
-				TTL:     cf.F(cfdns.TTL1),
-				Type:    cf.F(cfdns.CNAMERecordTypeCNAME),
-				Content: cf.F(in.Content),
-				Proxied: cf.F(in.Proxied),
-				Comment: cf.F(in.Comment),
-			},
+			Body:   body.(cfdns.RecordUpdateParamsBodyUnion),
 		})
 		if err != nil {
 			return mapAPIError(err)
@@ -660,6 +654,46 @@ func (d *realDNSRecords) Delete(ctx context.Context, zoneID, id string) error {
 		}
 		return nil
 	})
+}
+
+// CNAMERecordParam and TXTRecordParam from cfdns satisfy both the New and
+// Update body unions, so dnsRecordBody returns one concrete value and each
+// call site casts to the union it needs. Compile-time asserts make the dual
+// conformance load-bearing — if a future SDK version splits the param shape
+// per verb, the build fails here instead of at a runtime cast.
+var (
+	_ cfdns.RecordNewParamsBodyUnion    = cfdns.CNAMERecordParam{}
+	_ cfdns.RecordUpdateParamsBodyUnion = cfdns.CNAMERecordParam{}
+	_ cfdns.RecordNewParamsBodyUnion    = cfdns.TXTRecordParam{}
+	_ cfdns.RecordUpdateParamsBodyUnion = cfdns.TXTRecordParam{}
+)
+
+// dnsRecordBody dispatches on in.Type so failover lease writes (TXT) and the
+// public-hostname CNAME path share one write boundary. Unknown types are a
+// programmer error and reach this code only on a controller bug.
+func dnsRecordBody(in DNSRecordInput) (any, error) {
+	switch in.Type {
+	case "CNAME":
+		return cfdns.CNAMERecordParam{
+			Name:    cf.F(in.Name),
+			TTL:     cf.F(cfdns.TTL1),
+			Type:    cf.F(cfdns.CNAMERecordTypeCNAME),
+			Content: cf.F(in.Content),
+			Proxied: cf.F(in.Proxied),
+			Comment: cf.F(in.Comment),
+		}, nil
+	case "TXT":
+		return cfdns.TXTRecordParam{
+			Name:    cf.F(in.Name),
+			TTL:     cf.F(cfdns.TTL1),
+			Type:    cf.F(cfdns.TXTRecordTypeTXT),
+			Content: cf.F(in.Content),
+			Proxied: cf.F(in.Proxied),
+			Comment: cf.F(in.Comment),
+		}, nil
+	default:
+		return nil, fmt.Errorf("cloudflare: unsupported DNS record type %q for CAS write", in.Type)
+	}
 }
 
 type realZones struct {

@@ -7,6 +7,7 @@ Usage:
   hack/live-cloudflare-local.sh preflight
   hack/live-cloudflare-local.sh up
   hack/live-cloudflare-local.sh lifecycle
+  hack/live-cloudflare-local.sh failover
   hack/live-cloudflare-local.sh down
   hack/live-cloudflare-local.sh delete-cluster
   hack/live-cloudflare-local.sh stop-colima
@@ -209,6 +210,19 @@ case "${cmd}" in
     export GITHUB_RUN_ID="${GITHUB_RUN_ID:-$(date +%s)}"
     export GITHUB_RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
     run_go_test '^TestCloudflareLifecycle$'
+    ;;
+  failover)
+    load_env
+    require_cmd helm
+    export CHART_REF="${CHART_REF:-charts/cfzt-operator}"
+    export IMAGE_REPOSITORY="${IMAGE_REPOSITORY:-cfzt-operator}"
+    export IMAGE_TAG="${IMAGE_TAG:-live-local}"
+    ensure_kind_cluster
+    build_and_load_image
+    export GITHUB_REF_NAME="${GITHUB_REF_NAME:-v0.1.0-alpha-local}"
+    export GITHUB_RUN_ID="${GITHUB_RUN_ID:-$(date +%s)}"
+    export GITHUB_RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
+    run_go_test '^TestFailoverLifecycle$'
     ;;
   down)
     load_env_if_present

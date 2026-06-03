@@ -1,6 +1,8 @@
 package naming
 
 import (
+	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -31,6 +33,46 @@ func TestDaemonSetName(t *testing.T) {
 	for _, tc := range tests {
 		if got := DaemonSetName(tc.tunnelName); got != tc.want {
 			t.Errorf("DaemonSetName(%q) = %q, want %q", tc.tunnelName, got, tc.want)
+		}
+	}
+}
+
+func TestFailoverLeaseTXTName(t *testing.T) {
+	const zone = "example.com"
+
+	// Stable: the same group + zone always hashes to the same record.
+	first := FailoverLeaseTXTName("jellyfin-dr", zone)
+	second := FailoverLeaseTXTName("jellyfin-dr", zone)
+	if first != second {
+		t.Fatalf("FailoverLeaseTXTName not stable: %q vs %q", first, second)
+	}
+
+	// Shape: _cfzt-lease.<8 hex>.<zone>, zone suffix preserved.
+	shape := regexp.MustCompile(`^_cfzt-lease\.[0-9a-f]{8}\.example\.com$`)
+	if !shape.MatchString(first) {
+		t.Fatalf("FailoverLeaseTXTName = %q, want match %v", first, shape)
+	}
+	if !strings.HasSuffix(first, "."+zone) {
+		t.Fatalf("FailoverLeaseTXTName = %q, want zone suffix %q", first, zone)
+	}
+
+	// Distinct groups hash to distinct hash8 labels (no leak of the
+	// group string into DNS, but still collision-distinguishable).
+	other := FailoverLeaseTXTName("plex-dr", zone)
+	if other == first {
+		t.Fatalf("distinct groups produced same record name %q", first)
+	}
+	if strings.Contains(first, "jellyfin") {
+		t.Fatalf("group string leaked into DNS name %q", first)
+	}
+
+	// Bounded: hash8 + fixed label keep the record well under the 63-char
+	// DNS label / 253-char FQDN limits regardless of group length.
+	longGroup := strings.Repeat("a", 63)
+	long := FailoverLeaseTXTName(longGroup, zone)
+	for label := range strings.SplitSeq(long, ".") {
+		if len(label) > 63 {
+			t.Fatalf("label %q exceeds 63 chars in %q", label, long)
 		}
 	}
 }

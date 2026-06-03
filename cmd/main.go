@@ -18,8 +18,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"os"
+	"strings"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -51,11 +53,22 @@ func init() {
 	// +kubebuilder:scaffold:scheme
 }
 
+// validateSiteID enforces the D26 invariant that every operator process carries
+// a non-empty --site-id. Identity is a process-level invariant; the per-Exposure
+// reasons surface lease/role state, not missing identity.
+func validateSiteID(siteID string) error {
+	if strings.TrimSpace(siteID) == "" {
+		return errors.New("--site-id is required (D26: every operator process must carry a stable site identity)")
+	}
+	return nil
+}
+
 func main() {
 	var metricsAddr string
 	var enableLeaderElection bool
 	var probeAddr string
 	var secureMetrics bool
+	var siteID string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -67,6 +80,11 @@ func main() {
 			"Enabling this will ensure there is only one active controller manager.")
 	flag.BoolVar(&secureMetrics, "metrics-secure", true,
 		"If set, the metrics endpoint is served securely via HTTPS. Use --metrics-secure=false to use HTTP instead.")
+	// D26: stable identity this operator process uses when arbitrating
+	// per-Exposure failover leases. Required; empty is a fatal start-up error.
+	flag.StringVar(&siteID, "site-id", "",
+		"Stable identity for this operator process. Written into the DR failover lease record "+
+			"and compared on every reconcile. Required (D26).")
 	// Default to production-grade logging. Override via --zap-log-level=debug.
 	opts := zap.Options{
 		Development: false,
@@ -75,6 +93,11 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	if err := validateSiteID(siteID); err != nil {
+		setupLog.Error(err, "Invalid --site-id")
+		os.Exit(1)
+	}
 
 	// Metrics options configure the controller-runtime metrics server.
 	// More info:
@@ -142,6 +165,7 @@ func main() {
 			Recorder: controller.NewEventRecorder(mgr.GetEventRecorder("cloudflareexposure-controller")),
 		},
 		HTTPRouteSourceEnabled: httpRouteSourceEnabled,
+		SiteID:                 siteID,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "cloudflareexposure")
 		os.Exit(1)

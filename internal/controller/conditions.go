@@ -32,6 +32,13 @@ const (
 	ReasonUnsupportedDrift   = "UnsupportedDrift"
 	ReasonReconciled         = "Reconciled"
 
+	// D26 failover reasons.
+	ReasonStandby                        = "Standby"
+	ReasonLeaseConflict                  = "LeaseConflict"
+	ReasonFailoverRequiresManagedDNS     = "FailoverRequiresManagedDNS"
+	ReasonFailoverRequiresDistinctSiteID = "FailoverRequiresDistinctSiteID"
+	ReasonFailoverGroupConflict          = "FailoverGroupConflict"
+
 	EventCreatedTunnel         = "CreatedTunnel"
 	EventRecoveredTunnel       = "RecoveredTunnel"
 	EventRenamedTunnel         = "RenamedTunnel"
@@ -55,6 +62,16 @@ const (
 	EventDeletedRoute          = "DeletedRoute"
 	EventForeignRoute          = "ForeignRoute"
 	EventBlockedByRoutes       = "BlockedByRoutes"
+
+	// D26 failover events.
+	EventPromotedToPrimary  = "PromotedToPrimary"
+	EventDemotedToStandby   = "DemotedToStandby"
+	EventLeaseAcquired      = "LeaseAcquired"
+	EventLeaseRenewed       = "LeaseRenewed"
+	EventLeaseLost          = "LeaseLost"
+	EventLeaseConflict      = "LeaseConflict"
+	EventSplitBrainDetected = "SplitBrainDetected"
+	EventForcePromoted      = "ForcePromoted"
 )
 
 func setCondition(conditions *[]metav1.Condition, conditionType string, status metav1.ConditionStatus, reason, message string, observedGeneration int64) {

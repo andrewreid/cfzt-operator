@@ -52,6 +52,54 @@ func TestOwnerAccessTagChunkRoundTrip(t *testing.T) {
 	}
 }
 
+func TestFailoverOwnershipTagAcceptsGroupID(t *testing.T) {
+	// Two clusters in a failover pair both reconcile the same logical
+	// exposure with spec.failover.group="jellyfin-dr". They each construct
+	// an Owner from that group and must produce identical comment / tag
+	// renders, so either cluster can mutate the shared Access app and DNS
+	// CNAME without surfacing ForeignResource.
+	const group = "jellyfin-dr"
+	primary := FromFailoverGroup(group)
+	standby := FromFailoverGroup(group)
+
+	if primary.Comment() != standby.Comment() {
+		t.Fatalf("two clusters disagree on Comment: %q vs %q", primary.Comment(), standby.Comment())
+	}
+	if !standby.MatchesComment(primary.Comment()) {
+		t.Fatalf("standby does not accept primary's failover-group comment %q", primary.Comment())
+	}
+	if !primary.MatchesTags(standby.Tags()) {
+		t.Fatalf("primary does not accept standby's failover-group tags %v", standby.Tags())
+	}
+	// Compact form (used on DNS records owned by Routes / Tunnels) must
+	// also round-trip across the pair.
+	if !standby.MatchesComment(primary.CompactComment()) {
+		t.Fatalf("standby does not accept primary's compact comment %q", primary.CompactComment())
+	}
+
+	// Negative direction: a non-failover Owner constructed from a per-CR
+	// UID that happens to differ from the group MUST NOT match the
+	// failover-group renders. The relaxation is opt-in via the
+	// FromFailoverGroup constructor; the From(uid) guard stays tight.
+	other := From(types.UID("some-cr-uid"))
+	if other.MatchesComment(primary.Comment()) {
+		t.Fatalf("non-failover Owner matches failover-group comment")
+	}
+	if other.MatchesTags(primary.Tags()) {
+		t.Fatalf("non-failover Owner matches failover-group tags")
+	}
+
+	// Symmetric: a failover-group Owner MUST NOT match an unrelated
+	// per-CR Owner's writes — the group ID must literally equal the
+	// stamped source-uid for the match to succeed.
+	if primary.MatchesComment(other.Comment()) {
+		t.Fatalf("failover-group Owner matches unrelated per-CR comment")
+	}
+	if primary.MatchesTags(other.Tags()) {
+		t.Fatalf("failover-group Owner matches unrelated per-CR tags")
+	}
+}
+
 func TestOwnerMatchesForeign(t *testing.T) {
 	owner := From(types.UID("local"))
 	foreign := From(types.UID("foreign"))

@@ -230,3 +230,35 @@ spec:
   virtualNetworkId: 00000000-0000-4000-8000-000000000002
   comment: homelab LAN
 ```
+
+## DR Failover Exposure (two clusters)
+
+Active-passive multi-cluster DR. Apply the **same** Exposure to each cluster with a matching `spec.failover.group`; only `tunnelRef.name` differs (each cluster owns its own `CloudflareTunnel` with `dns.manage: true`). Each cluster's operator must run a distinct `--site-id` (Helm `site.id`, an install setting — not CR YAML). Exactly one cluster reports `status.failover.role: Primary`; the other is `Standby`.
+
+```yaml
+# Cluster A. In cluster B, this manifest is identical except tunnelRef.name
+# points at cluster B's own CloudflareTunnel.
+apiVersion: cfzt.reid.ee/v1alpha1
+kind: CloudflareExposure
+metadata:
+  name: jellyfin
+  namespace: media
+spec:
+  hostname: jellyfin.example.com
+  tunnelRef:
+    name: homelab-a            # cluster B: homelab-b
+  origin:
+    protocol: http
+    host: jellyfin.media.svc.cluster.local
+    port: 8096
+  failover:
+    group: jellyfin-dr         # same in every cluster
+    leaseSeconds: 60           # optional; default 60, min 30, max 600
+```
+
+Emergency manual promotion of a standby (use a fresh token each time; safe to commit — re-applying the same value does not re-promote):
+
+```sh
+kubectl annotate cfe jellyfin -n media \
+  cfzt.reid.ee/force-promote="$(date +%s)" --overwrite
+```
