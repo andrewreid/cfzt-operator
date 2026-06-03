@@ -193,7 +193,7 @@ For direct lifecycle runs, the current kubeconfig must point at the target clust
 - Build a local candidate image and install the packaged candidate chart into kind.
 - Run `TestCloudflarePreflight`.
 - Create a fresh kind cluster, load the local candidate image, and run `TestCloudflareLifecycle` against the packaged candidate chart and real Cloudflare.
-- Only after those gates pass, create the `v<version>` git tag, push the final image tags, push the Helm chart, verify both published artifacts, and create the GitHub Release.
+- Only after those gates pass, create the `v<version>` git tag, build the final multi-arch image on native `linux/amd64` and `linux/arm64` GitHub runners, merge the pushed digests into the release image tags, push the Helm chart, verify both published artifacts, and create the GitHub Release.
 
 The release workflow and the ad-hoc `.github/workflows/live-smoke.yaml` workflow read Cloudflare values from repository secrets and variables:
 
@@ -217,6 +217,59 @@ IMAGE_TAG=release-candidate
 ```
 
 Use the separate `live smoke` workflow when you want to exercise the live harness without creating a release. It builds and loads a local image, installs `charts/cfzt-operator`, and never pushes tags, packages, images, or GitHub Releases.
+
+### Development Snapshots
+
+Use `.github/workflows/dev-artifacts.yaml` when Flux needs registry artifacts for cluster testing but the change is not ready for a semver release. The workflow publishes immutable development artifacts from GitHub Actions, building the image on native `linux/amd64` and `linux/arm64` runners and then merging the pushed digests into one manifest:
+
+```text
+image: ghcr.io/andrewreid/cfzt-operator:0.0.0-dev.sha-<short-sha>
+chart: oci://ghcr.io/andrewreid/charts/cfzt-operator
+chart version: 0.0.0-dev.sha-<short-sha>
+appVersion: 0.0.0-dev.sha-<short-sha>
+```
+
+It runs automatically for pushes to `main`. It can also be run manually with `workflow_dispatch` for a selected branch or commit once the workflow exists on the default branch. For one-off branch publication before that, include `[publish-dev]` in the push commit message. The workflow refuses to overwrite an existing image or chart for the same commit-derived version.
+
+Flux can pin a snapshot chart directly:
+
+```yaml
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: cfzt-operator-dev
+  namespace: flux-system
+spec:
+  type: oci
+  url: oci://ghcr.io/andrewreid/charts
+  interval: 10m
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: cfzt-operator
+  namespace: cfzt-system
+spec:
+  chart:
+    spec:
+      chart: cfzt-operator
+      version: 0.0.0-dev.sha-<short-sha>
+      sourceRef:
+        kind: HelmRepository
+        name: cfzt-operator-dev
+        namespace: flux-system
+  install:
+    crds: Create
+  upgrade:
+    crds: CreateReplace
+  values:
+    image:
+      tag: 0.0.0-dev.sha-<short-sha>
+    site:
+      id: <cluster-site-id>
+```
+
+The snapshot channel has the same CRD caveats as normal releases: breaking `v1alpha1` changes may require CR migration, and `upgrade.crds: CreateReplace` must be used deliberately.
 
 ### Cleanup and Failure Notes
 
