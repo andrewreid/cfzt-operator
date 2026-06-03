@@ -166,6 +166,7 @@ Regenerate manifests + deepcopy after any `api/v1alpha1` change and commit the g
 ## Verification
 
 - After a meaningful change: `rtk make test` for the touched package; `rtk go test ./...` if reconciliation logic was touched. Regenerate manifests + deepcopy first if `api/` changed.
+- Any code change should pass live smoke before commit: `rtk bash hack/live-cloudflare-local.sh lifecycle`. Docs-only and other tiny non-substantive commits do not need local live smoke, but `.github/workflows/live-smoke.yaml` runs against real Cloudflare in CI before merge to `main`.
 - Reconciliation-semantics changes (ownership, finalizers, tunnel-config builder) **require** envtest coverage — create CR → assert CF-fake state + CR status conditions. Not optional.
 - Unit tests use the fake Cloudflare client (`internal/cloudflare/fake.go`); the real SDK is never reached in unit tests.
 - Finalizer + deletion paths need explicit tests (untested deletion = production incident). `HostnameConflict`, `ForeignResource`, `BlockedByExposures` each need a dedicated test.
