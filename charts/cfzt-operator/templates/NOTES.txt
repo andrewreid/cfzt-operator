@@ -17,6 +17,13 @@ Next steps:
 
   3. Apply a CloudflareExposure CR per workload to publish.
 
+DR failover (optional):
+
+  This install uses site.id={{ .Values.site.id | quote }}. For active-passive
+  failover across clusters, set a DISTINCT site.id per cluster
+  (--set site.id=<unique>) and give each Exposure a matching
+  spec.failover.group. See the README "Disaster Recovery" section.
+
 CRD upgrade caveat (D23):
 
   CRDs ship in `charts/cfzt-operator/crds/` per Helm 3 native install-only
