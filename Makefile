@@ -108,6 +108,15 @@ lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
 lint-config: golangci-lint ## Verify golangci-lint linter configuration
 	"$(GOLANGCI_LINT)" config verify
 
+.PHONY: pre-push
+pre-push: ## Run local checks before pushing a PR branch.
+	$(MAKE) lint
+	$(MAKE) manifests generate
+	$(MAKE) helm-sync-crds
+	git diff --exit-code -- api/v1alpha1/zz_generated.deepcopy.go config/crd/bases charts/cfzt-operator/crds
+	$(MAKE) test
+	$(MAKE) helm-lint
+
 ##@ Build
 
 .PHONY: build

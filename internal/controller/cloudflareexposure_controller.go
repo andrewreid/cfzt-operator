@@ -157,22 +157,32 @@ func (r *CloudflareExposureReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	status.PublicHostnameRouteHash = routeHashForExposure(&tunnel, &exposure)
-	accessReady := true
-	if exposure.Spec.Access.Enabled {
-		accessReady = len(status.AccessApplications) == len(exposure.Spec.Access.Applications)
-		for _, app := range status.AccessApplications {
-			if app.AppID == "" || app.CanonicalDomainHash == "" || app.PolicyHash == "" {
-				accessReady = false
-				break
-			}
-		}
-	}
-	ready := status.PublicHostnameRouteHash != "" && accessReady && (!tunnel.Spec.Dns.Manage || status.DnsRecordId != "")
-	if !ready {
+	if !exposureReady(&exposure, &tunnel, status) {
 		log.V(1).Info("CloudflareExposure waiting for tunnel route", "hostname", exposure.Spec.Hostname)
 		return requeueResult(failoverRequeue), r.setExposureStatus(ctx, &exposure, status, false, ReasonAccessAppPending, "waiting for tunnel ingress route hash")
 	}
 	return requeueResult(failoverRequeue), r.setExposureStatus(ctx, &exposure, status, true, ReasonReconciled, "Exposure reconciled")
+}
+
+func exposureReady(exposure *cfztv1alpha1.CloudflareExposure, tunnel *cfztv1alpha1.CloudflareTunnel, status cfztv1alpha1.ExposureCloudflareStatus) bool {
+	return status.PublicHostnameRouteHash != "" &&
+		exposureAccessReady(exposure, status) &&
+		(!tunnel.Spec.Dns.Manage || status.DnsRecordId != "")
+}
+
+func exposureAccessReady(exposure *cfztv1alpha1.CloudflareExposure, status cfztv1alpha1.ExposureCloudflareStatus) bool {
+	if !exposure.Spec.Access.Enabled {
+		return true
+	}
+	if len(status.AccessApplications) != len(exposure.Spec.Access.Applications) {
+		return false
+	}
+	for _, app := range status.AccessApplications {
+		if app.AppID == "" || app.CanonicalDomainHash == "" || app.PolicyHash == "" {
+			return false
+		}
+	}
+	return true
 }
 
 func (r *CloudflareExposureReconciler) reconcileExposureAccess(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, cfClient cloudflare.Client, status *cfztv1alpha1.ExposureCloudflareStatus) (ctrl.Result, bool, error) {
@@ -327,7 +337,7 @@ func (r *CloudflareExposureReconciler) desiredAccessApplications(ctx context.Con
 	seenCoverage := make(map[string]string, len(apps))
 	desired := make([]desiredAccessApplication, 0, len(apps))
 	for _, appSpec := range apps {
-		policyUUIDs, err := r.resolveAccessPolicyUUIDs(ctx, exposure, appSpec.Policies)
+		policyUUIDs, err := r.resolveAccessPolicyUUIDs(ctx, appSpec.Policies)
 		if err != nil {
 			return nil, err
 		}
@@ -401,10 +411,7 @@ func prepareOwnedAccessApplications(hostname string, owner ownership.Owner, desi
 	}
 	owned := make([]ownedAccessApplication, 0, len(apps))
 	for _, app := range apps {
-		appCoverage, err := accessApplicationCoverage(hostname, app)
-		if err != nil {
-			return nil, err
-		}
+		appCoverage := accessApplicationCoverage(hostname, app)
 		if !owner.MatchesTags(app.Tags) {
 			for _, domain := range appCoverage {
 				if _, ok := desiredCoverage[domain]; ok {
@@ -418,7 +425,7 @@ func prepareOwnedAccessApplications(hostname string, owner ownership.Owner, desi
 	return owned, nil
 }
 
-func accessApplicationCoverage(hostname string, app cloudflare.AccessApplication) ([]string, error) {
+func accessApplicationCoverage(hostname string, app cloudflare.AccessApplication) []string {
 	seen := make(map[string]struct{})
 	coverage := make([]string, 0, len(app.Domains)+1)
 	add := func(domain string) {
@@ -438,7 +445,7 @@ func accessApplicationCoverage(hostname string, app cloudflare.AccessApplication
 	for _, domain := range app.Domains {
 		add(domain)
 	}
-	return sortedCopy(coverage), nil
+	return sortedCopy(coverage)
 }
 
 func canonicalLiveAccessApplicationDomain(hostname, domain string) (string, bool) {
@@ -549,7 +556,7 @@ func (r *CloudflareExposureReconciler) reconcileOwnedAccessApplications(ctx cont
 	return statuses, action, nil
 }
 
-func (r *CloudflareExposureReconciler) resolveAccessPolicyUUIDs(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, policies []cfztv1alpha1.AccessApplicationPolicyBinding) ([]string, error) {
+func (r *CloudflareExposureReconciler) resolveAccessPolicyUUIDs(ctx context.Context, policies []cfztv1alpha1.AccessApplicationPolicyBinding) ([]string, error) {
 	uuids := make([]string, 0, len(policies))
 	for _, policy := range policies {
 		uuid, err := r.resolveAccessPolicyUUID(ctx, policy.PolicyRef)

@@ -786,7 +786,6 @@ func accessAppFromListResponse(item zero_trust.AccessApplicationListResponse) Ac
 	policyUUIDs := accessApplicationPolicyIDs(item.Policies)
 	tags := stringSlice(item.Tags)
 	if selfHosted, ok := item.AsUnion().(zero_trust.AccessApplicationListResponseSelfHostedApplication); ok {
-		domains = accessApplicationDomainsFromAny(selfHosted.SelfHostedDomains)
 		policyUUIDs = accessApplicationPolicyIDs(selfHosted.Policies)
 		tags = append([]string(nil), selfHosted.Tags...)
 	}
@@ -812,7 +811,6 @@ func accessAppFromNewResponse(resp *zero_trust.AccessApplicationNewResponse) *Ac
 	policyUUIDs := accessApplicationPolicyIDs(resp.Policies)
 	tags := stringSlice(resp.Tags)
 	if selfHosted, ok := resp.AsUnion().(zero_trust.AccessApplicationNewResponseSelfHostedApplication); ok {
-		domains = accessApplicationDomainsFromAny(selfHosted.SelfHostedDomains)
 		policyUUIDs = accessApplicationPolicyIDs(selfHosted.Policies)
 		tags = append([]string(nil), selfHosted.Tags...)
 	}
@@ -838,7 +836,6 @@ func accessAppFromUpdateResponse(resp *zero_trust.AccessApplicationUpdateRespons
 	policyUUIDs := accessApplicationPolicyIDs(resp.Policies)
 	tags := stringSlice(resp.Tags)
 	if selfHosted, ok := resp.AsUnion().(zero_trust.AccessApplicationUpdateResponseSelfHostedApplication); ok {
-		domains = accessApplicationDomainsFromAny(selfHosted.SelfHostedDomains)
 		policyUUIDs = accessApplicationPolicyIDs(selfHosted.Policies)
 		tags = append([]string(nil), selfHosted.Tags...)
 	}
@@ -888,9 +885,7 @@ func accessApplicationSelfHostedDomains(domains []string) []zero_trust.SelfHoste
 		return nil
 	}
 	out := make([]zero_trust.SelfHostedDomainsParam, 0, len(domains))
-	for _, domain := range domains {
-		out = append(out, zero_trust.SelfHostedDomainsParam(domain))
-	}
+	out = append(out, domains...)
 	return out
 }
 
