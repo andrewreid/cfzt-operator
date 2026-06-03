@@ -218,6 +218,59 @@ IMAGE_TAG=release-candidate
 
 Use the separate `live smoke` workflow when you want to exercise the live harness without creating a release. It builds and loads a local image, installs `charts/cfzt-operator`, and never pushes tags, packages, images, or GitHub Releases.
 
+### Development Snapshots
+
+Use `.github/workflows/dev-artifacts.yaml` when Flux needs registry artifacts for cluster testing but the change is not ready for a semver release. The workflow publishes immutable development artifacts from GitHub Actions:
+
+```text
+image: ghcr.io/andrewreid/cfzt-operator:0.0.0-dev.sha-<short-sha>
+chart: oci://ghcr.io/andrewreid/charts/cfzt-operator
+chart version: 0.0.0-dev.sha-<short-sha>
+appVersion: 0.0.0-dev.sha-<short-sha>
+```
+
+It runs automatically for pushes to `main`. It can also be run manually with `workflow_dispatch` for a selected branch or commit once the workflow exists on the default branch. For one-off branch publication before that, include `[publish-dev]` in the push commit message. The workflow refuses to overwrite an existing image or chart for the same commit-derived version.
+
+Flux can pin a snapshot chart directly:
+
+```yaml
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: cfzt-operator-dev
+  namespace: flux-system
+spec:
+  type: oci
+  url: oci://ghcr.io/andrewreid/charts
+  interval: 10m
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: cfzt-operator
+  namespace: cfzt-system
+spec:
+  chart:
+    spec:
+      chart: cfzt-operator
+      version: 0.0.0-dev.sha-<short-sha>
+      sourceRef:
+        kind: HelmRepository
+        name: cfzt-operator-dev
+        namespace: flux-system
+  install:
+    crds: Create
+  upgrade:
+    crds: CreateReplace
+  values:
+    image:
+      tag: 0.0.0-dev.sha-<short-sha>
+    site:
+      id: <cluster-site-id>
+```
+
+The snapshot channel has the same CRD caveats as normal releases: breaking `v1alpha1` changes may require CR migration, and `upgrade.crds: CreateReplace` must be used deliberately.
+
 ### Cleanup and Failure Notes
 
 The lifecycle test registers cleanup with `t.Cleanup`, so it runs after test failure as long as the process is still alive. Cleanup deletes the cfzt Kubernetes resources first so their finalizers can remove owned Cloudflare resources, then it removes the intentionally created foreign DNS record and foreign tunnel route directly.
