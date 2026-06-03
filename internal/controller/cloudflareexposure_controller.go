@@ -18,9 +18,12 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"math/rand"
+	"sort"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -153,7 +156,7 @@ func (r *CloudflareExposureReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	status.PublicHostnameRouteHash = routeHashForExposure(&tunnel, &exposure)
-	ready := status.PublicHostnameRouteHash != "" && (!exposure.Spec.Access.Enabled || status.AccessApplicationId != "") && (!tunnel.Spec.Dns.Manage || status.DnsRecordId != "")
+	ready := status.PublicHostnameRouteHash != "" && (!exposure.Spec.Access.Enabled || len(status.AccessApplications) == 1 && status.AccessApplications[0].AppID != "") && (!tunnel.Spec.Dns.Manage || status.DnsRecordId != "")
 	if !ready {
 		log.V(1).Info("CloudflareExposure waiting for tunnel route", "hostname", exposure.Spec.Hostname)
 		return requeueResult(failoverRequeue), r.setExposureStatus(ctx, &exposure, status, false, ReasonAccessAppPending, "waiting for tunnel ingress route hash")
@@ -163,7 +166,7 @@ func (r *CloudflareExposureReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 func (r *CloudflareExposureReconciler) reconcileExposureAccess(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, cfClient cloudflare.Client, status *cfztv1alpha1.ExposureCloudflareStatus) (ctrl.Result, bool, error) {
 	if exposure.Spec.Access.Enabled {
-		app, action, err := r.reconcileAccess(ctx, exposure, cfClient)
+		app, statusEntry, action, err := r.reconcileAccess(ctx, exposure, cfClient)
 		if err != nil {
 			if errors.Is(err, errHostnameConflict) {
 				r.Recorder.Eventf(exposure, corev1.EventTypeWarning, EventHostnameConflict, "Access application hostname conflict for %s", exposure.Spec.Hostname)
@@ -173,6 +176,9 @@ func (r *CloudflareExposureReconciler) reconcileExposureAccess(ctx context.Conte
 			if errors.Is(err, errForeignResource) {
 				result, statusErr := r.setExposureStatusAndRequeue(ctx, exposure, *status, ReasonForeignResource, err.Error())
 				return result, true, statusErr
+			}
+			if errors.Is(err, errAccessApplicationsUnsupported) {
+				return ctrl.Result{}, true, r.setExposureStatus(ctx, exposure, *status, false, ReasonAccessApplicationsUnsupported, err.Error())
 			}
 			if errors.Is(err, errPolicyNotFound) {
 				return ctrl.Result{}, true, r.setExposureStatus(ctx, exposure, *status, false, ReasonPolicyNotFound, err.Error())
@@ -185,7 +191,7 @@ func (r *CloudflareExposureReconciler) reconcileExposureAccess(ctx context.Conte
 			}
 			return ctrl.Result{}, true, err
 		}
-		status.AccessApplicationId = app.ID
+		status.AccessApplications = []cfztv1alpha1.ExposureAccessApplicationStatus{statusEntry}
 		switch action {
 		case accessApplicationReconcileCreated:
 			r.Recorder.Eventf(exposure, corev1.EventTypeNormal, EventCreatedAccessApp, "Created Cloudflare Access application %s", app.ID)
@@ -199,9 +205,11 @@ func (r *CloudflareExposureReconciler) reconcileExposureAccess(ctx context.Conte
 		return ctrl.Result{}, true, err
 	}
 	if deleted {
-		r.Recorder.Eventf(exposure, corev1.EventTypeNormal, EventDeletedAccessApp, "Deleted Cloudflare Access application %s for %s", status.AccessApplicationId, exposure.Spec.Hostname)
+		if len(status.AccessApplications) > 0 {
+			r.Recorder.Eventf(exposure, corev1.EventTypeNormal, EventDeletedAccessApp, "Deleted Cloudflare Access application %s for %s", status.AccessApplications[0].AppID, exposure.Spec.Hostname)
+		}
 	}
-	status.AccessApplicationId = ""
+	status.AccessApplications = nil
 	return ctrl.Result{}, false, nil
 }
 
@@ -249,10 +257,11 @@ const (
 )
 
 var (
-	errHostnameConflict = errors.New("hostname conflict")
-	errForeignResource  = errors.New("foreign resource")
-	errPolicyNotFound   = errors.New("policy not found")
-	errPolicyNotReady   = errors.New("policy not ready")
+	errHostnameConflict              = errors.New("hostname conflict")
+	errForeignResource               = errors.New("foreign resource")
+	errAccessApplicationsUnsupported = errors.New("access applications unsupported")
+	errPolicyNotFound                = errors.New("policy not found")
+	errPolicyNotReady                = errors.New("policy not ready")
 )
 
 type accessApplicationReconcileAction string
@@ -263,53 +272,82 @@ const (
 	accessApplicationReconcileUpdated   accessApplicationReconcileAction = "updated"
 )
 
-func (r *CloudflareExposureReconciler) reconcileAccess(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, cfClient cloudflare.Client) (*cloudflare.AccessApplication, accessApplicationReconcileAction, error) {
+func (r *CloudflareExposureReconciler) reconcileAccess(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, cfClient cloudflare.Client) (*cloudflare.AccessApplication, cfztv1alpha1.ExposureAccessApplicationStatus, accessApplicationReconcileAction, error) {
+	desired, err := r.desiredAccessApplication(ctx, exposure)
+	if err != nil {
+		return nil, cfztv1alpha1.ExposureAccessApplicationStatus{}, accessApplicationReconcileUnchanged, err
+	}
 	apps, err := cfClient.AccessApplications().List(ctx, exposure.Spec.Hostname)
 	if err != nil {
-		return nil, accessApplicationReconcileUnchanged, err
-	}
-	policyUUID, err := r.resolveAccessPolicyUUID(ctx, exposure)
-	if err != nil {
-		return nil, accessApplicationReconcileUnchanged, err
+		return nil, cfztv1alpha1.ExposureAccessApplicationStatus{}, accessApplicationReconcileUnchanged, err
 	}
 	owner := exposureOwner(exposure)
-	want := cloudflare.AccessApplicationInput{
-		Name:       naming.AccessAppName(exposure.Spec.DisplayName, exposure.Name),
-		Domain:     exposure.Spec.Hostname,
-		PolicyUUID: policyUUID,
-		Tags:       owner.Tags(),
-	}
-	var owned *cloudflare.AccessApplication
-	for _, app := range apps {
-		if !owner.MatchesTags(app.Tags) {
-			return nil, accessApplicationReconcileUnchanged, fmt.Errorf("%w: Access application %s for hostname %s", errHostnameConflict, app.ID, exposure.Spec.Hostname)
-		}
-	}
+	var owned []*cloudflare.AccessApplication
 	for i := range apps {
-		if owner.MatchesTags(apps[i].Tags) {
-			owned = &apps[i]
-			break
+		app := &apps[i]
+		if !owner.MatchesTags(app.Tags) {
+			return nil, cfztv1alpha1.ExposureAccessApplicationStatus{}, accessApplicationReconcileUnchanged, fmt.Errorf("%w: Access application %s for hostname %s", errHostnameConflict, app.ID, exposure.Spec.Hostname)
 		}
+		owned = append(owned, app)
 	}
-	if owned != nil {
-		if owned.Name == want.Name && accessApplicationPoliciesMatch(*owned, want.PolicyUUID) && sameStringSet(owned.Tags, want.Tags) {
-			copy := *owned
-			return &copy, accessApplicationReconcileUnchanged, nil
+	if len(owned) > 1 {
+		return nil, cfztv1alpha1.ExposureAccessApplicationStatus{}, accessApplicationReconcileUnchanged, fmt.Errorf("%w: found %d Cloudflare Access applications for hostname %s; slice 8a only supports one root app", errAccessApplicationsUnsupported, len(owned), exposure.Spec.Hostname)
+	}
+	if len(owned) == 1 {
+		ownedApp := owned[0]
+		if accessApplicationMatchesDesired(*ownedApp, desired) {
+			copy := *ownedApp
+			return &copy, accessApplicationStatusFrom(exposure.Spec.Access.Applications[0].Name, &copy), accessApplicationReconcileUnchanged, nil
 		}
-		updated, err := cfClient.AccessApplications().Update(ctx, owned.ID, want)
-		return updated, accessApplicationReconcileUpdated, err
+		updated, err := cfClient.AccessApplications().Update(ctx, ownedApp.ID, desired)
+		if err != nil {
+			return nil, cfztv1alpha1.ExposureAccessApplicationStatus{}, accessApplicationReconcileUnchanged, err
+		}
+		return updated, accessApplicationStatusFrom(exposure.Spec.Access.Applications[0].Name, updated), accessApplicationReconcileUpdated, nil
 	}
-	app, err := cfClient.AccessApplications().Create(ctx, want)
-	return app, accessApplicationReconcileCreated, err
+	app, err := cfClient.AccessApplications().Create(ctx, desired)
+	if err != nil {
+		return nil, cfztv1alpha1.ExposureAccessApplicationStatus{}, accessApplicationReconcileUnchanged, err
+	}
+	return app, accessApplicationStatusFrom(exposure.Spec.Access.Applications[0].Name, app), accessApplicationReconcileCreated, nil
 }
 
-func (r *CloudflareExposureReconciler) resolveAccessPolicyUUID(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure) (string, error) {
-	if exposure.Spec.Access.PolicyRef.UUID != "" {
-		return exposure.Spec.Access.PolicyRef.UUID, nil
+func (r *CloudflareExposureReconciler) desiredAccessApplication(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure) (cloudflare.AccessApplicationInput, error) {
+	if len(exposure.Spec.Access.Applications) != 1 {
+		return cloudflare.AccessApplicationInput{}, fmt.Errorf("%w: access.applications[] must contain exactly one entry in slice 8a", errAccessApplicationsUnsupported)
 	}
-	name := exposure.Spec.Access.PolicyRef.Name
+	appSpec := exposure.Spec.Access.Applications[0]
+	policyUUIDs, err := r.resolveAccessPolicyUUIDs(ctx, exposure, appSpec.Policies)
+	if err != nil {
+		return cloudflare.AccessApplicationInput{}, err
+	}
+	return cloudflare.AccessApplicationInput{
+		Name:        desiredAccessApplicationName(exposure, appSpec.Name),
+		Domains:     accessApplicationDomainsAsStrings(appSpec.Domains),
+		PolicyUUIDs: policyUUIDs,
+		Tags:        exposureOwner(exposure).Tags(),
+	}, nil
+}
+
+func (r *CloudflareExposureReconciler) resolveAccessPolicyUUIDs(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, policies []cfztv1alpha1.AccessApplicationPolicyBinding) ([]string, error) {
+	uuids := make([]string, 0, len(policies))
+	for _, policy := range policies {
+		uuid, err := r.resolveAccessPolicyUUID(ctx, policy.PolicyRef)
+		if err != nil {
+			return nil, err
+		}
+		uuids = append(uuids, uuid)
+	}
+	return uuids, nil
+}
+
+func (r *CloudflareExposureReconciler) resolveAccessPolicyUUID(ctx context.Context, ref cfztv1alpha1.AccessPolicyRef) (string, error) {
+	if ref.UUID != "" {
+		return ref.UUID, nil
+	}
+	name := ref.Name
 	if name == "" {
-		return "", fmt.Errorf("%w: access.policyRef.name is empty", errPolicyNotFound)
+		return "", fmt.Errorf("%w: access.applications[].policies[].policyRef.name is empty", errPolicyNotFound)
 	}
 	var policy cfztv1alpha1.CloudflareAccessPolicy
 	if err := r.Get(ctx, types.NamespacedName{Name: name}, &policy); err != nil {
@@ -490,7 +528,7 @@ func (r *CloudflareExposureReconciler) reconcileDelete(ctx context.Context, expo
 	// Non-failover Exposures with nothing written can drop the finalizer
 	// without fetching credentials. Failover Exposures always take the
 	// cleanup path so a Primary's lease record is removed before the CR goes.
-	if !failover && exposure.Status.Cloudflare.AccessApplicationId == "" && exposure.Status.Cloudflare.DnsRecordId == "" {
+	if !failover && len(exposure.Status.Cloudflare.AccessApplications) == 0 && exposure.Status.Cloudflare.DnsRecordId == "" {
 		controllerutil.RemoveFinalizer(exposure, naming.Finalizer)
 		return ctrl.Result{}, r.Update(ctx, exposure)
 	}
@@ -537,14 +575,16 @@ func (r *CloudflareExposureReconciler) reconcileDelete(ctx context.Context, expo
 		return ctrl.Result{}, err
 	}
 	if deletedAccess {
-		r.Recorder.Eventf(exposure, corev1.EventTypeNormal, EventDeletedAccessApp, "Deleted Cloudflare Access application %s for %s", exposure.Status.Cloudflare.AccessApplicationId, exposure.Spec.Hostname)
+		if len(exposure.Status.Cloudflare.AccessApplications) > 0 {
+			r.Recorder.Eventf(exposure, corev1.EventTypeNormal, EventDeletedAccessApp, "Deleted Cloudflare Access application %s for %s", exposure.Status.Cloudflare.AccessApplications[0].AppID, exposure.Spec.Hostname)
+		}
 	}
 	controllerutil.RemoveFinalizer(exposure, naming.Finalizer)
 	return ctrl.Result{}, r.Update(ctx, exposure)
 }
 
 func (r *CloudflareExposureReconciler) deleteOwnedAccessIfPresent(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, cfClient cloudflare.Client) (bool, error) {
-	if exposure.Status.Cloudflare.AccessApplicationId == "" {
+	if len(exposure.Status.Cloudflare.AccessApplications) == 0 {
 		return false, nil
 	}
 	apps, err := cfClient.AccessApplications().List(ctx, exposure.Spec.Hostname)
@@ -552,9 +592,17 @@ func (r *CloudflareExposureReconciler) deleteOwnedAccessIfPresent(ctx context.Co
 		return false, err
 	}
 	owner := exposureOwner(exposure)
-	deleted := false
+	byID := make(map[string]cloudflare.AccessApplication, len(apps))
 	for _, app := range apps {
-		if app.ID != exposure.Status.Cloudflare.AccessApplicationId {
+		byID[app.ID] = app
+	}
+	deleted := false
+	for _, tracked := range exposure.Status.Cloudflare.AccessApplications {
+		if tracked.AppID == "" {
+			continue
+		}
+		app, ok := byID[tracked.AppID]
+		if !ok {
 			continue
 		}
 		if !owner.MatchesTags(app.Tags) {
@@ -664,8 +712,66 @@ func sameStringSet(a, b []string) bool {
 	return true
 }
 
-func accessApplicationPoliciesMatch(app cloudflare.AccessApplication, wantPolicyUUID string) bool {
-	return sameStringSet(app.PolicyUUIDs, []string{wantPolicyUUID})
+func desiredAccessApplicationName(exposure *cfztv1alpha1.CloudflareExposure, applicationName string) string {
+	baseName := exposure.Spec.DisplayName
+	if baseName == "" {
+		baseName = exposure.Name
+	}
+	return baseName + "-" + applicationName + "-cfzt"
+}
+
+func accessApplicationMatchesDesired(app cloudflare.AccessApplication, want cloudflare.AccessApplicationInput) bool {
+	return app.Name == want.Name &&
+		app.Domain == accessApplicationPrimaryDomain(want.Domains) &&
+		equality.Semantic.DeepEqual(app.Domains, want.Domains) &&
+		equality.Semantic.DeepEqual(app.PolicyUUIDs, want.PolicyUUIDs) &&
+		sameStringSet(app.Tags, want.Tags)
+}
+
+func accessApplicationStatusFrom(name string, app *cloudflare.AccessApplication) cfztv1alpha1.ExposureAccessApplicationStatus {
+	if app == nil {
+		return cfztv1alpha1.ExposureAccessApplicationStatus{}
+	}
+	return cfztv1alpha1.ExposureAccessApplicationStatus{
+		Name:                name,
+		AppID:               app.ID,
+		CanonicalDomainHash: hashStringsSorted(app.Domains),
+		PolicyHash:          hashStringsOrdered(app.PolicyUUIDs),
+	}
+}
+
+func hashStringsSorted(values []string) string {
+	return hashStrings(sortedCopy(values))
+}
+
+func hashStringsOrdered(values []string) string {
+	return hashStrings(values)
+}
+
+func hashStrings(values []string) string {
+	sum := sha256.Sum256([]byte(strings.Join(values, "\x00")))
+	return fmt.Sprintf("sha256:%x", sum[:])
+}
+
+func accessApplicationDomainsAsStrings(domains []cfztv1alpha1.AccessApplicationDomain) []string {
+	out := make([]string, len(domains))
+	for i := range domains {
+		out[i] = string(domains[i])
+	}
+	return out
+}
+
+func accessApplicationPrimaryDomain(domains []string) string {
+	if len(domains) == 0 {
+		return ""
+	}
+	return domains[0]
+}
+
+func sortedCopy(values []string) []string {
+	out := append([]string(nil), values...)
+	sort.Strings(out)
+	return out
 }
 
 // SetupWithManager sets up the controller with the Manager.

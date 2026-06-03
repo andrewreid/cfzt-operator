@@ -3,6 +3,7 @@ package cloudflare_test
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/andrewreid/cfzt-operator/internal/cloudflare"
@@ -115,18 +116,28 @@ func TestZoneLongestSuffix(t *testing.T) {
 	}
 }
 
-func TestFakeAccessAppRoundTrip(t *testing.T) {
+func TestFakeAccessAppRoundTripMultipleDomainsAndPolicies(t *testing.T) {
 	ctx := context.Background()
 	fake := cloudflare.NewFake()
 	app, err := fake.AccessApplications().Create(ctx, cloudflare.AccessApplicationInput{
-		Name:       "jellyfin-cfzt",
-		Domain:     "jellyfin.example.com",
-		PolicyUUID: "00000000-0000-4000-8000-000000000001",
-		Tags:       []string{"managed-by=cfzt-operator", "source-uid=uid-1"},
+		Name:        "jellyfin-cfzt",
+		Domains:     []string{"jellyfin.example.com", "jellyfin.example.com/admin"},
+		PolicyUUIDs: []string{"00000000-0000-4000-8000-000000000002", "00000000-0000-4000-8000-000000000001"},
+		Tags:        []string{"managed-by=cfzt-operator", "source-uid=uid-1"},
 	})
 	if err != nil {
 		t.Fatalf("Create returned error: %v", err)
 	}
+	if app.Domain != "jellyfin.example.com" {
+		t.Fatalf("Domain = %q, want canonical first domain", app.Domain)
+	}
+	if got, want := app.Domains, []string{"jellyfin.example.com", "jellyfin.example.com/admin"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Domains = %#v, want %#v", got, want)
+	}
+	if got, want := app.PolicyUUIDs, []string{"00000000-0000-4000-8000-000000000002", "00000000-0000-4000-8000-000000000001"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("PolicyUUIDs = %#v, want %#v", got, want)
+	}
+
 	apps, err := fake.AccessApplications().List(ctx, "jellyfin.example.com")
 	if err != nil {
 		t.Fatalf("List returned error: %v", err)
@@ -134,16 +145,22 @@ func TestFakeAccessAppRoundTrip(t *testing.T) {
 	if len(apps) != 1 || apps[0].ID != app.ID {
 		t.Fatalf("apps = %#v, want created app", apps)
 	}
+	if got, want := apps[0].Domains, []string{"jellyfin.example.com", "jellyfin.example.com/admin"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Listed Domains = %#v, want %#v", got, want)
+	}
+	if got, want := apps[0].PolicyUUIDs, []string{"00000000-0000-4000-8000-000000000002", "00000000-0000-4000-8000-000000000001"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Listed PolicyUUIDs = %#v, want %#v", got, want)
+	}
 }
 
 func TestFakeAccessApplicationsEnsuresTagsImplicitly(t *testing.T) {
 	ctx := context.Background()
 	fake := cloudflare.NewFake()
 	app, err := fake.AccessApplications().Create(ctx, cloudflare.AccessApplicationInput{
-		Name:       "jellyfin-cfzt",
-		Domain:     "jellyfin.example.com",
-		PolicyUUID: "00000000-0000-4000-8000-000000000001",
-		Tags:       []string{"managed-by=cfzt-operator", "source-uid-0=uid-1"},
+		Name:        "jellyfin-cfzt",
+		Domains:     []string{"jellyfin.example.com"},
+		PolicyUUIDs: []string{"00000000-0000-4000-8000-000000000001"},
+		Tags:        []string{"managed-by=cfzt-operator", "source-uid-0=uid-1"},
 	})
 	if err != nil {
 		t.Fatalf("Create returned error: %v", err)
@@ -156,10 +173,10 @@ func TestFakeAccessApplicationsEnsuresTagsImplicitly(t *testing.T) {
 	}
 
 	_, err = fake.AccessApplications().Update(ctx, app.ID, cloudflare.AccessApplicationInput{
-		Name:       "jellyfin-cfzt",
-		Domain:     "jellyfin.example.com",
-		PolicyUUID: "00000000-0000-4000-8000-000000000001",
-		Tags:       []string{"managed-by=cfzt-operator", "source-uid-0=uid-2"},
+		Name:        "jellyfin-cfzt",
+		Domains:     []string{"jellyfin.example.com"},
+		PolicyUUIDs: []string{"00000000-0000-4000-8000-000000000001"},
+		Tags:        []string{"managed-by=cfzt-operator", "source-uid-0=uid-2"},
 	})
 	if err != nil {
 		t.Fatalf("Update returned error: %v", err)
@@ -169,6 +186,51 @@ func TestFakeAccessApplicationsEnsuresTagsImplicitly(t *testing.T) {
 	}
 	if err := fake.AccessTags().Delete(ctx, "source-uid-0=uid-2"); err != nil {
 		t.Fatalf("Update did not implicitly ensure source UID tag: %v", err)
+	}
+}
+
+func TestFakeAccessApplicationsBroadDiscoveryIncludesPathApps(t *testing.T) {
+	ctx := context.Background()
+	fake := cloudflare.NewFake()
+
+	_, err := fake.AccessApplications().Create(ctx, cloudflare.AccessApplicationInput{
+		Name:        "jellyfin-root",
+		Domains:     []string{"jellyfin.example.com"},
+		PolicyUUIDs: []string{"00000000-0000-4000-8000-000000000001"},
+	})
+	if err != nil {
+		t.Fatalf("Create root: %v", err)
+	}
+	_, err = fake.AccessApplications().Create(ctx, cloudflare.AccessApplicationInput{
+		Name:        "jellyfin-admin",
+		Domains:     []string{"jellyfin.example.com/admin"},
+		PolicyUUIDs: []string{"00000000-0000-4000-8000-000000000002"},
+	})
+	if err != nil {
+		t.Fatalf("Create path app: %v", err)
+	}
+	_, err = fake.AccessApplications().Create(ctx, cloudflare.AccessApplicationInput{
+		Name:        "other",
+		Domains:     []string{"other.example.com"},
+		PolicyUUIDs: []string{"00000000-0000-4000-8000-000000000003"},
+	})
+	if err != nil {
+		t.Fatalf("Create other: %v", err)
+	}
+
+	apps, err := fake.AccessApplications().List(ctx, "jellyfin.example.com")
+	if err != nil {
+		t.Fatalf("List returned error: %v", err)
+	}
+	if len(apps) != 2 {
+		t.Fatalf("List returned %d apps, want 2: %#v", len(apps), apps)
+	}
+	got := map[string]bool{}
+	for _, app := range apps {
+		got[app.Name] = true
+	}
+	if !got["jellyfin-root"] || !got["jellyfin-admin"] {
+		t.Fatalf("List did not include both root and path apps: %#v", apps)
 	}
 }
 

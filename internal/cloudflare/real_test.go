@@ -81,19 +81,75 @@ func TestMapAPIErrorNotFound(t *testing.T) {
 	}
 }
 
-func TestAccessAppFromListResponseCapturesAllPolicyIDs(t *testing.T) {
+func TestAccessAppFromListResponseCapturesDomainsAndPolicyIDs(t *testing.T) {
 	app := accessAppFromListResponse(zero_trust.AccessApplicationListResponse{
 		ID:     "app-1",
 		Name:   "jellyfin-cfzt",
 		Domain: "jellyfin.example.com",
+		SelfHostedDomains: []string{
+			"jellyfin.example.com",
+			"jellyfin.example.com/admin",
+		},
 		Policies: []zero_trust.AccessApplicationListResponseSelfHostedApplicationPolicy{
 			{ID: "policy-1"},
 			{ID: "policy-2"},
 		},
 	})
 
+	if !reflect.DeepEqual(app.Domains, []string{"jellyfin.example.com", "jellyfin.example.com/admin"}) {
+		t.Fatalf("Domains = %#v", app.Domains)
+	}
 	if !reflect.DeepEqual(app.PolicyUUIDs, []string{"policy-1", "policy-2"}) {
 		t.Fatalf("PolicyUUIDs = %#v", app.PolicyUUIDs)
+	}
+}
+
+func TestAccessAppFromNewAndUpdateResponseRoundTrip(t *testing.T) {
+	newResp := &zero_trust.AccessApplicationNewResponse{
+		ID:     "app-1",
+		Name:   "jellyfin-cfzt",
+		Domain: "jellyfin.example.com",
+		SelfHostedDomains: []string{
+			"jellyfin.example.com",
+			"jellyfin.example.com/admin",
+		},
+		Policies: []zero_trust.AccessApplicationNewResponseSelfHostedApplicationPolicy{
+			{ID: "policy-2"},
+			{ID: "policy-1"},
+		},
+		Tags: []string{"managed-by=cfzt-operator"},
+	}
+	newApp := accessAppFromNewResponse(newResp)
+	if newApp.Domain != "jellyfin.example.com" {
+		t.Fatalf("new Domain = %q", newApp.Domain)
+	}
+	if !reflect.DeepEqual(newApp.Domains, []string{"jellyfin.example.com", "jellyfin.example.com/admin"}) {
+		t.Fatalf("new Domains = %#v", newApp.Domains)
+	}
+	if !reflect.DeepEqual(newApp.PolicyUUIDs, []string{"policy-2", "policy-1"}) {
+		t.Fatalf("new PolicyUUIDs = %#v", newApp.PolicyUUIDs)
+	}
+
+	updateResp := &zero_trust.AccessApplicationUpdateResponse{
+		ID:     "app-1",
+		Name:   "jellyfin-cfzt",
+		Domain: "jellyfin.example.com",
+		SelfHostedDomains: []string{
+			"jellyfin.example.com",
+			"jellyfin.example.com/admin",
+		},
+		Policies: []zero_trust.AccessApplicationUpdateResponseSelfHostedApplicationPolicy{
+			{ID: "policy-2"},
+			{ID: "policy-1"},
+		},
+		Tags: []string{"managed-by=cfzt-operator"},
+	}
+	updateApp := accessAppFromUpdateResponse(updateResp)
+	if !reflect.DeepEqual(updateApp.Domains, newApp.Domains) {
+		t.Fatalf("update Domains = %#v, want %#v", updateApp.Domains, newApp.Domains)
+	}
+	if !reflect.DeepEqual(updateApp.PolicyUUIDs, newApp.PolicyUUIDs) {
+		t.Fatalf("update PolicyUUIDs = %#v, want %#v", updateApp.PolicyUUIDs, newApp.PolicyUUIDs)
 	}
 }
 

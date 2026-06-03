@@ -98,7 +98,10 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		reconcileExposure(ctx, exposureReconciler, exposure)
 
 		current := fetchExposure(ctx, exposure.Name)
-		Expect(current.Status.Cloudflare.AccessApplicationId).NotTo(BeEmpty())
+		Expect(current.Status.Cloudflare.AccessApplications).To(HaveLen(1))
+		Expect(current.Status.Cloudflare.AccessApplications[0].AppID).NotTo(BeEmpty())
+		Expect(current.Status.Cloudflare.AccessApplications[0].CanonicalDomainHash).NotTo(BeEmpty())
+		Expect(current.Status.Cloudflare.AccessApplications[0].PolicyHash).NotTo(BeEmpty())
 		Expect(current.Status.Cloudflare.DnsRecordId).NotTo(BeEmpty())
 		Expect(current.Status.Cloudflare.PublicHostnameRouteHash).NotTo(BeEmpty())
 		Expect(meta.FindStatusCondition(current.Status.Conditions, ConditionReady).Status).To(Equal(metav1.ConditionTrue))
@@ -117,6 +120,10 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		apps, err := fakeCF.AccessApplications().List(ctx, "jellyfin.example.com")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(apps).To(HaveLen(1))
+		Expect(apps[0].Name).To(Equal("jellyfin-root-cfzt"))
+		Expect(apps[0].Domains).To(Equal([]string{"jellyfin.example.com"}))
+		Expect(apps[0].PolicyUUIDs).To(Equal([]string{defaultPolicyUUID}))
+		Expect(current.Status.Cloudflare.AccessApplications[0].Name).To(Equal("root"))
 		for _, tag := range apps[0].Tags {
 			Expect(fakeCF.AccessTags().Delete(ctx, tag)).To(Succeed())
 		}
@@ -226,12 +233,34 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		reconcileExposure(ctx, exposureReconciler, exposure)
 
 		current := fetchExposure(ctx, exposure.Name)
-		Expect(current.Status.Cloudflare.AccessApplicationId).To(BeEmpty())
+		Expect(current.Status.Cloudflare.AccessApplications).To(BeEmpty())
 		Expect(current.Status.Cloudflare.DnsRecordId).NotTo(BeEmpty())
 		Expect(meta.FindStatusCondition(current.Status.Conditions, ConditionReady).Status).To(Equal(metav1.ConditionTrue))
 	})
 
-	It("TestExposureAccessToggleOffDeletesOwnedApp", func() {
+	It("TestExposureAccessApplicationsMultipleEntriesUnsupported", func() {
+		tunnel := readyTunnel(ctx, tunnelReconciler, "access-multi", "access-multi")
+		exposure := createExposure(ctx, "multi-access", tunnel.Name, "multi-access.example.com", true)
+		exposure.Spec.Access.Applications = append(exposure.Spec.Access.Applications, cfztv1alpha1.AccessApplicationTarget{
+			Name:    "admin",
+			Domains: []cfztv1alpha1.AccessApplicationDomain{cfztv1alpha1.AccessApplicationDomain("multi-access.example.com/admin")},
+			Policies: []cfztv1alpha1.AccessApplicationPolicyBinding{{
+				PolicyRef: cfztv1alpha1.AccessPolicyRef{UUID: defaultPolicyUUID},
+			}},
+		})
+		Expect(k8sClient.Update(ctx, exposure)).To(Succeed())
+
+		reconcileExposure(ctx, exposureReconciler, exposure)
+
+		current := fetchExposure(ctx, exposure.Name)
+		Expect(meta.FindStatusCondition(current.Status.Conditions, ConditionReady).Reason).To(Equal(ReasonAccessApplicationsUnsupported))
+		Expect(current.Status.Cloudflare.AccessApplications).To(HaveLen(0))
+		apps, err := fakeCF.AccessApplications().List(ctx, exposure.Spec.Hostname)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(apps).To(BeEmpty())
+	})
+
+	It("TestExposureAccessDisabledDeletesAllOwnedApps", func() {
 		tunnel := readyTunnel(ctx, tunnelReconciler, "access-toggle", "access-toggle")
 		exposure := createExposure(ctx, "toggleauth", tunnel.Name, "toggleauth.example.com", true)
 		reconcileExposure(ctx, exposureReconciler, exposure)
@@ -239,7 +268,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		reconcileExposure(ctx, exposureReconciler, exposure)
 
 		current := fetchExposure(ctx, exposure.Name)
-		Expect(current.Status.Cloudflare.AccessApplicationId).NotTo(BeEmpty())
+		Expect(current.Status.Cloudflare.AccessApplications).To(HaveLen(1))
 		drainRecordedEvents(exposureRecorder)
 		current.Spec.Access.Enabled = false
 		Expect(k8sClient.Update(ctx, current)).To(Succeed())
@@ -247,7 +276,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		expectRecordedEvent(exposureRecorder, EventDeletedAccessApp)
 
 		updated := fetchExposure(ctx, exposure.Name)
-		Expect(updated.Status.Cloudflare.AccessApplicationId).To(BeEmpty())
+		Expect(updated.Status.Cloudflare.AccessApplications).To(BeEmpty())
 		apps, err := fakeCF.AccessApplications().List(ctx, "toggleauth.example.com")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(apps).To(BeEmpty())
@@ -401,7 +430,8 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		reconcileExposure(ctx, exposureReconciler, exposure)
 		current := fetchExposure(ctx, exposure.Name)
 		Expect(current.Finalizers).To(ContainElement(naming.Finalizer))
-		appID := current.Status.Cloudflare.AccessApplicationId
+		Expect(current.Status.Cloudflare.AccessApplications).To(HaveLen(1))
+		appID := current.Status.Cloudflare.AccessApplications[0].AppID
 		recordID := current.Status.Cloudflare.DnsRecordId
 		drainRecordedEvents(exposureRecorder)
 
@@ -435,7 +465,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		reconcileTunnel(ctx, tunnelReconciler, tunnel.Name)
 		reconcileExposure(ctx, exposureReconciler, exposure)
 		current := fetchExposure(ctx, exposure.Name)
-		Expect(current.Status.Cloudflare.AccessApplicationId).NotTo(BeEmpty())
+		Expect(current.Status.Cloudflare.AccessApplications).To(HaveLen(1))
 		Expect(current.Status.Cloudflare.DnsRecordId).NotTo(BeEmpty())
 		Expect(k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "cloudflare-credentials", Namespace: "cfzt-system"}})).To(Succeed())
 
@@ -506,13 +536,16 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		))
 	})
 
-	It("TestExposurePolicyRefName", func() {
+	It("TestExposureAccessApplicationsResolveNestedPolicyRefs", func() {
 		tunnel := readyTunnel(ctx, tunnelReconciler, "policy-ref-name", "policy-ref-name")
 		policy := createAccessPolicy(ctx, "family-only", "")
 		reconcileAccessPolicy(ctx, policyReconciler, policy.Name)
 		policy = fetchAccessPolicy(ctx, policy.Name)
 		exposure := createExposure(ctx, "named-policy", tunnel.Name, "named-policy.example.com", true)
-		exposure.Spec.Access.PolicyRef = cfztv1alpha1.AccessPolicyRef{Name: policy.Name}
+		exposure.Spec.Access.Applications[0].Policies = []cfztv1alpha1.AccessApplicationPolicyBinding{
+			{PolicyRef: cfztv1alpha1.AccessPolicyRef{Name: policy.Name}},
+			{PolicyRef: cfztv1alpha1.AccessPolicyRef{UUID: defaultPolicyUUID}},
+		}
 		Expect(k8sClient.Update(ctx, exposure)).To(Succeed())
 
 		reconcileExposure(ctx, exposureReconciler, exposure)
@@ -521,13 +554,14 @@ var _ = Describe("CloudflareExposure Controller", func() {
 
 		current := fetchExposure(ctx, exposure.Name)
 		Expect(meta.FindStatusCondition(current.Status.Conditions, ConditionReady).Status).To(Equal(metav1.ConditionTrue))
+		Expect(current.Status.Cloudflare.AccessApplications).To(HaveLen(1))
 		apps, err := fakeCF.AccessApplications().List(ctx, exposure.Spec.Hostname)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(apps).To(HaveLen(1))
-		Expect(apps[0].PolicyUUIDs).To(Equal([]string{policy.Status.PolicyId}))
+		Expect(apps[0].PolicyUUIDs).To(Equal([]string{policy.Status.PolicyId, defaultPolicyUUID}))
 	})
 
-	It("TestAccessApplicationForeignPolicyAttachmentDriftsBack", func() {
+	It("TestExposureAccessApplicationsSingleRootDrift", func() {
 		tunnel := readyTunnel(ctx, tunnelReconciler, "policy-drift-tunnel", "policy-drift-tunnel")
 		exposure := createExposure(ctx, "policy-drift", tunnel.Name, "policy-drift.example.com", true)
 
@@ -547,11 +581,11 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		Expect(apps[0].PolicyUUIDs).To(Equal([]string{defaultPolicyUUID}))
 	})
 
-	It("TestExposurePolicyRefNamePolicyNotReady", func() {
+	It("TestExposureAccessApplicationsPolicyRefNameNotReady", func() {
 		tunnel := readyTunnel(ctx, tunnelReconciler, "policy-not-ready", "policy-not-ready")
 		policy := createAccessPolicy(ctx, "not-ready-policy", "")
 		exposure := createExposure(ctx, "not-ready-exp", tunnel.Name, "not-ready.example.com", true)
-		exposure.Spec.Access.PolicyRef = cfztv1alpha1.AccessPolicyRef{Name: policy.Name}
+		exposure.Spec.Access.Applications[0].Policies = []cfztv1alpha1.AccessApplicationPolicyBinding{{PolicyRef: cfztv1alpha1.AccessPolicyRef{Name: policy.Name}}}
 		Expect(k8sClient.Update(ctx, exposure)).To(Succeed())
 
 		result, err := exposureReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: exposure.Namespace, Name: exposure.Name}})
@@ -560,12 +594,13 @@ var _ = Describe("CloudflareExposure Controller", func() {
 
 		current := fetchExposure(ctx, exposure.Name)
 		Expect(meta.FindStatusCondition(current.Status.Conditions, ConditionReady).Reason).To(Equal(ReasonPolicyNotReady))
+		Expect(current.Status.Cloudflare.AccessApplications).To(BeEmpty())
 		apps, err := fakeCF.AccessApplications().List(ctx, exposure.Spec.Hostname)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(apps).To(BeEmpty())
 	})
 
-	It("TestExposurePolicyRefNameStaleGenerationNotReady", func() {
+	It("TestExposureAccessApplicationsPolicyRefNameStaleGenerationNotReady", func() {
 		tunnel := readyTunnel(ctx, tunnelReconciler, "policy-stale-generation", "policy-stale-generation")
 		policy := createAccessPolicy(ctx, "stale-generation-policy", "")
 		reconcileAccessPolicy(ctx, policyReconciler, policy.Name)
@@ -573,7 +608,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		readyPolicy.Spec.Rules.Include = []cfztv1alpha1.AccessRule{{EmailDomain: "edited.example.com"}}
 		Expect(k8sClient.Update(ctx, readyPolicy)).To(Succeed())
 		exposure := createExposure(ctx, "stale-generation-exp", tunnel.Name, "stale-generation.example.com", true)
-		exposure.Spec.Access.PolicyRef = cfztv1alpha1.AccessPolicyRef{Name: policy.Name}
+		exposure.Spec.Access.Applications[0].Policies = []cfztv1alpha1.AccessApplicationPolicyBinding{{PolicyRef: cfztv1alpha1.AccessPolicyRef{Name: policy.Name}}}
 		Expect(k8sClient.Update(ctx, exposure)).To(Succeed())
 
 		result, err := exposureReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: exposure.Namespace, Name: exposure.Name}})
@@ -582,12 +617,13 @@ var _ = Describe("CloudflareExposure Controller", func() {
 
 		current := fetchExposure(ctx, exposure.Name)
 		Expect(meta.FindStatusCondition(current.Status.Conditions, ConditionReady).Reason).To(Equal(ReasonPolicyNotReady))
+		Expect(current.Status.Cloudflare.AccessApplications).To(BeEmpty())
 		apps, err := fakeCF.AccessApplications().List(ctx, exposure.Spec.Hostname)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(apps).To(BeEmpty())
 	})
 
-	It("TestExposurePolicyRefNameDeletingPolicyNotReady", func() {
+	It("TestExposureAccessApplicationsPolicyRefNameDeletingPolicyNotReady", func() {
 		tunnel := readyTunnel(ctx, tunnelReconciler, "policy-deleting", "policy-deleting")
 		policy := createAccessPolicy(ctx, "deleting-policy", "")
 		reconcileAccessPolicy(ctx, policyReconciler, policy.Name)
@@ -596,7 +632,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		Expect(k8sClient.Update(ctx, readyPolicy)).To(Succeed())
 		Expect(k8sClient.Delete(ctx, readyPolicy)).To(Succeed())
 		exposure := createExposure(ctx, "deleting-policy-exp", tunnel.Name, "deleting-policy.example.com", true)
-		exposure.Spec.Access.PolicyRef = cfztv1alpha1.AccessPolicyRef{Name: policy.Name}
+		exposure.Spec.Access.Applications[0].Policies = []cfztv1alpha1.AccessApplicationPolicyBinding{{PolicyRef: cfztv1alpha1.AccessPolicyRef{Name: policy.Name}}}
 		Expect(k8sClient.Update(ctx, exposure)).To(Succeed())
 
 		result, err := exposureReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: exposure.Namespace, Name: exposure.Name}})
@@ -605,21 +641,23 @@ var _ = Describe("CloudflareExposure Controller", func() {
 
 		current := fetchExposure(ctx, exposure.Name)
 		Expect(meta.FindStatusCondition(current.Status.Conditions, ConditionReady).Reason).To(Equal(ReasonPolicyNotReady))
+		Expect(current.Status.Cloudflare.AccessApplications).To(BeEmpty())
 		apps, err := fakeCF.AccessApplications().List(ctx, exposure.Spec.Hostname)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(apps).To(BeEmpty())
 	})
 
-	It("TestExposurePolicyRefNameMissingPolicyCR", func() {
+	It("TestExposureAccessApplicationsPolicyRefNameMissingPolicyCR", func() {
 		tunnel := readyTunnel(ctx, tunnelReconciler, "policy-missing", "policy-missing")
 		exposure := createExposure(ctx, "missing-policy-exp", tunnel.Name, "missing-policy.example.com", true)
-		exposure.Spec.Access.PolicyRef = cfztv1alpha1.AccessPolicyRef{Name: "missing-policy"}
+		exposure.Spec.Access.Applications[0].Policies = []cfztv1alpha1.AccessApplicationPolicyBinding{{PolicyRef: cfztv1alpha1.AccessPolicyRef{Name: "missing-policy"}}}
 		Expect(k8sClient.Update(ctx, exposure)).To(Succeed())
 
 		reconcileExposure(ctx, exposureReconciler, exposure)
 
 		current := fetchExposure(ctx, exposure.Name)
 		Expect(meta.FindStatusCondition(current.Status.Conditions, ConditionReady).Reason).To(Equal(ReasonPolicyNotFound))
+		Expect(current.Status.Cloudflare.AccessApplications).To(BeEmpty())
 		apps, err := fakeCF.AccessApplications().List(ctx, exposure.Spec.Hostname)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(apps).To(BeEmpty())
@@ -707,7 +745,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		reconcileTunnel(ctx, tunnelReconciler, tunnel.Name)
 		reconcileExposure(ctx, exposureReconciler, current)
 		current = fetchExposure(ctx, exposure.Name)
-		Expect(current.Status.Cloudflare.AccessApplicationId).NotTo(BeEmpty())
+		Expect(current.Status.Cloudflare.AccessApplications).To(HaveLen(1))
 
 		Expect(k8sClient.Delete(ctx, svc)).To(Succeed())
 		// Envtest does not run the Kubernetes garbage collector. The source
@@ -781,12 +819,13 @@ func createExposure(ctx context.Context, name, tunnelName, hostname string, acce
 				Port:     8096,
 			},
 			Access: cfztv1alpha1.AccessSpec{
-				Enabled: accessEnabled,
-				PolicyRef: cfztv1alpha1.AccessPolicyRef{
-					UUID: "00000000-0000-4000-8000-000000000001",
-				},
+				Enabled:      accessEnabled,
+				Applications: defaultAccessApplications(hostname),
 			},
 		},
+	}
+	if !accessEnabled {
+		exposure.Spec.Access.Applications = nil
 	}
 	Expect(k8sClient.Create(ctx, exposure)).To(Succeed())
 	return exposure
@@ -804,15 +843,26 @@ func createSourceRefExposure(ctx context.Context, name, tunnelName, hostname, so
 				Name:       sourceName,
 			},
 			Access: cfztv1alpha1.AccessSpec{
-				Enabled: accessEnabled,
-				PolicyRef: cfztv1alpha1.AccessPolicyRef{
-					UUID: "00000000-0000-4000-8000-000000000001",
-				},
+				Enabled:      accessEnabled,
+				Applications: defaultAccessApplications(hostname),
 			},
 		},
 	}
+	if !accessEnabled {
+		exposure.Spec.Access.Applications = nil
+	}
 	Expect(k8sClient.Create(ctx, exposure)).To(Succeed())
 	return exposure
+}
+
+func defaultAccessApplications(hostname string) []cfztv1alpha1.AccessApplicationTarget {
+	return []cfztv1alpha1.AccessApplicationTarget{{
+		Name:    "root",
+		Domains: []cfztv1alpha1.AccessApplicationDomain{cfztv1alpha1.AccessApplicationDomain(hostname)},
+		Policies: []cfztv1alpha1.AccessApplicationPolicyBinding{{
+			PolicyRef: cfztv1alpha1.AccessPolicyRef{UUID: "00000000-0000-4000-8000-000000000001"},
+		}},
+	}}
 }
 
 func createService(ctx context.Context, namespace, name string, ports ...int32) *corev1.Service {

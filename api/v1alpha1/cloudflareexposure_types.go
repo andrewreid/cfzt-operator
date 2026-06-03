@@ -16,9 +16,7 @@ limitations under the License.
 
 package v1alpha1
 
-import (
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-)
+import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 // TunnelRef identifies the CloudflareTunnel that publishes this exposure.
 type TunnelRef struct {
@@ -72,6 +70,48 @@ type AccessPolicyRef struct {
 	Name string `json:"name,omitempty"`
 }
 
+func (r AccessPolicyRef) IsZero() bool {
+	return r.UUID == "" && r.Name == ""
+}
+
+// AccessApplicationPolicyBinding references one policy attached to an Access
+// application. The policy ref shape stays shared with the legacy top-level
+// access.policyRef field, but only nested bindings are accepted in v1alpha1.
+//
+// +kubebuilder:validation:XValidation:rule="(has(self.policyRef.uuid) && size(self.policyRef.uuid) > 0) != (has(self.policyRef.name) && size(self.policyRef.name) > 0)",message="policyRef requires exactly one of uuid or name"
+type AccessApplicationPolicyBinding struct {
+	// +kubebuilder:validation:Required
+	PolicyRef AccessPolicyRef `json:"policyRef"`
+}
+
+// AccessApplicationDomain is one canonical self-hosted domain target for an
+// Access application.
+//
+// +kubebuilder:validation:MaxLength=253
+// +kubebuilder:validation:Pattern=`^[^\s?#:]+(?:/[^\s?#:]*)?$`
+type AccessApplicationDomain string
+
+// AccessApplicationTarget describes one Cloudflare Access self-hosted
+// application owned by a CloudflareExposure.
+type AccessApplicationTarget struct {
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Name string `json:"name"`
+
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=3
+	// +listType=set
+	Domains []AccessApplicationDomain `json:"domains"`
+
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=3
+	Policies []AccessApplicationPolicyBinding `json:"policies"`
+}
+
 // AccessSpec controls Cloudflare Access protection.
 type AccessSpec struct {
 	// +kubebuilder:validation:Optional
@@ -79,7 +119,14 @@ type AccessSpec struct {
 	Enabled bool `json:"enabled"`
 
 	// +kubebuilder:validation:Optional
-	PolicyRef AccessPolicyRef `json:"policyRef,omitempty"`
+	PolicyRef AccessPolicyRef `json:"policyRef,omitempty,omitzero"`
+
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=3
+	// +listType=map
+	// +listMapKey=name
+	Applications []AccessApplicationTarget `json:"applications,omitempty"`
 }
 
 // FailoverSpec opts a CloudflareExposure into D26 active-passive multi-cluster
@@ -111,8 +158,10 @@ type FailoverSpec struct {
 // CloudflareExposureSpec defines the desired state of CloudflareExposure.
 //
 // +kubebuilder:validation:XValidation:rule="(has(self.sourceRef) && self.sourceRef.kind == 'Service') || (has(self.origin) && has(self.origin.protocol) && has(self.origin.host) && has(self.origin.port))",message="origin protocol, host, and port are required unless sourceRef.kind is Service"
-// +kubebuilder:validation:XValidation:rule="has(self.hostname) || (has(self.sourceRef) && self.sourceRef.kind == 'HTTPRoute')",message="hostname is required unless sourceRef.kind is HTTPRoute"
-// +kubebuilder:validation:XValidation:rule="!has(self.access) || !self.access.enabled || (has(self.access.policyRef) && ((has(self.access.policyRef.uuid) && size(self.access.policyRef.uuid) > 0) != (has(self.access.policyRef.name) && size(self.access.policyRef.name) > 0)))",message="access.policyRef requires exactly one of uuid or name when access.enabled is true"
+// +kubebuilder:validation:XValidation:rule="has(self.hostname) || (has(self.sourceRef) && self.sourceRef.kind == 'HTTPRoute' && (!has(self.access) || !self.access.enabled))",message="hostname is required unless sourceRef.kind is HTTPRoute and access is disabled"
+// +kubebuilder:validation:XValidation:rule="!has(self.access) || !self.access.enabled || (has(self.hostname) && size(self.hostname) > 0 && has(self.access.applications) && size(self.access.applications) > 0)",message="access.enabled=true requires spec.hostname and access.applications[]"
+// +kubebuilder:validation:XValidation:rule="!has(self.access) || !has(self.access.policyRef)",message="access.policyRef was removed in v1alpha1; use access.applications[]"
+// +kubebuilder:validation:XValidation:rule="!has(self.access) || !self.access.enabled || self.access.applications.all(app, app.domains.all(domain, domain == self.hostname || domain.startsWith(self.hostname + '/')))",message="access.applications[].domains must equal spec.hostname or start with spec.hostname + \"/\""
 // +kubebuilder:validation:XValidation:rule="has(oldSelf.hostname) ? (has(self.hostname) && self.hostname == oldSelf.hostname) : (!has(self.hostname) || (has(self.sourceRef) && self.sourceRef.kind == 'HTTPRoute'))",message="hostname is immutable except when initially derived from an HTTPRoute sourceRef"
 // +kubebuilder:validation:XValidation:rule="self.tunnelRef.name == oldSelf.tunnelRef.name",message="tunnelRef.name is immutable"
 // +kubebuilder:validation:XValidation:rule="has(self.sourceRef) == has(oldSelf.sourceRef) && (!has(self.sourceRef) || self.sourceRef == oldSelf.sourceRef)",message="sourceRef is immutable"
@@ -144,9 +193,34 @@ type CloudflareExposureSpec struct {
 
 // ExposureCloudflareStatus records Cloudflare-side resources for one exposure.
 type ExposureCloudflareStatus struct {
-	AccessApplicationId     string `json:"accessApplicationId,omitempty"`
+	// AccessApplicationId is retained only so older controller code compiles
+	// during the Slice 8a API migration; it is not serialized into the CRD.
+	AccessApplicationId string `json:"-"`
+
+	// +listType=map
+	// +listMapKey=name
+	// +optional
+	AccessApplications []ExposureAccessApplicationStatus `json:"accessApplications,omitempty"`
+
 	PublicHostnameRouteHash string `json:"publicHostnameRouteHash,omitempty"`
 	DnsRecordId             string `json:"dnsRecordId,omitempty"`
+}
+
+// ExposureAccessApplicationStatus records one reconciled Access application for
+// a CloudflareExposure.
+type ExposureAccessApplicationStatus struct {
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+
+	// +kubebuilder:validation:Optional
+	AppID string `json:"appId,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	CanonicalDomainHash string `json:"canonicalDomainHash,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	PolicyHash string `json:"policyHash,omitempty"`
 }
 
 // ExposureFailoverStatus records this site's view of the D26 failover lease

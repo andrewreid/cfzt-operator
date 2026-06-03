@@ -500,16 +500,15 @@ func (t *realAccessTags) Delete(ctx context.Context, name string) error {
 func (a *realAccessApplications) List(ctx context.Context, domain string) ([]AccessApplication, error) {
 	var out []AccessApplication
 	err := a.client.withRetry(ctx, func() error {
-		params := zero_trust.AccessApplicationListParams{
-			AccountID: cf.F(a.client.accountID),
-			Domain:    cf.F(domain),
-			Exact:     cf.F(true),
-		}
+		params := zero_trust.AccessApplicationListParams{AccountID: cf.F(a.client.accountID)}
 		pager := a.client.api.ZeroTrust.Access.Applications.ListAutoPaging(ctx, params)
 		out = out[:0]
 		for pager.Next() {
 			item := pager.Current()
-			out = append(out, accessAppFromListResponse(item))
+			app := accessAppFromListResponse(item)
+			if accessApplicationMatchesHostname(app, domain) {
+				out = append(out, app)
+			}
 		}
 		return pager.Err()
 	})
@@ -529,7 +528,7 @@ func (a *realAccessApplications) Create(ctx context.Context, in AccessApplicatio
 		if err != nil {
 			return err
 		}
-		result = accessAppFromNewResponse(resp, in.PolicyUUID)
+		result = accessAppFromNewResponse(resp)
 		return nil
 	})
 	return result, err
@@ -548,7 +547,7 @@ func (a *realAccessApplications) Update(ctx context.Context, id string, in Acces
 		if err != nil {
 			return mapAPIError(err)
 		}
-		result = accessAppFromUpdateResponse(resp, in.PolicyUUID)
+		result = accessAppFromUpdateResponse(resp)
 		return nil
 	})
 	return result, err
@@ -742,119 +741,189 @@ func (z *realZones) Resolve(ctx context.Context, hostname string) (*Zone, error)
 }
 
 func accessNewBody(in AccessApplicationInput) zero_trust.AccessApplicationNewParamsBodyUnion {
-	fields := commonAccessFields(in)
+	domains := accessApplicationInputDomains(in)
+	policyUUIDs := accessApplicationInputPolicyUUIDs(in)
+	policies := make([]zero_trust.AccessApplicationNewParamsBodySelfHostedApplicationPolicyUnion, 0, len(policyUUIDs))
+	for idx, policyUUID := range policyUUIDs {
+		policies = append(policies, zero_trust.AccessApplicationNewParamsBodySelfHostedApplicationPoliciesAccessAppPolicyLink{
+			ID:         cf.F(policyUUID),
+			Precedence: cf.F(int64(idx)),
+		})
+	}
 	return zero_trust.AccessApplicationNewParamsBodySelfHostedApplication{
-		Domain: cf.F(fields.domain),
-		Type:   cf.F(zero_trust.ApplicationTypeSelfHosted),
-		Name:   cf.F(fields.name),
-		Policies: cf.F([]zero_trust.AccessApplicationNewParamsBodySelfHostedApplicationPolicyUnion{
-			zero_trust.AccessApplicationNewParamsBodySelfHostedApplicationPoliciesAccessAppPolicyLink{
-				ID:         cf.F(fields.policyUUID),
-				Precedence: cf.F(int64(0)),
-			},
-		}),
-		SelfHostedDomains: cf.F(fields.selfHostedDomains),
-		Tags:              cf.F(fields.tags),
+		Domain:            cf.F(accessApplicationPrimaryDomain(domains)),
+		Type:              cf.F(zero_trust.ApplicationTypeSelfHosted),
+		Name:              cf.F(in.Name),
+		Policies:          cf.F(policies),
+		SelfHostedDomains: cf.F(accessApplicationSelfHostedDomains(domains)),
+		Tags:              cf.F(in.Tags),
 	}
 }
 
 func accessUpdateBody(in AccessApplicationInput) zero_trust.AccessApplicationUpdateParamsBodyUnion {
-	fields := commonAccessFields(in)
-	return zero_trust.AccessApplicationUpdateParamsBodySelfHostedApplication{
-		Domain: cf.F(fields.domain),
-		Type:   cf.F(zero_trust.ApplicationTypeSelfHosted),
-		Name:   cf.F(fields.name),
-		Policies: cf.F([]zero_trust.AccessApplicationUpdateParamsBodySelfHostedApplicationPolicyUnion{
-			zero_trust.AccessApplicationUpdateParamsBodySelfHostedApplicationPoliciesAccessAppPolicyLink{
-				ID:         cf.F(fields.policyUUID),
-				Precedence: cf.F(int64(0)),
-			},
-		}),
-		SelfHostedDomains: cf.F(fields.selfHostedDomains),
-		Tags:              cf.F(fields.tags),
+	domains := accessApplicationInputDomains(in)
+	policyUUIDs := accessApplicationInputPolicyUUIDs(in)
+	policies := make([]zero_trust.AccessApplicationUpdateParamsBodySelfHostedApplicationPolicyUnion, 0, len(policyUUIDs))
+	for idx, policyUUID := range policyUUIDs {
+		policies = append(policies, zero_trust.AccessApplicationUpdateParamsBodySelfHostedApplicationPoliciesAccessAppPolicyLink{
+			ID:         cf.F(policyUUID),
+			Precedence: cf.F(int64(idx)),
+		})
 	}
-}
-
-type accessCommonFields struct {
-	domain            string
-	name              string
-	policyUUID        string
-	selfHostedDomains []zero_trust.SelfHostedDomainsParam
-	tags              []string
-}
-
-func commonAccessFields(in AccessApplicationInput) accessCommonFields {
-	return accessCommonFields{
-		domain:            in.Domain,
-		name:              in.Name,
-		policyUUID:        in.PolicyUUID,
-		selfHostedDomains: []zero_trust.SelfHostedDomainsParam{in.Domain},
-		tags:              in.Tags,
+	return zero_trust.AccessApplicationUpdateParamsBodySelfHostedApplication{
+		Domain:            cf.F(accessApplicationPrimaryDomain(domains)),
+		Type:              cf.F(zero_trust.ApplicationTypeSelfHosted),
+		Name:              cf.F(in.Name),
+		Policies:          cf.F(policies),
+		SelfHostedDomains: cf.F(accessApplicationSelfHostedDomains(domains)),
+		Tags:              cf.F(in.Tags),
 	}
 }
 
 func accessAppFromListResponse(item zero_trust.AccessApplicationListResponse) AccessApplication {
-	policyUUIDs := accessApplicationListPolicyIDs(item.Policies)
+	domains := accessApplicationDomainsFromAny(item.SelfHostedDomains)
+	policyUUIDs := accessApplicationPolicyIDs(item.Policies)
 	tags := stringSlice(item.Tags)
 	if selfHosted, ok := item.AsUnion().(zero_trust.AccessApplicationListResponseSelfHostedApplication); ok {
-		policyUUIDs = selfHostedListPolicyIDs(selfHosted.Policies)
+		domains = accessApplicationDomainsFromAny(selfHosted.SelfHostedDomains)
+		policyUUIDs = accessApplicationPolicyIDs(selfHosted.Policies)
 		tags = append([]string(nil), selfHosted.Tags...)
+	}
+	if len(domains) == 0 && item.Domain != "" {
+		domains = []string{item.Domain}
+	}
+	primaryDomain := item.Domain
+	if primaryDomain == "" {
+		primaryDomain = accessApplicationPrimaryDomain(domains)
 	}
 	return AccessApplication{
 		ID:          item.ID,
 		Name:        item.Name,
-		Domain:      item.Domain,
+		Domain:      primaryDomain,
+		Domains:     domains,
 		PolicyUUIDs: policyUUIDs,
 		Tags:        tags,
 	}
 }
 
-func accessAppFromNewResponse(resp *zero_trust.AccessApplicationNewResponse, fallbackPolicyUUID string) *AccessApplication {
-	var policyUUIDs []string
-	if fallbackPolicyUUID != "" {
-		policyUUIDs = []string{fallbackPolicyUUID}
-	}
+func accessAppFromNewResponse(resp *zero_trust.AccessApplicationNewResponse) *AccessApplication {
+	domains := accessApplicationDomainsFromAny(resp.SelfHostedDomains)
+	policyUUIDs := accessApplicationPolicyIDs(resp.Policies)
 	tags := stringSlice(resp.Tags)
 	if selfHosted, ok := resp.AsUnion().(zero_trust.AccessApplicationNewResponseSelfHostedApplication); ok {
+		domains = accessApplicationDomainsFromAny(selfHosted.SelfHostedDomains)
+		policyUUIDs = accessApplicationPolicyIDs(selfHosted.Policies)
 		tags = append([]string(nil), selfHosted.Tags...)
+	}
+	if len(domains) == 0 && resp.Domain != "" {
+		domains = []string{resp.Domain}
+	}
+	primaryDomain := resp.Domain
+	if primaryDomain == "" {
+		primaryDomain = accessApplicationPrimaryDomain(domains)
 	}
 	return &AccessApplication{
 		ID:          resp.ID,
 		Name:        resp.Name,
-		Domain:      resp.Domain,
+		Domain:      primaryDomain,
+		Domains:     domains,
 		PolicyUUIDs: policyUUIDs,
 		Tags:        tags,
 	}
 }
 
-func accessAppFromUpdateResponse(resp *zero_trust.AccessApplicationUpdateResponse, fallbackPolicyUUID string) *AccessApplication {
-	var policyUUIDs []string
-	if fallbackPolicyUUID != "" {
-		policyUUIDs = []string{fallbackPolicyUUID}
-	}
+func accessAppFromUpdateResponse(resp *zero_trust.AccessApplicationUpdateResponse) *AccessApplication {
+	domains := accessApplicationDomainsFromAny(resp.SelfHostedDomains)
+	policyUUIDs := accessApplicationPolicyIDs(resp.Policies)
 	tags := stringSlice(resp.Tags)
 	if selfHosted, ok := resp.AsUnion().(zero_trust.AccessApplicationUpdateResponseSelfHostedApplication); ok {
+		domains = accessApplicationDomainsFromAny(selfHosted.SelfHostedDomains)
+		policyUUIDs = accessApplicationPolicyIDs(selfHosted.Policies)
 		tags = append([]string(nil), selfHosted.Tags...)
+	}
+	if len(domains) == 0 && resp.Domain != "" {
+		domains = []string{resp.Domain}
+	}
+	primaryDomain := resp.Domain
+	if primaryDomain == "" {
+		primaryDomain = accessApplicationPrimaryDomain(domains)
 	}
 	return &AccessApplication{
 		ID:          resp.ID,
 		Name:        resp.Name,
-		Domain:      resp.Domain,
+		Domain:      primaryDomain,
+		Domains:     domains,
 		PolicyUUIDs: policyUUIDs,
 		Tags:        tags,
 	}
 }
 
-func accessApplicationListPolicyIDs(value any) []string {
+func accessApplicationPolicyIDs(value any) []string {
 	switch policies := value.(type) {
 	case []zero_trust.AccessApplicationListResponseSelfHostedApplicationPolicy:
 		return selfHostedListPolicyIDs(policies)
+	case []zero_trust.AccessApplicationNewResponseSelfHostedApplicationPolicy:
+		return selfHostedNewPolicyIDs(policies)
+	case []zero_trust.AccessApplicationUpdateResponseSelfHostedApplicationPolicy:
+		return selfHostedUpdatePolicyIDs(policies)
+	case []zero_trust.AccessApplicationGetResponseSelfHostedApplicationPolicy:
+		return selfHostedGetPolicyIDs(policies)
 	default:
 		return nil
 	}
 }
 
+func accessApplicationDomainsFromAny(value any) []string {
+	switch domains := value.(type) {
+	case []string:
+		return append([]string(nil), domains...)
+	default:
+		return nil
+	}
+}
+
+func accessApplicationSelfHostedDomains(domains []string) []zero_trust.SelfHostedDomainsParam {
+	if len(domains) == 0 {
+		return nil
+	}
+	out := make([]zero_trust.SelfHostedDomainsParam, 0, len(domains))
+	for _, domain := range domains {
+		out = append(out, zero_trust.SelfHostedDomainsParam(domain))
+	}
+	return out
+}
+
 func selfHostedListPolicyIDs(policies []zero_trust.AccessApplicationListResponseSelfHostedApplicationPolicy) []string {
+	out := make([]string, 0, len(policies))
+	for _, policy := range policies {
+		if policy.ID != "" {
+			out = append(out, policy.ID)
+		}
+	}
+	return out
+}
+
+func selfHostedNewPolicyIDs(policies []zero_trust.AccessApplicationNewResponseSelfHostedApplicationPolicy) []string {
+	out := make([]string, 0, len(policies))
+	for _, policy := range policies {
+		if policy.ID != "" {
+			out = append(out, policy.ID)
+		}
+	}
+	return out
+}
+
+func selfHostedUpdatePolicyIDs(policies []zero_trust.AccessApplicationUpdateResponseSelfHostedApplicationPolicy) []string {
+	out := make([]string, 0, len(policies))
+	for _, policy := range policies {
+		if policy.ID != "" {
+			out = append(out, policy.ID)
+		}
+	}
+	return out
+}
+
+func selfHostedGetPolicyIDs(policies []zero_trust.AccessApplicationGetResponseSelfHostedApplicationPolicy) []string {
 	out := make([]string, 0, len(policies))
 	for _, policy := range policies {
 		if policy.ID != "" {
