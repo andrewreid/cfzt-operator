@@ -185,7 +185,7 @@ var _ = Describe("CloudflareAccessPolicy Controller", func() {
 		Expect(updated.Status.ObservedRulesHash).To(Equal(oldHash))
 	})
 
-	It("TestAccessPolicyReferencedByPopulated", func() {
+	It("TestAccessPolicyReferencedByNestedApplications", func() {
 		policy := createAccessPolicy(ctx, "ref-policy", "")
 		first := createPolicyRefExposure(ctx, "ref-one", policy.Name)
 		second := createPolicyRefExposure(ctx, "ref-two", policy.Name)
@@ -424,8 +424,14 @@ func createPolicyRefExposure(ctx context.Context, name, policyName string) *cfzt
 				Port:     8096,
 			},
 			Access: cfztv1alpha1.AccessSpec{
-				Enabled:   true,
-				PolicyRef: cfztv1alpha1.AccessPolicyRef{Name: policyName},
+				Enabled: true,
+				Applications: []cfztv1alpha1.AccessApplicationTarget{{
+					Name:    "root",
+					Domains: []cfztv1alpha1.AccessApplicationDomain{cfztv1alpha1.AccessApplicationDomain(name + ".example.com")},
+					Policies: []cfztv1alpha1.AccessApplicationPolicyBinding{{
+						PolicyRef: cfztv1alpha1.AccessPolicyRef{Name: policyName},
+					}},
+				}},
 			},
 		},
 	}

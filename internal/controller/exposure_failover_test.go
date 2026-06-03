@@ -342,6 +342,109 @@ var _ = Describe("CloudflareExposure failover role gate", func() {
 		Expect(records[0].Content).To(Equal(cfTunnel.Status.TunnelId + ".cfargotunnel.com"))
 	})
 
+	It("TestFailoverPrimaryWritesFullAccessSetAndStandbyWritesNone", func() {
+		tunnel := readyTunnel(ctx, tunnelReconciler, "fo-access", "fo-access")
+		exposure := createFailoverExposure(ctx, "fo-access-app", tunnel.Name, "fo-access.example.com", "fo-access-grp")
+		exposure.Spec.Access.Enabled = true
+		exposure.Spec.Access.Applications = []cfztv1alpha1.AccessApplicationTarget{
+			{
+				Name:    "root",
+				Domains: []cfztv1alpha1.AccessApplicationDomain{cfztv1alpha1.AccessApplicationDomain("fo-access.example.com")},
+				Policies: []cfztv1alpha1.AccessApplicationPolicyBinding{{
+					PolicyRef: cfztv1alpha1.AccessPolicyRef{UUID: "00000000-0000-4000-8000-000000000001"},
+				}},
+			},
+			{
+				Name: "admin",
+				Domains: []cfztv1alpha1.AccessApplicationDomain{
+					cfztv1alpha1.AccessApplicationDomain("fo-access.example.com/admin"),
+				},
+				Policies: []cfztv1alpha1.AccessApplicationPolicyBinding{{
+					PolicyRef: cfztv1alpha1.AccessPolicyRef{UUID: "00000000-0000-4000-8000-000000000001"},
+				}},
+			},
+		}
+		Expect(k8sClient.Update(ctx, exposure)).To(Succeed())
+		seedLease("fo-access-grp", sitePeer, "peer-tunnel", testNow.Add(-1*time.Second))
+
+		reconcileExposure(ctx, exposureRec, exposure)
+
+		current := fetchExposure(ctx, exposure.Name)
+		Expect(current.Status.Failover.Role).To(Equal(string(dr.RolePrimary)))
+		Expect(current.Status.Cloudflare.AccessApplications).To(HaveLen(2))
+		apps, err := fakeCF.AccessApplications().List(ctx, exposure.Spec.Hostname)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(apps).To(HaveLen(2))
+
+		standbyRec := &CloudflareExposureReconciler{
+			Base: Base{
+				Client:              indexedClient,
+				Scheme:              indexedClient.Scheme(),
+				NewCloudflareClient: newFakeCloudflareClient(indexedClient, fakeCF),
+				Recorder:            record.NewFakeRecorder(1024),
+			},
+			SiteID: sitePeer,
+			Now:    func() time.Time { return testNow },
+		}
+		seedLeasePeerOverwrite("fo-access-grp", siteSelf, fetchTunnel(ctx, tunnel.Name).Status.TunnelId, testNow.Add(5*time.Minute))
+		reconcileExposure(ctx, standbyRec, fetchExposure(ctx, exposure.Name))
+
+		refreshed := fetchExposure(ctx, exposure.Name)
+		Expect(refreshed.Status.Failover.Role).To(Equal(string(dr.RoleStandby)))
+		appsAfter, err := fakeCF.AccessApplications().List(ctx, exposure.Spec.Hostname)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(appsAfter).To(HaveLen(2))
+	})
+
+	It("TestFailoverPrimaryDeletesRemovedGroupOwnedAppWithoutLocalStatus", func() {
+		tunnel := readyTunnel(ctx, tunnelReconciler, "fo-remove-app", "fo-remove-app")
+		exposure := createFailoverExposure(ctx, "fo-remove-app", tunnel.Name, "fo-remove-app.example.com", "fo-remove-app-grp")
+		exposure.Spec.Access.Enabled = true
+		exposure.Spec.Access.Applications = []cfztv1alpha1.AccessApplicationTarget{
+			{
+				Name:    "root",
+				Domains: []cfztv1alpha1.AccessApplicationDomain{cfztv1alpha1.AccessApplicationDomain("fo-remove-app.example.com")},
+				Policies: []cfztv1alpha1.AccessApplicationPolicyBinding{{
+					PolicyRef: cfztv1alpha1.AccessPolicyRef{UUID: "00000000-0000-4000-8000-000000000001"},
+				}},
+			},
+			{
+				Name: "admin",
+				Domains: []cfztv1alpha1.AccessApplicationDomain{
+					cfztv1alpha1.AccessApplicationDomain("fo-remove-app.example.com/admin"),
+				},
+				Policies: []cfztv1alpha1.AccessApplicationPolicyBinding{{
+					PolicyRef: cfztv1alpha1.AccessPolicyRef{UUID: "00000000-0000-4000-8000-000000000001"},
+				}},
+			},
+		}
+		Expect(k8sClient.Update(ctx, exposure)).To(Succeed())
+		seedLease("fo-remove-app-grp", sitePeer, "peer-tunnel", testNow.Add(-1*time.Second))
+
+		reconcileExposure(ctx, exposureRec, exposure)
+
+		current := fetchExposure(ctx, exposure.Name)
+		Expect(current.Status.Failover.Role).To(Equal(string(dr.RolePrimary)))
+		apps, err := fakeCF.AccessApplications().List(ctx, exposure.Spec.Hostname)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(apps).To(HaveLen(2))
+
+		current.Status.Cloudflare.AccessApplications = nil
+		Expect(k8sClient.Status().Update(ctx, current)).To(Succeed())
+		current.Spec.Access.Applications = current.Spec.Access.Applications[:1]
+		Expect(k8sClient.Update(ctx, current)).To(Succeed())
+
+		reconcileExposure(ctx, exposureRec, current)
+
+		refreshed := fetchExposure(ctx, exposure.Name)
+		Expect(refreshed.Status.Cloudflare.AccessApplications).To(HaveLen(1))
+		Expect(refreshed.Status.Cloudflare.AccessApplications[0].Name).To(Equal("root"))
+		appsAfter, err := fakeCF.AccessApplications().List(ctx, exposure.Spec.Hostname)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(appsAfter).To(HaveLen(1))
+		Expect(appsAfter[0].Name).To(Equal("fo-remove-app-root-cfzt"))
+	})
+
 	It("TestFailoverReturnedPrimaryStandsDown", func() {
 		tunnel := readyTunnel(ctx, tunnelReconciler, "fo-return", "fo-return")
 		exposure := createFailoverExposure(ctx, "fo-return-app", tunnel.Name, "fo-return.example.com", "fo-return-grp")

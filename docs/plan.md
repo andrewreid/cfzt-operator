@@ -2,13 +2,15 @@
 
 ## 1. Context
 
-Operational plan for shipping the cfzt-operator MVP in five product slices (Tunnel/connector → Exposure → sourceRef derivation → managed Access policies → private network CIDR routes), plus an interstitial engineering cleanup slice and a DR-failover slice. Source of truth for architecture, decisions D1–D26, CRD shapes, RBAC, and DoD lists is `spec.md`. Operating handbook (bootstrap, commands, delegation, code rules) is `AGENTS.md`. This plan turns those into ordered, single-session subtasks with cited spec sections and test names.
+Operational plan for shipping the cfzt-operator MVP in five original product slices (Tunnel/connector → Exposure → sourceRef derivation → managed Access policies → private network CIDR routes), plus an interstitial engineering cleanup slice, a DR-failover slice, and a path-scoped Access applications slice. Source of truth for architecture, decisions D1–D27, CRD shapes, RBAC, and DoD lists is `spec.md`. Operating handbook (bootstrap, commands, delegation, code rules) is `AGENTS.md`. This plan turns those into ordered, single-session subtasks with cited spec sections and test names.
 
 Slice 4 (`CloudflareAccessPolicy` CRD, D24) added under `## 3. Slice plan` after Slice 3 ships — managed Access policies are now in scope per `spec.md ## Decisions` D24.
 
 Slice 5 (`CloudflareTunnelRoute` CRD, D25) added under `## 3. Slice plan` after Slice 4 ships — private network CIDR routes are now in scope per `spec.md ## Decisions` D25.
 
 Slice 7 — DR failover (≡ `spec.md` Slice 6, D26) added under `## 3. Slice plan` — active-passive multi-cluster DR via per-Exposure `spec.failover` + a Cloudflare DNS TXT lease is now in scope per `spec.md ## Decisions` D26 (which supersedes the old "multi-cluster out of scope" D9). The plan's "Slice 6" label is the engineering-only Pre-MVP cleanup; the DR product slice is "Slice 7" here to avoid a local numbering collision (spec calls it Slice 6).
+
+Slice 8a/8b — Path-scoped Access applications (≡ `spec.md` Slice 7a/7b, D27) added under `## 3. Slice plan` — `CloudflareExposure.spec.access.applications[]` becomes the only Access-enabled shape, then one Exposure can own multiple Cloudflare Access self-hosted applications for the same hostname, including path-specific applications with different ordered policy bindings. DNS and tunnel ingress remain one-hostname-per-Exposure.
 
 Not covered: post-MVP work (annotation UX, Ingress source, WARP, Gateway, OLM, multi-cluster active-active / federation, additional Access rule types beyond Slice 4 subset). Decisions are not re-derived here — see `spec.md ## Decisions`.
 
@@ -293,11 +295,6 @@ Completed on 2026-05-22:
 
 Completed on 2026-06-02:
 - Slice 7 (DR failover, spec Slice 6, D26) subtasks 1-10:
-  - **Note:** the original subtask 3/4/7 bullets below described a
-    "CAS-by-record_id" lease that the implementation no longer uses. They
-    are **superseded by the "Slice 7 review remediation" entry dated
-    2026-06-02 further down** (best-effort lease, no CAS). The bullets here
-    have been corrected in place to match the shipped code.
   - Subtask 1: `--site-id` flag with non-empty boot validation
     (`validateSiteID`), Helm `site.id` value (default `cfzt-default-site`)
     rendered into the deployment, and `CloudflareExposureReconciler.SiteID`.
@@ -307,21 +304,22 @@ Completed on 2026-06-02:
     `leaseRenewedAt`, `lastRoleTransitionAt`, `observedPrimaryTunnelId`),
     `Role` printcolumn, regenerated CRD/deepcopy, synced chart.
   - Subtask 3: `internal/cloudflare` DNS `Create` / `Update` are TXT-aware
-    (share `dnsRecordBody` with CNAME). No CAS / conditional-write primitive —
+    (share `dnsRecordBody` with CNAME). No conditional-write primitive —
     Cloudflare DNS has none; the fake models real semantics (`Create` is
     non-atomic and can yield duplicate TXT). Coordination lives in the
     controller + `internal/dr`, not the client.
   - Subtask 4: pure `internal/dr` package — lease serde (`v=1 site=… tunnel=…
     exp=… renewed=…`), symmetric acquire jitter, deterministic duplicate-lease
     resolution (`Resolve`: unexpired/lowest-site-id wins), and the `Decide`
-    role state machine (Wait / Acquire / Renew / SplitBrain). No CAS retry loop.
+    role state machine (Wait / Acquire / Renew / SplitBrain).
   - Subtask 5: `ownership.FromFailoverGroup(group)` so failover Exposures tag
-    the shared Access app + CNAME with the group ID; non-failover guard
+    the shared Access application set + CNAME with the group ID; non-failover guard
     unchanged.
   - Subtask 6: `naming.FailoverLeaseTXTName(group, zone)` →
     `_cfzt-lease.<hash8(group)>.<zone>`.
   - Subtask 7: Exposure controller role gate before the shared Access/DNS
-    writes — Standby early-returns, Primary writes + renews at leaseSeconds/2
+    writes — Standby early-returns, Primary writes the shared Access application
+    set + DNS and renews at leaseSeconds/2
     with read-back verification, duplicate-lease resolution, split-brain /
     lease-lost demotion, `FailoverRequiresManagedDNS` on `dns.manage:false`.
     force-promote is a one-shot token vs `status.lastForcePromoteToken` (the
@@ -329,11 +327,14 @@ Completed on 2026-06-02:
     Promoted/Demoted/LeaseAcquired/Renewed/Lost/Conflict/SplitBrain/ForcePromoted
     and metrics `cfzt_failover_role` / `_lease_renew_total` / `_promotion_total`
     (labelled with `site_id`). Delete path proves live lease ownership before
-    tearing down shared resources, failing safe under ambiguity.
-  - Subtask 8: two-managers-in-one-process envtest (two namespaces, two
-    tunnels, shared group, distinct `--site-id`, one shared fake CF client) —
-    single Primary, lease handoff on renewer stop, returning-primary
-    self-demote, force-promote, group-ID mutation guard across sites.
+    tearing down shared resources, failing safe under ambiguity. Slice 8b extends
+    this from one Access app to the full path-scoped app set and must discover
+    group-owned apps, not just local status entries.
+  - Subtask 8: envtest coverage uses one reconciler plus seeded peer lease/DNS
+    state in one shared fake CF client — single Primary, peer handoff,
+    returning-primary self-demote, force-promote, duplicate-lease resolution,
+    group conflicts, default-site rejection, finalizer live-lease proof, and
+    group-ID mutation guard across sites.
   - Subtask 9: live `TestFailoverLifecycle` (one operator, peer simulated via
     the CF API) — acquire as Primary, self-demote on peer takeover,
     auto-promote on peer expiry, clean teardown; `hack/live-cloudflare-local.sh
@@ -343,51 +344,8 @@ Completed on 2026-06-02:
     chart already in sync; `make manifests generate` clean, `helm lint` clean,
     `go test ./...` green.
 
-Completed on 2026-06-02 (Slice 7 review remediation, PR #7):
-- Reshaped D26 from a false "CAS-by-record_id" claim to an honest
-  best-effort lease (Cloudflare DNS has no conditional write nor TXT
-  uniqueness). Spec + code now describe an optimistic, eventually-consistent
-  coordination hint whose safety rests on the data plane (single CNAME → one
-  tunnel target; a failed primary drops its cloudflared edge connection),
-  not on lease atomicity. User signed off on the D26 amendment.
-- Deleted `CreateCAS`/`UpdateCAS`/`ErrDNSCASConflict`; `Create`/`Update` are
-  now TXT-aware and the fake models real semantics (duplicate TXT allowed).
-- `internal/dr` dropped `CASRetry`; added `Resolve` — deterministic
-  duplicate-lease tie-break (unexpired, lowest site-id wins; winner deletes
-  others, loser deletes own). The role gate detects `>1` group-owned record,
-  resolves, requeues, and read-back-verifies every acquire/renew, bounding
-  the dual-writer window to ~one reconcile; foreign/unparseable → fail closed.
-- force-promote is now a one-shot token vs `status.failover.lastForcePromoteToken`;
-  the controller records the honored token and never mutates the annotation
-  (GitOps replay-safe).
-- Reject `spec.failover` on the chart-default `--site-id`
-  (`FailoverRequiresDistinctSiteID`); reject same-cluster duplicate
-  `spec.failover.group` (`FailoverGroupConflict`, cluster-wide — see round 3).
-- Deletion proves live lease ownership (`holdsLiveLease`) before tearing down
-  the shared CNAME/Access, never the stale persisted role.
-- Metrics gained a `site_id` label. New envtests:
-  `TestFailoverDuplicateLeaseResolves`, `TestFailoverGroupConflict`,
-  `TestFailoverRequiresDistinctSiteID`, `TestFailoverDeleteRequiresLiveOwnership`,
-  force-promote replay guard, plus `internal/dr` `Resolve` table tests.
-- Review round 2 (review 4409975606): the finalizer ownership proof now
-  fails safe under ambiguity. `holdsLiveLease` returns true only when exactly
-  one group-owned lease exists and names this site; `deleteOwnedLeaseIfPresent`
-  removes every record this site owns (all duplicates, never a peer's). The
-  duplicate-unaware `readLease`/`errLeaseForeign` were removed. New envtest
-  `TestFailoverDeleteWithDuplicateLeasesFailsSafe`.
-- Review round 3: the round-1 namespace-scoped group guard was a production
-  hole — the lease name has no namespace and all Exposures in a cluster share
-  one `--site-id`, so two same-group members in one cluster share a lease and
-  each read it as self-owned. Reverted to **cluster-wide** group uniqueness
-  (`hasFailoverGroupConflict` no longer filters by namespace; spec wording back
-  to "same cluster"). Deleted `exposure_failover_twosite_test.go` (it
-  co-located two same-group CRs in one apiserver, which the invariant forbids);
-  its scenarios are covered by the single-reconciler + seeded-peer suite, and
-  the one unique bit (a Primary adopting a peer-created group-owned CNAME) is
-  retained as `TestFailoverPrimaryAdoptsPeerGroupCNAME`.
-
-Next: Slice 7 complete (review remediation landed). MVP slices 1-7 in;
-remaining work is release hardening and CI on PR #7.
+Next: MVP slices 1-7 are in. Remaining work is release hardening, CI, and the
+new Slice 8 path-scoped Access application work below.
 
 ## 3. Slice plan
 
@@ -589,7 +547,7 @@ Subtask-derived additions: `TestExposureCRDValidationSliceThreeRelaxed` also pas
 
 ### Slice 4 — Managed Access policies
 
-Per `spec.md ## Implementation slices ### Slice 4` (D24). Outcome: `CloudflareAccessPolicy` CR creates and maintains a reusable account-level Cloudflare Access policy. `CloudflareExposure.spec.access.policyRef.name` binds an Exposure to a managed policy as an alternative to `uuid`.
+Per `spec.md ## Implementation slices ### Slice 4` (D24). Outcome: `CloudflareAccessPolicy` CR creates and maintains a reusable account-level Cloudflare Access policy. Slice 4 originally binds `CloudflareExposure.spec.access.policyRef.name` as an alternative to `uuid`; Slice 8a/D27 later removes that top-level Exposure field and moves the same `{uuid, name}` ref shape under `spec.access.applications[].policies[].policyRef`.
 
 **Subtasks**
 
@@ -601,7 +559,7 @@ Per `spec.md ## Implementation slices ### Slice 4` (D24). Outcome: `CloudflareAc
 
 2. **Extend Exposure CRD: `policyRef.name` + relaxed CEL.**
    - Files: `api/v1alpha1/cloudflareexposure_types.go`.
-   - Implements: `spec.md ## CRD model` Exposure schema update (`policyRef.name`) + `## CRD validation` rewrite of the access CEL rule to exactly-one-of {uuid, name} when `access.enabled: true`.
+   - Implements: `spec.md ## CRD model` Exposure schema update (`policyRef.name`) + `## CRD validation` rewrite of the access CEL rule to exactly-one-of {uuid, name} when `access.enabled: true`. Superseded by Slice 8a/D27 for new operator versions.
    - Tests: `TestExposurePolicyRefOneOfValidation` (uuid alone OK; name alone OK; both → reject; neither → reject when enabled; neither → OK when disabled).
    - Regenerate manifests + commit.
 
@@ -630,7 +588,7 @@ Per `spec.md ## Implementation slices ### Slice 4` (D24). Outcome: `CloudflareAc
    - Implements: D21 finalizer on `CloudflareAccessPolicy`; `spec.md ## Ownership and deletion semantics` policy deletion rule. Mutation guard: only delete CF policy when `source-uid` tag matches (fall back to ID equality if SDK has no tag field).
    - Tests: `TestAccessPolicyFinalizerBlockedByExposures`, `TestAccessPolicyFinalizerUnblocks`.
 
-8. **Exposure controller: resolve `policyRef.name` → bind via `Applications.Policies.Update`.**
+8. **Exposure controller: resolve top-level `policyRef.name` → bind via `Applications.Policies.Update`.**
    - Files: extend `internal/controller/cloudflareexposure_controller.go`; add `policyToExposures` watch map.
    - Implements: `spec.md ## CRD model` Exposure responsibility 3 rewrite (uuid OR name resolution), `Reason=PolicyNotReady` when target Policy CR exists but is not yet `Ready=True` or `status.policyId` empty. D20 Slice 4 addition: Exposure `.Watches(&CloudflareAccessPolicy{}, policyToExposures)`.
    - Tests: `TestExposurePolicyRefName` (happy path), `TestExposurePolicyRefNamePolicyNotReady`, `TestExposurePolicyRefNameMissingPolicyCR` (→ `Reason=PolicyNotFound`).
@@ -649,7 +607,7 @@ Per `spec.md ## Implementation slices ### Slice 4` (D24). Outcome: `CloudflareAc
 
 - `kubectl apply` of a `CloudflareAccessPolicy` creates a CF Access policy, populates `status.policyId`, sets `Ready=True`.
 - A pre-existing CF policy with name collision and no local ID record is recovered only when its full Cloudflare policy shape exactly matches the CR; mismatches go `Ready=False, Reason=ForeignPolicy`, no mutation of the foreign policy.
-- An Exposure with `policyRef.name` binds the policy ID once the Policy CR becomes ready.
+- An Exposure with Slice 4 top-level `policyRef.name` binds the policy ID once the Policy CR becomes ready. Slice 8a migrates this to nested `applications[].policies[].policyRef.name`.
 - `kubectl delete` of a Policy CR with referencing Exposures is blocked (`Reason=BlockedByExposures`); succeeds once references are removed.
 - Editing `spec.rules` on a Policy CR rewrites the CF policy and propagates a reconcile to all referencing Exposures.
 - envtest tests pass: `TestAccessPolicyCreate`, `TestAccessPolicyExactMatchOrphanRecovery`, `TestAccessPolicyForeignRefuses`, `TestAccessPolicyRulesDrift`, `TestAccessPolicyFinalizerBlockedByExposures`, `TestAccessPolicyFinalizerUnblocks`, `TestExposurePolicyRefName`, `TestExposurePolicyRefNamePolicyNotReady`, `TestExposurePolicyRefOneOfValidation`.
@@ -1152,18 +1110,16 @@ Subtask-derived additions: `TestEnqueueNamedExtracts`,
 
 ### Slice 7 — DR failover (spec Slice 6, D26)
 
-> **⚠️ SUPERSEDED PLANNING TEXT.** This block is the *original* pre-implementation design and still describes a "CAS-by-record_id" lease (`CreateCAS` / `UpdateCAS` / "CAS Update" / "fake models CAS" / "CAS retry loop" / two-managers-in-process envtest). **None of that shipped.** Cloudflare DNS has no conditional-write precondition or TXT uniqueness, so the lease was implemented as a *best-effort, eventually-consistent* coordination record with read-back verification + deterministic duplicate resolution (`internal/dr.Resolve`), a cluster-wide group-uniqueness guard, and single-reconciler + seeded-peer envtests. For the as-built behaviour see **`## 2. Current state` → the Slice 7 review-remediation entries (rounds 1–3)** and `spec.md ## DR failover`. The text below is retained only as a historical planning record.
-
 > **Numbering note.** `spec.md ## Implementation slices` labels this **Slice 6 — DR failover** (the next *product* slice after Slice 5 routes). This plan already used "Slice 6" for the interstitial engineering-only "Pre-MVP cleanup" slice above, so the plan calls the DR work **Slice 7** to avoid a local collision. They are the same body of work: plan Slice 7 ≡ spec Slice 6.
 
 Per `spec.md ## Implementation slices ### Slice 6` and `spec.md ## DR failover` (D26). Outcome: `CloudflareExposure.spec.failover` lets the same Exposure, applied to two clusters (each with its own `--site-id` and its own `CloudflareTunnel`), cooperate over one hostname via a Cloudflare DNS TXT lease. Exactly one cluster is Primary and serves traffic; the standby auto-promotes on lease expiry; a recovered former primary stands down without thrashing CF state.
 
-This is the **largest reconciliation-semantics change since Slice 2** (new role gate at the top of the Exposure reconcile, new cross-cluster ownership identity, new CAS write path). Per `AGENTS.md ## Delegation Policy` it is orchestrator-led: architecture model plans the lease/role state machine and the ownership-tag relaxation, scoped coders implement each package, reviewer audits the finalizer/promotion/demotion paths before merge.
+This is the **largest reconciliation-semantics change since Slice 2**: it adds a role gate at the top of the Exposure reconcile, cross-cluster ownership identity, best-effort TXT lease handling, and live-lease-verified deletion. It is already implemented; this slice records the current code shape and the tests that must stay green while Slice 8 builds on it.
 
 **Preconditions / dependencies**
 
-- Builds on Slice 2 (Exposure controller: DNS CNAME + Access app writes, ownership tagging) and the Slice 6 cleanup (centralised ownership-tag handling in `internal/ownership`, shared reconciler `Base`). Land the cleanup first — the role gate and the `FromFailoverGroup` ownership path are far easier on the post-cleanup reconciler shape.
-- Verify the `cloudflare-go/v4` DNS record read exposes `record_id` and the update path can be conditioned on it (Cloudflare MCP at implementation time). If the SDK cannot express a record_id precondition directly, emulate optimistic concurrency by re-reading and comparing `record_id` immediately before the write inside the rate-limited client — isolate the choice inside `internal/cloudflare/dns.go`.
+- Builds on Slice 2 (Exposure controller: DNS CNAME + Access app writes, ownership tagging) and the Slice 6 cleanup (centralised ownership-tag handling in `internal/ownership`, shared reconciler `Base`).
+- Cloudflare DNS has no conditional-write precondition and no TXT uniqueness guarantee. The implementation treats the lease as a best-effort coordination record, then bounds races with read-back verification, deterministic duplicate resolution, and fail-closed ambiguity handling.
 
 **Subtasks**
 
@@ -1177,15 +1133,15 @@ This is the **largest reconciliation-semantics change since Slice 2** (new role 
    - Implements: `spec.md ## CRD model` (CloudflareExposure failover fields), `## CRD validation` (`spec.failover.group` RFC 1123 label min 3 / max 63 required when block present; `spec.failover.leaseSeconds` default 60 / min 30 / max 600), `Role` printcolumn.
    - Tests: CRD validation cases (good group, too-short group, bad chars, leaseSeconds bounds, group required when block present); deepcopy round-trip. Run `make manifests generate` + `make helm-sync-crds`; commit generated output.
 
-3. **`internal/cloudflare` DNS: record_id + CAS Update; fake models CAS.**
+3. **`internal/cloudflare` DNS: TXT-aware create/update/list.**
    - Files: `internal/cloudflare/dns.go`, `client.go`, `fake.go`, `real.go`.
-   - Implements: surface DNS `record_id` on list/get; add a CAS-capable Update (update conditioned on `record_id`). `fake.go` models CAS-by-record_id over shared in-memory CF state so two managers in one test process race realistically.
-   - Tests: `TestFakeDNSRecordIDStable`, `TestFakeDNSCASUpdateRejectsStaleRecordID`, `TestFakeDNSCASCreateConflict`.
+   - Implements: `Create` / `Update` support TXT records as well as CNAMEs. `record_id` is only the address for update/delete of a record just observed; it is not treated as a concurrency precondition. The fake allows duplicate TXT records so the controller tests real Cloudflare behaviour.
+   - Tests: `TestFakeDNSRecordIDStable`, duplicate TXT create/list coverage through the failover controller tests.
 
-4. **`internal/dr/` package: lease, CAS, role state machine.**
-   - Files: `internal/dr/lease.go` (parse/serialise `v=1 site=… tunnel=… exp=… renewed=…`, record-name hashing `_cfzt-lease.<hash8(group)>.<zone>`), `internal/dr/cas.go` (CAS retry loop, bounded backoff + jitter, `LeaseConflict` after N attempts), `internal/dr/role.go` (role state machine `Unknown→Standby→Primary→Standby`, renewal cadence `leaseSeconds/2`).
-   - Implements: `spec.md ## DR failover` (Lease record, CAS protocol, Role state machine, Split-brain bounding).
-   - Tests: `TestFailoverLeaseAcquire`, `TestFailoverLeaseRenew`, `TestFailoverCASConflictRetries`, lease parse/serialise round-trip, record-name hashing stable, jitter within bounds.
+4. **`internal/dr/` package: lease, duplicate resolution, role state machine.**
+   - Files: `internal/dr/lease.go` (parse/serialise `v=1 site=… tunnel=… exp=… renewed=…`), `internal/dr/resolve.go` (deterministic duplicate winner), `internal/dr/role.go` (role actions Wait / Acquire / Renew / SplitBrain, renewal cadence `leaseSeconds/2`), `internal/dr/jitter.go`.
+   - Implements: `spec.md ## DR failover` (Lease record, best-effort write protocol, duplicate-lease resolution, role state machine, split-brain bounding).
+   - Tests: `TestLeaseParseSerialize`, `TestResolveDuplicateLeases`, `TestFailoverLeaseAcquire`, `TestFailoverLeaseRenew`, `TestFailoverAutoPromoteOnExpiry`, jitter bounds.
 
 5. **`internal/ownership`: failover-group identity.**
    - Files: `internal/ownership/owner.go`, `comment.go`, `accesstag.go`.
@@ -1199,18 +1155,18 @@ This is the **largest reconciliation-semantics change since Slice 2** (new role 
 
 7. **Exposure controller: role gate, promotion/demotion, events, metrics.**
    - Files: `internal/controller/cloudflareexposure_controller.go`, reuse `conditions.go`, `Base`.
-   - Implements: read lease + determine role at top of reconcile (before Access/DNS steps); Standby writes `status.failover` and early-returns (no shared Access/DNS writes) while still letting the owning Tunnel reconcile its connector; Primary writes Access + DNS with the group-ID `source-uid` and runs the renewal loop; auto-promote on `now > leaseExpiresAt + jitter`; `cfzt.reid.ee/force-promote` annotation forces a CAS acquire and is cleared after success; demotion + `SplitBrainDetected`; `Ready=False, Reason=FailoverRequiresManagedDNS` when the referenced Tunnel has `dns.manage: false`. Emit `PromotedToPrimary`, `DemotedToStandby`, `LeaseAcquired`, `LeaseRenewed`, `LeaseLost`, `LeaseConflict`, `SplitBrainDetected`, `ForcePromoted`. Wire metrics `cfzt_failover_role`, `cfzt_failover_lease_renew_total`, `cfzt_failover_promotion_total`.
+   - Implements: reject chart-default `--site-id` (`FailoverRequiresDistinctSiteID`) and same-cluster duplicate `spec.failover.group` (`FailoverGroupConflict`); read lease + determine role at top of reconcile (before Access/DNS steps); resolve `>1` group-owned TXT records deterministically; Standby writes `status.failover` and early-returns; Primary writes the full Access application set and DNS with the group-ID `source-uid`, renews at `leaseSeconds/2`, and read-back verifies; force-promote is a one-shot token compared with `status.failover.lastForcePromoteToken`, and the controller never mutates the annotation; demotion + `SplitBrainDetected`; `Ready=False, Reason=FailoverRequiresManagedDNS` when the referenced Tunnel has `dns.manage: false`; deletion proves live lease ownership before touching shared resources. Emit `PromotedToPrimary`, `DemotedToStandby`, `LeaseAcquired`, `LeaseRenewed`, `LeaseLost`, `LeaseConflict`, `SplitBrainDetected`, `ForcePromoted`. Wire metrics `cfzt_failover_role`, `cfzt_failover_lease_renew_total`, `cfzt_failover_promotion_total` with `site_id`.
    - Implements: `spec.md ## DR failover` (Role state machine, Operator behaviour matrix), `## Status and conditions` (new reasons), `## Observability` (events + metrics).
-   - Tests: `TestFailoverAutoPromoteOnExpiry`, `TestFailoverReturnedPrimaryStandsDown`, `TestFailoverForcePromoteAnnotation`, `TestFailoverDNSManagedRequired`.
+   - Tests: `TestFailoverAutoPromoteOnExpiry`, `TestFailoverReturnedPrimaryStandsDown`, `TestFailoverForcePromoteTokenReplayIgnored`, `TestFailoverDNSManagedRequired`, `TestFailoverRequiresDistinctSiteID`, `TestFailoverGroupConflict`, `TestFailoverDeleteRequiresLiveOwnership`, `TestFailoverDeleteWithDuplicateLeasesFailsSafe`.
 
-8. **envtest: two-manager-in-process coverage.**
+8. **envtest: failover controller coverage.**
    - Files: Exposure controller envtest suite.
-   - Implements: start two controller-runtime managers in one test process with distinct `--site-id`, both pointing at one shared fake `CloudflareClient` (CAS-by-record_id + shared CF state). Assert exactly one Primary, lease handoff on renewer stop, returning-primary self-demote, force-promote, mutation guards accept the group ID.
+   - Implements: one reconciler plus seeded peer lease/DNS state in the shared fake Cloudflare client. Assert Primary acquire, Standby, lease handoff on peer expiry, returning-primary self-demote, force-promote token replay guard, duplicate-lease resolution, default-site rejection, group conflict, finalizer live-lease ownership, and group-ID mutation guards.
    - Tests: all Slice 7 `TestFailover*` envtest cases above run green together.
 
 9. **Live Cloudflare smoke extension.**
    - Files: `test/live/cloudflare_smoke_test.go`, `hack/live-cloudflare-local.sh`, `.env.live.example`.
-   - Implements: `TestFailoverLifecycle` — two `--site-id` operator processes against a real Cloudflare account and a single test hostname; assert one Primary, auto-promote after killing the primary process, returning-primary self-demote, clean teardown of the lease TXT + shared CNAME + Access app. Packet routing is out of scope; CF-side lease + DNS + Access lifecycle is sufficient.
+   - Implements: `TestFailoverLifecycle` — one operator plus a peer simulated via the Cloudflare API against a real Cloudflare account and a single test hostname; assert Primary acquire, returning-primary self-demote on peer takeover, auto-promote on peer-lease expiry, and clean teardown of lease TXT + shared CNAME + Access application set. Packet routing is out of scope; CF-side lease + DNS + Access lifecycle is sufficient.
    - Tests: `TestFailoverLifecycle`; `TestCloudflarePreflight` unchanged (lease reuses the existing `Zone:DNS:Edit` scope).
 
 10. **RBAC + Helm sync.**
@@ -1220,24 +1176,165 @@ This is the **largest reconciliation-semantics change since Slice 2** (new role 
 **Definition of done** (from `spec.md ## Implementation slices ### Slice 6`):
 
 - Two clusters apply an identical `CloudflareExposure` with matching `spec.failover.group` and distinct `--site-id` → exactly one reports `status.failover.role == Primary`; the other `Standby` with `leaseOwner` set to the primary's site ID.
-- Stopping the primary's lease renewer for `leaseSeconds + jitter` → the standby auto-promotes; the CF Access app `source-uid` remains the failover-group ID; the public DNS CNAME flips to the new tunnel ID; `PromotedToPrimary` / `LeaseAcquired` events emit.
+- Stopping the primary's lease renewer for `leaseSeconds + jitter` → the standby auto-promotes; every CF Access app `source-uid` remains the failover-group ID; the public DNS CNAME flips to the new tunnel ID; `PromotedToPrimary` / `LeaseAcquired` events emit.
 - A returning former primary self-demotes (`DemotedToStandby`) on its first reconcile and performs no Cloudflare writes for the shared hostname.
-- `cfzt.reid.ee/force-promote=true` → immediate CAS acquire regardless of expiry; controller removes the annotation after success and emits `ForcePromoted`.
+- A new `cfzt.reid.ee/force-promote` token → immediate acquire regardless of expiry; controller records the honored token in `status.failover.lastForcePromoteToken`, never mutates the annotation, and emits `ForcePromoted`.
 - A failover Exposure on a `dns.manage: false` tunnel → `Ready=False, Reason=FailoverRequiresManagedDNS`, no lease written.
+- A failover Exposure on the chart-default `site.id` → `Ready=False, Reason=FailoverRequiresDistinctSiteID`, no lease written.
+- Two same-cluster failover Exposures sharing a `group` → both `Ready=False, Reason=FailoverGroupConflict`, no Cloudflare write.
+- Duplicate group-owned lease TXT records converge through deterministic resolution; unresolvable ambiguity fails closed (`Ready=False, Reason=LeaseConflict`).
 - Empty `--site-id` is a fatal manager start-up error.
-- envtest tests pass: `TestFailoverLeaseAcquire`, `TestFailoverLeaseRenew`, `TestFailoverAutoPromoteOnExpiry`, `TestFailoverReturnedPrimaryStandsDown`, `TestFailoverCASConflictRetries`, `TestFailoverForcePromoteAnnotation`, `TestFailoverOwnershipTagAcceptsGroupID`, `TestFailoverDNSManagedRequired`, `TestFailoverSiteIDMandatoryAtBoot`.
+- envtest tests pass: `TestFailoverLeaseAcquire`, `TestFailoverLeaseRenew`, `TestFailoverAutoPromoteOnExpiry`, `TestFailoverReturnedPrimaryStandsDown`, `TestFailoverDuplicateLeaseResolves`, `TestFailoverForcePromoteTokenReplayIgnored`, `TestFailoverGroupConflict`, `TestFailoverRequiresDistinctSiteID`, `TestFailoverDeleteRequiresLiveOwnership`, `TestFailoverDeleteWithDuplicateLeasesFailsSafe`, `TestFailoverOwnershipTagAcceptsGroupID`, `TestFailoverDNSManagedRequired`, `TestFailoverSiteIDMandatoryAtBoot`.
 - Live smoke `TestFailoverLifecycle` green; `ci.yaml` green; `helm lint` clean; manual: `dig TXT _cfzt-lease.<hash>.<zone> @1.1.1.1` shows the lease owner + TTL.
 
-Subtask-derived additions also pass: `TestFakeDNSRecordIDStable`, `TestFakeDNSCASUpdateRejectsStaleRecordID`, `TestFakeDNSCASCreateConflict`, `TestFailoverLeaseTXTName`.
+Subtask-derived additions also pass: `TestFakeDNSRecordIDStable`, `TestFailoverLeaseTXTName`, and `internal/dr` lease/resolve/role table tests.
 
 **Risks**
 
-- **Split-brain window.** Lease TTL + jitter bounds the dual-writer window. Mitigated by the partitioned primary's cloudflared also dropping its edge connection (CF stops routing to the stale tunnel ID) and by CAS-by-record_id preventing simultaneous acquire. Default `leaseSeconds: 60`; document the trade-off.
-- **SDK record_id precondition (D13).** If `cloudflare-go/v4` cannot condition an update on `record_id`, fall back to read-compare-write immediately before the call inside the rate-limited client. Isolate in `internal/cloudflare/dns.go`; cover with the fake CAS tests.
+- **Best-effort lease.** Cloudflare DNS does not provide a lock. Lease TTL + jitter and read-back verification bound the dual-writer window; the single public CNAME and Cloudflare's tunnel liveness make the data plane safe while control-plane state converges.
+- **Duplicate TXT records.** Simultaneous acquire can create duplicates. Every reconciler must run the same deterministic `internal/dr.Resolve` winner selection and delete only group-owned records it is allowed to touch.
 - **Ownership identity switch.** Failover Exposures tag CF resources with the group ID, not the per-CR uid. The `MatchesComment`/`MatchesTags` relaxation must not loosen the guard for non-failover Exposures — `TestFailoverOwnershipTagAcceptsGroupID` plus existing `TestOwnerMatchesForeign` guard both directions.
-- **Force-promote misuse.** The annotation bypasses expiry; split-brain risk is the operator's. Controller clears it post-acquire so it cannot persist in GitOps and re-trigger every reconcile.
-- **Renewal goroutine lifecycle.** The renewal loop must stop cleanly on demotion, CR delete, and manager shutdown to avoid a demoted process renewing a lease it no longer owns. Cover demotion-stops-renewal in envtest.
+- **Force-promote misuse.** The annotation bypasses expiry; split-brain risk is the operator's. The token must be one-shot by comparing it with `status.failover.lastForcePromoteToken`; the controller never mutates the annotation.
+- **Renewal lifecycle.** Renewal is driven by reconcile requeue/role decisions. A demoted site must stop writing immediately when the live lease no longer names its site ID.
 - **Scope creep.** Active-active, automatic primary restoration, cross-zone failover, and LB-based failover are explicitly out (D26). Resist widening.
+
+### Slice 8a — Access application API foundation (spec Slice 7a, D27)
+
+Per `spec.md ## Implementation slices ### Slice 7a` and D27. Outcome: `CloudflareExposure.spec.access.applications[]` becomes the only Access-enabled API shape, the old top-level `spec.access.policyRef` is rejected with a migration error, and a one-entry application list preserves the root Access app behaviour before multi-app fan-out is added.
+
+This is intentionally a breaking migration for the new operator version. Do not keep a compatibility reconcile path for top-level `policyRef`; it creates two sources of truth and keeps the status model split for no operational win.
+
+Before implementation, keep the D27 Cloudflare spike result visible in the work item. The 2026-06-02 live spike with temporary Access apps confirmed:
+
+- Path primary domains such as `<host>/v1/health` are accepted.
+- Middle wildcards such as `<host>/foo*/bar` are accepted.
+- Multiple apps sharing the same bare primary `domain` are rejected by Cloudflare.
+- `List(domain=<host>, Exact=true)` returns only the bare-host app; broad `List(domain=<host>)` sees the bare and path apps.
+
+Therefore implementation must not use `Exact=true` for path-app discovery. Use broad hostname listing, or list-all plus client-side canonical filtering if the SDK/API shape requires it.
+
+**Subtasks**
+
+0. **Preserve the live spike as evidence.**
+   - Files: `test/live/cloudflare_smoke_test.go` or a small `hack/` script if the smoke harness is not ready yet.
+   - Implements: create temporary policy/apps using the live-smoke credentials, assert the Cloudflare behaviours above, and assert cleanup leaves zero temporary apps/policies.
+   - Tests: `TestCloudflareAccessApplicationPathDiscoverySpike` or equivalent script output committed only if it is deterministic and secret-free.
+
+1. **CRD/API fields + generated output.**
+   - Files: `api/v1alpha1/cloudflareexposure_types.go`, generated deepcopy, CRDs, Helm CRD copy.
+   - Implements: `AccessApplicationTarget`, `AccessApplicationPolicyBinding`, `ExposureAccessApplicationStatus`; `spec.access.applications[]` as a map list keyed by `name`; `domains[]` as an ordered list where the first entry is the Cloudflare primary app domain; `status.cloudflare.accessApplications[]` as a map list keyed by `name`; remove `status.cloudflare.accessApplicationId` from current readiness/drift semantics.
+   - Validation: `access.enabled=true` requires explicit `spec.hostname` and non-empty `applications[]`; top-level `spec.access.policyRef` is rejected if present with `access.policyRef was removed in v1alpha1; use access.applications[]`; nested policy bindings require exactly one of `{uuid, name}`; admission checks domains equal `spec.hostname` or start with `spec.hostname + "/"`; controller-side validation rejects unsupported URL components, path/glob grammar errors, and duplicate canonical coverage before mutation.
+   - Tests: `TestExposureAccessApplicationsCRDValidation`, `TestExposurePolicyRefRemovedValidation`, existing Slice 2/4 Access tests migrated to the new one-entry app list.
+
+2. **Access target canonicalization + hashes.**
+   - Files: new small helper under `internal/controller` or `internal/accessapp` if reuse pressure appears.
+   - Implements: canonical domain target parsing, `<host>` and `<host>/*` duplicate treatment, D27 path/glob grammar, deterministic sorted-domain hash for status/no-op comparison, ordered-policy hash preserving policy precedence.
+   - Tests: `TestAccessTargetCanonicalization`, `TestAccessTargetRejectsUnsupportedURLParts`, `TestAccessTargetHashesDeterministic`.
+
+3. **`internal/cloudflare` Access app interface and fake.**
+   - Files: `internal/cloudflare/access_applications.go`, `fake.go`, `fake_test.go`.
+   - Implements: change `AccessApplicationInput` to `Domains []string` and `PolicyUUIDs []string`; read shape returns all self-hosted domains and ordered policy UUIDs; fake create/update/delete models multiple domains and ordered policy links exactly.
+   - Tests: `TestFakeAccessApplicationMultipleDomainsAndPolicies`, `TestFakeAccessApplicationsEnsuresTagsImplicitly`, existing single-policy fake tests adapted to the new one-entry desired-shape builder.
+
+4. **Real Cloudflare SDK mapping.**
+   - Files: `internal/cloudflare/real.go`, `real_test.go`.
+   - Implements: map the first canonical domain to primary `domain`; map `Domains []string` to SDK `SelfHostedDomains`; map `PolicyUUIDs []string` to policy-link unions with `Precedence` equal to list index; read back `domain`, `self_hosted_domains`, and policy IDs from list/create/update responses. Verify exact SDK surface via Cloudflare MCP or local `cloudflare-go/v4` types before coding.
+   - Tests: `TestRealAccessApplicationMapsSelfHostedDomainsAndPrecedence`; existing `accessAppFrom*Response` tests updated for multiple domains and policies.
+
+5. **Exposure desired-state builder for the migrated root app.**
+   - Files: `internal/controller/cloudflareexposure_controller.go` plus a focused helper if needed.
+   - Implements: build desired apps only from `applications[]`; initially require exactly one app entry for this slice if that materially reduces reconciliation blast radius; generate names from `<displayName|metadata.name>-<app.name>-cfzt`; resolve all nested `policyRef.uuid`/`policyRef.name` bindings before writes; propagate `PolicyNotFound` and `PolicyNotReady`. Do not invent hidden truncation until the Cloudflare app-name limit is verified; prefer validation over silent renaming.
+   - Tests: `TestExposureAccessApplicationsPolicyRefNameNotReady`, `TestExposureAccessApplicationsResolveNestedPolicyRefs`, `TestExposurePolicyRefNameMigratedToNestedBinding`.
+
+6. **Single-app reconcile and status migration.**
+   - Files: `internal/controller/cloudflareexposure_controller.go`.
+   - Implements: reconcile the one desired app through the new `Domains []string` / `PolicyUUIDs []string` client shape; set/read `status.cloudflare.accessApplications[]`; readiness gates on the map status plus live owned app. `status.cloudflare.accessApplicationId` is no longer used.
+   - Tests: `TestExposureAccessApplicationsSingleRootCreate`, `TestExposureAccessApplicationsSingleRootDrift`, `TestExposureAccessDisabledDeletesAllOwnedApps`.
+
+7. **AccessPolicy cross-watch and reference accounting.**
+   - Files: `internal/controller/cloudflareaccesspolicy_controller.go`, Exposure/Policy mapper helpers.
+   - Implements: `referencedBy` and `referencedByCount` include nested `spec.access.applications[].policies[].policyRef.name`; AccessPolicy watcher enqueues Exposures with nested refs; deletion remains blocked by nested references.
+   - Tests: `TestAccessPolicyReferencedByNestedApplications`, `TestAccessPolicyFinalizerBlockedByNestedExposure`, `TestExposureReconcilesWhenNestedPolicyBecomesReady`.
+
+**Definition of done**
+
+- Top-level `spec.access.policyRef` is rejected by CRD validation with the migration message.
+- A one-entry `access.applications[]` root app reconciles one Cloudflare Access application with expected primary `domain`, `self_hosted_domains`, ordered policy links, ownership tags, deterministic `accessApplications[]` status, and no duplicate writes on reapply.
+- Nested managed policy refs block with `PolicyNotFound` / `PolicyNotReady` until the target Policy CR is ready, then bind the resolved `status.policyId`.
+- Existing Slice 2/4 tests are migrated to the new API; no compatibility-only legacy tests remain.
+- `make manifests generate && git diff --exit-code`, `go test ./...`, and `helm lint charts/cfzt-operator` are clean.
+- The live spike or smoke leaves no temporary Access apps or policies behind.
+
+**Risks**
+
+- **Half-migration ambiguity.** Keeping top-level `policyRef` accepted would make user migration optional and force the controller to maintain two status paths. Reject it early and loudly.
+- **SDK shape drift.** Verify `cloudflare-go/v4` request/response structs at coding time; keep all SDK mapping behind `internal/cloudflare`.
+- **Name length guesswork.** Do not freeze truncate+hash until the Cloudflare app-name limit is confirmed. A validation error is better than an undocumented rename.
+
+### Slice 8b — Multi-app path-scoped Access sets (spec Slice 7b, D27)
+
+Per `spec.md ## Implementation slices ### Slice 7b` and D27. Outcome: one `CloudflareExposure` owns a full set of Cloudflare Access self-hosted applications for one hostname, including path-specific applications with different ordered policy bindings. DNS and tunnel ingress stay one-hostname-per-Exposure; path scoping is Cloudflare Access application state.
+
+**Subtasks**
+
+1. **Enable multi-entry desired-state building.**
+   - Files: `internal/controller/cloudflareexposure_controller.go` plus the Slice 8a helper.
+   - Implements: remove any temporary one-app limit; build one desired app per `applications[]` entry; primary `domain` is the first canonical domain in the entry; `self_hosted_domains` is the full canonical domain set.
+   - Tests: `TestExposureAccessApplicationsBuildRootAndPaths`, `TestExposureAccessApplicationsRejectDuplicateCanonicalCoverage`.
+
+2. **Remote discovery for path apps.**
+   - Files: `internal/cloudflare/access_applications.go`, `internal/controller/cloudflareexposure_controller.go`.
+   - Implements: list Access apps broadly by hostname or list-all when needed, then client-side filter by canonical `domain` and `self_hosted_domains` under `spec.hostname`. Never use `Exact=true` for D27 discovery.
+   - Tests: `TestAccessApplicationDiscoveryIncludesPathApps`, `TestExposureAccessApplicationsBroadListFiltersForeignHosts`.
+
+3. **Validate-all-before-mutate conflict pass.**
+   - Files: `internal/controller/cloudflareexposure_controller.go`.
+   - Implements: canonicalize every desired and relevant remote target; if any exact target is foreign-tagged, set `Ready=False, Reason=HostnameConflict` and perform no Access, DNS, or tunnel-ingress mutation in that reconcile. Under failover, run this full app-set validation after live lease acquisition/read-back and before writing the public CNAME, so a promotion blocked by Access policy or path conflict cannot point traffic at a partially-reconciled app set.
+   - Tests: `TestExposureAccessApplicationsForeignTargetConflict`, `TestExposureAccessApplicationsForeignConflictNoPartialMutation`, `TestFailoverAccessApplicationsConflictBlocksCNAMEWrite`, `TestFailoverAccessApplicationsPolicyNotReadyBlocksPromotionSurface`.
+
+4. **Exposure reconcile create/update/delete for app sets.**
+   - Files: `internal/controller/cloudflareexposure_controller.go`.
+   - Implements: list apps for the hostname, match owned apps by source-uid and desired canonical targets, create missing apps, update name/domain/policy/tag drift, delete owned apps removed from spec, and delete owned apps when `access.enabled` flips false. Non-failover cleanup discovers owned live apps under `spec.hostname` rather than relying only on status-tracked IDs. For failover Primary, deletion also includes live-discovered group-owned apps under `spec.hostname`, because a newly-promoted site may not have the former Primary's `status.cloudflare.accessApplications[]` entries. Keep status writes deterministic.
+   - Tests: `TestExposureAccessApplicationsCreateRootAndPaths`, `TestExposureAccessApplicationsPolicyOrderDrift`, `TestExposureAccessApplicationRemovedDeletesOnlyOwnedApp`, `TestExposureAccessDisabledDeletesAllOwnedApps`, `TestFailoverAccessApplicationsPromotedStandbyDeletesRemovedGroupOwnedApp`.
+
+5. **Ownership, finalizer, and failover paths.**
+   - Files: `internal/controller/cloudflareexposure_controller.go`, `conditions.go` if reason/event constants need expansion.
+   - Implements: non-failover finalizer discovers and deletes owned live apps under the hostname and leaves foreign-tagged apps alone; `access.enabled: false` cleanup removes owned apps; failover Primary validates and writes the full app set with failover-group `source-uid`; Standby writes none of it. Failover cleanup first proves live lease ownership, then deletes all group-owned apps discovered under the hostname; stale `status.failover.role=Primary` is not sufficient.
+   - Tests: `TestExposureFinalizerDeletesAllAccessApps`, `TestExposureFinalizerLeavesForeignAccessApps`, `TestFailoverAccessApplicationsPrimaryWritesFullSet`, `TestFailoverAccessApplicationsStandbyWritesNone`, `TestFailoverFinalizerDeletesDiscoveredGroupOwnedAppsOnlyWithLiveLease`, `TestFailoverFinalizerIgnoresStalePrimaryStatus`.
+
+6. **Ready/status semantics for failover app sets.**
+   - Files: `internal/controller/cloudflareexposure_controller.go`, `conditions.go`.
+   - Implements: non-failover and failover Primary readiness requires every desired app to have a matching `status.cloudflare.accessApplications[]` entry and live owned remote app. Failover Standby readiness is role-based: once the live lease names another site and this site's own tunnel/connector is warm, report `Ready=True, Reason=Standby` without requiring local Access app status entries for the shared Primary-owned app set.
+   - Tests: `TestExposureAccessApplicationsPrimaryReadyRequiresAllApps`, `TestFailoverAccessApplicationsStandbyReadyWithoutLocalAppStatus`, `TestFailoverAccessApplicationsPrimaryReadyRequiresFullAppSet`.
+
+7. **Docs and examples.**
+   - Files: `README.md` if public examples are being kept current in the same PR, plus `docs/architecture.md` if it still describes exactly one Access app per Exposure.
+   - Implements: ntfy-style root authenticated app + public path app example; explicitly recommend root plus specific path overrides, not root plus redundant `/*` unless live smoke proves it.
+   - Tests: docs are covered by normal markdown/static CI only if present.
+
+8. **Live Cloudflare smoke.**
+   - Files: `test/live/cloudflare_smoke_test.go`, `hack/live-cloudflare-local.sh` only if a new mode/env var is needed.
+   - Implements: create root authenticated Access app and path bypass app for one hostname; assert the specific path bypasses while root and unrelated paths follow root policy; teardown all temporary Access apps/policies and assert none remain. Extend the failover live smoke, or add a focused variant, so a promoted site converges a pre-existing group-owned root + path app set without relying on local status entries.
+   - Tests: `TestCloudflareAccessApplicationPathPolicies`, `TestCloudflareFailoverAccessApplicationSetPromotion`.
+
+**Definition of done**
+
+- Explicit `access.applications[]` reconciles root + path Access apps for one hostname, with expected `self_hosted_domains`, ordered policy links, ownership tags, deterministic status entries, and no duplicate writes on reapply.
+- Removing an app entry deletes owned live apps no longer desired; disabling Access deletes all owned Access apps; finalizer deletes all owned Access apps and preserves foreign-tagged apps. For failover Primary, "owned" includes live-discovered group-owned apps under the hostname, not only this cluster's status entries.
+- Foreign exact target collision gives `Ready=False, Reason=HostnameConflict`; no Access app, DNS record, or tunnel ingress write is attempted as part of resolving the conflict.
+- Failover Primary owns the entire app set with failover-group tags; Standby never writes the shared Access app set. Promotion validates the full app set before public CNAME writes, and Standby readiness does not require local app status for the Primary-owned set.
+- `make manifests generate && git diff --exit-code`, `go test ./...`, and `helm lint charts/cfzt-operator` are clean.
+- Live smoke `TestCloudflareAccessApplicationPathPolicies` passes against real Cloudflare.
+
+**Risks**
+
+- **Cloudflare path matching assumptions.** Cloudflare documents root applications as covering paths and more-specific path apps as taking precedence. Live smoke must verify the root-plus-specific-path shape before recommending it broadly.
+- **Policy precedence misunderstanding.** The operator preserves listed policy order inside each app, but Cloudflare evaluates action classes first. Document that order cannot force Allow ahead of Bypass/Service Auth.
+- **Deletion blast radius.** Removed app entries are real deletes. Only delete ownership-tag-matching live apps under the Exposure hostname; never infer deletion solely from a same-name or same-domain remote object.
+- **Failover status locality.** `status.cloudflare.accessApplications[]` is per cluster, but the failover Access app set is shared. A promoted standby must discover group-owned apps remotely for drift/deletion; otherwise removed path apps can leak until the old primary returns.
+- **Duplicate target ambiguity.** Treat `<host>` and `<host>/*` as duplicate desired coverage to avoid users creating two apps that both claim the root. Keep this check in controller-side validation rather than brittle bounded CEL comparisons, so the API can scale beyond small fixed app counts while still refusing to mutate Cloudflare on ambiguous desired state. Keep different specific paths independent.
+- **Cloudflare discovery blind spot.** `Exact=true` misses path apps. Broad/list-all discovery with client-side canonical filtering is mandatory, even if the exact query looks neater.
+- **Failover partial writes.** DR promotion must validate the whole app set before mutating anything. A Primary that creates the root app and then discovers a foreign path app leaves a mess.
 
 ## 4. Bootstrap subtasks (scaffold absent)
 
@@ -1287,7 +1384,7 @@ Slice 4 end-to-end:
 
 - Slice 1–3 smoke remain green.
 - Apply a `CloudflareAccessPolicy` per `spec.md ## CRD model ### CloudflareAccessPolicy` (decision `allow`, include rule `emailDomain: <your-domain>`). Wait for `Ready=True`; confirm `status.policyId` set and the policy appears in the Cloudflare dashboard with the expected `<base>-cfzt` name.
-- Apply a `CloudflareExposure` with `spec.access.policyRef.name: <policy-cr-name>`. Confirm `Ready=True` and the Access app binds the resolved UUID. `curl -v https://<hostname>` → Access challenge; authenticate, confirm origin response.
+- Before Slice 8a/D27, apply a `CloudflareExposure` with `spec.access.policyRef.name: <policy-cr-name>`. After Slice 8a/D27, apply the same reference under `spec.access.applications[].policies[].policyRef.name`. Confirm `Ready=True` and the Access app binds the resolved UUID. `curl -v https://<hostname>` -> Access challenge; authenticate, confirm origin response.
 - `kubectl edit cloudflareaccesspolicy <name>` — change an include rule. Within one reconcile, dashboard shows updated rule; all referencing Exposures re-bind cleanly.
 - `kubectl delete cloudflareaccesspolicy <name>` while an Exposure references it — confirm `Ready=False, Reason=BlockedByExposures`, policy CR not deleted, CF policy still present. Remove the referencing Exposure; confirm policy CR + CF policy are then deleted.
 - Negative: create a CF Access policy by hand in the dashboard named `<policy-cr-name>-cfzt`, then apply the matching `CloudflareAccessPolicy` CR — confirm `Ready=False, Reason=ForeignPolicy`, dashboard policy untouched.

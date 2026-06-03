@@ -122,7 +122,8 @@ func TestCloudflareLifecycle(t *testing.T) {
 	publicDNSBefore := public.Status.Cloudflare.DnsRecordId
 	publicRouteBefore := public.Status.Cloudflare.PublicHostnameRouteHash
 	accessDNSBefore := access.Status.Cloudflare.DnsRecordId
-	accessAppBefore := access.Status.Cloudflare.AccessApplicationId
+	accessRootBefore := h.accessApplicationStatus(access.Status.Cloudflare.AccessApplications, "root")
+	accessAdminBefore := h.accessApplicationStatus(access.Status.Cloudflare.AccessApplications, "admin")
 	accessRouteBefore := access.Status.Cloudflare.PublicHostnameRouteHash
 	if publicRouteBefore == "" || accessRouteBefore == "" {
 		t.Fatalf("expected non-empty route hashes, got public=%q access=%q", publicRouteBefore, accessRouteBefore)
@@ -138,8 +139,9 @@ func TestCloudflareLifecycle(t *testing.T) {
 	h.waitPublicRoute()
 	// Slice 6 adjustment: subtask 7 split write PolicyUUID from read
 	// PolicyUUIDs, so live smoke reads the CF app back through the slice shape.
-	h.assertAccessApplication(accessAppBefore, policyIDBefore)
-	h.assertAccessChallenged()
+	h.assertAccessApplications(access.Status.Cloudflare.AccessApplications, policyIDBefore)
+	h.assertAccessChallenged("/hostname")
+	h.assertAccessChallenged("/admin/hostname")
 
 	t.Log("checking idempotency after re-apply and operator restart")
 	h.updateAccessPolicyNoop()
@@ -161,8 +163,9 @@ func TestCloudflareLifecycle(t *testing.T) {
 	assertEqual(t, "tunnel route ID", tunnelRouteIDBefore, tunnelRoute.Status.RouteId)
 	assertEqual(t, "public DNS record ID", publicDNSBefore, public.Status.Cloudflare.DnsRecordId)
 	assertEqual(t, "access DNS record ID", accessDNSBefore, access.Status.Cloudflare.DnsRecordId)
-	assertEqual(t, "Access application ID", accessAppBefore, access.Status.Cloudflare.AccessApplicationId)
-	h.assertAccessApplication(accessAppBefore, policyIDBefore)
+	assertEqual(t, "root Access application ID", accessRootBefore.AppID, h.accessApplicationStatus(access.Status.Cloudflare.AccessApplications, "root").AppID)
+	assertEqual(t, "admin Access application ID", accessAdminBefore.AppID, h.accessApplicationStatus(access.Status.Cloudflare.AccessApplications, "admin").AppID)
+	h.assertAccessApplications(access.Status.Cloudflare.AccessApplications, policyIDBefore)
 
 	t.Log("checking foreign DNS conflict safety")
 	record, err := h.cf.DNSRecords().Create(ctx, cloudflare.DNSRecordInput{

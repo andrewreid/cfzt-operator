@@ -7,7 +7,7 @@ Kubernetes operator for managing Cloudflare Tunnel, public hostname exposure, Cl
 | CRD | Scope | Short name | Purpose |
 |---|---|---|---|
 | `CloudflareTunnel` | Cluster | `cft` | Creates or adopts a remotely managed Cloudflare Tunnel, stores its token, deploys `cloudflared`, and writes the tunnel ingress config. |
-| `CloudflareExposure` | Namespaced | `cfe` | Publishes one hostname through a tunnel, optionally creating a proxied DNS CNAME and Access application. |
+| `CloudflareExposure` | Namespaced | `cfe` | Publishes one hostname through a tunnel, optionally creating a proxied DNS CNAME and one or more Access applications. |
 | `CloudflareAccessPolicy` | Cluster | `cfap` | Manages one reusable account-level Access policy that Exposures can reference by name. |
 | `CloudflareTunnelRoute` | Cluster | `cftr` | Registers one private-network CIDR route on a tunnel. |
 
@@ -97,11 +97,16 @@ spec:
     port: 8096
   access:
     enabled: true
-    policyRef:
-      uuid: 00000000-0000-4000-8000-000000000001
+    applications:
+      - name: root
+        domains:
+          - jellyfin.example.com
+        policies:
+          - policyRef:
+              uuid: 00000000-0000-4000-8000-000000000001
 ```
 
-That reconciles the Cloudflare Tunnel, token Secret, `cloudflared` DaemonSet, tunnel ingress rule, proxied DNS CNAME, and Access application.
+That reconciles the Cloudflare Tunnel, token Secret, `cloudflared` DaemonSet, tunnel ingress rule, proxied DNS CNAME, and Access applications.
 
 Use a managed Access policy when you want a reusable policy CR instead of a raw Cloudflare policy UUID:
 
@@ -136,9 +141,24 @@ spec:
     port: 8096
   access:
     enabled: true
-    policyRef:
-      name: family-only
+    applications:
+      - name: root
+        domains:
+          - jellyfin.example.com
+        policies:
+          - policyRef:
+              name: family-only
+      - name: admin
+        domains:
+          - jellyfin.example.com/admin
+        policies:
+          - policyRef:
+              name: family-only
 ```
+
+Root plus specific path overrides are the recommended pattern. A bare host and `host/*` describe the same coverage, so do not list them both.
+
+`access.applications[].domains` is ordered. The first value becomes the Cloudflare Access application's primary domain, and the full list is written to Cloudflare as `self_hosted_domains` in the same order. Model path-specific behaviour as a root application for `host` plus more-specific path applications such as `host/admin`, `host/alerts-*`, or `host/v1/health`. Do not add a redundant `host/*` app beside the root app; the controller treats that as duplicate coverage and reports `Ready=False, Reason=HostnameConflict` without writing Cloudflare resources.
 
 Register a private-network route on the same tunnel:
 
@@ -190,12 +210,14 @@ Field notes:
 | `spec.hostname` | Public hostname; required unless derived from `sourceRef.kind: HTTPRoute`. |
 | `spec.tunnelRef.name` | Referenced `CloudflareTunnel`. Immutable. |
 | `spec.origin.protocol`, `host`, `port` | Origin target; host and port can be derived only from `sourceRef.kind: Service`. |
-| `spec.access.enabled` | Enables a Cloudflare Access application. |
-| `spec.access.policyRef.uuid` or `name` | Exactly one is required when Access is enabled. |
+| `spec.access.enabled` | Enables Cloudflare Access applications. |
+| `spec.access.applications[]` | Defines the Access applications to create. |
+| `spec.access.applications[].domains[]` | Ordered Access targets for that app; first entry is the primary Cloudflare app domain. |
+| `spec.access.applications[].policies[].policyRef.uuid` or `name` | Exactly one is required for each policy binding. |
 | `spec.failover.group` | Opts into DR failover; cross-cluster logical-exposure identity (see [Disaster Recovery](#disaster-recovery-dr-failover)). |
 | `spec.failover.leaseSeconds` | Lease TTL; default 60, min 30, max 600. The primary renews at half this interval. |
 
-Status records `status.cloudflare.accessApplicationId`, `status.cloudflare.dnsRecordId`, `status.cloudflare.publicHostnameRouteHash`, `status.conditions`, and — when `spec.failover` is set — `status.failover` (role, lease owner, expiry; see below).
+Status records `status.cloudflare.accessApplications[]`, `status.cloudflare.dnsRecordId`, `status.cloudflare.publicHostnameRouteHash`, `status.conditions`, and — when `spec.failover` is set — `status.failover` (role, lease owner, expiry; see below).
 
 #### sourceRef
 
@@ -261,20 +283,20 @@ The operator refuses to mutate Cloudflare resources it cannot prove it owns:
 | Resource | Ownership record | Foreign condition |
 |---|---|---|
 | Tunnel | `CloudflareTunnel.status.tunnelId` | `ForeignTunnel` |
-| Exposure Access app | Access tags with `managed-by=cfzt-operator` and chunked `source-uid-<n>=...` values | `ForeignResource` or `HostnameConflict` |
+| Exposure Access apps | Access tags with `managed-by=cfzt-operator` and chunked `source-uid-<n>=...` values | `ForeignResource` or `HostnameConflict` |
 | Exposure DNS CNAME | DNS record comment with `managed-by=cfzt-operator source-uid=<exposure-uid>` | `ForeignResource` or `HostnameConflict` |
 | Access policy | `CloudflareAccessPolicy.status.policyId` | `ForeignPolicy` |
 | Tunnel route | `CloudflareTunnelRoute.status.routeId` plus comment `managed-by=cfzt source-uid=<route-uid>` | `ForeignRoute` |
 
 Ingress rules inside the tunnel config are not tagged individually; the tunnel controller rewrites the complete config from current Kubernetes state. Repeated reconciles are intended to be idempotent, and dashboard drift on owned resources is corrected.
 
-For a failover Exposure (`spec.failover`) the shared Access app and DNS CNAME carry the **failover-group ID** as their `source-uid` instead of the per-CR uid, so either cluster's operator recognizes them as owned. Deletion of a failover Exposure proves **current** lease ownership before tearing down the shared CNAME/Access (it never trusts stale status): a standby — or a former primary whose peer has taken over — only removes its own lease record and leaves the shared resources for the live owner.
+For a failover Exposure (`spec.failover`) the shared Access app set and DNS CNAME carry the **failover-group ID** as their `source-uid` instead of the per-CR uid, so either cluster's operator recognizes them as owned. A promoted standby re-lists the group-owned Access applications remotely and discovers the live shared set from Cloudflare rather than trusting stale local status. Deletion of a failover Exposure proves **current** lease ownership before tearing down the shared CNAME / Access set: a standby — or a former primary whose peer has taken over — only removes its own lease record and leaves the shared resources for the live owner.
 
 Deletion is finalizer-driven:
 
 | Delete | What happens |
 |---|---|
-| `CloudflareExposure` | Removes owned Access app, DNS CNAME, and tunnel ingress rule. |
+| `CloudflareExposure` | Removes owned Access applications, DNS CNAME, and tunnel ingress rule. |
 | `CloudflareTunnelRoute` | Deletes the owned Cloudflare private-network route. |
 | `CloudflareAccessPolicy` | Blocks with `BlockedByExposures` until no Exposure references it. |
 | `CloudflareTunnel` | Blocks with `BlockedByExposures` or `BlockedByRoutes` until dependants are gone, then removes `cloudflared`, token Secret, and the Cloudflare Tunnel. |
@@ -285,7 +307,7 @@ Active-passive DR lets the **same** `CloudflareExposure`, applied to two (or mor
 
 ### How it works
 
-Each cluster runs its own `CloudflareTunnel` (own tunnel ID, own `cloudflared`) and its own copy of the Exposure with a matching `spec.failover.group`. Coordination uses a single Cloudflare **DNS TXT lease record** at `_cfzt-lease.<hash8(group)>.<zone>`. The lease holder is Primary and alone writes the shared public CNAME and Access application; the CNAME points at the holder's tunnel. Promotion is automatic when the lease TTL expires.
+Each cluster runs its own `CloudflareTunnel` (own tunnel ID, own `cloudflared`) and its own copy of the Exposure with a matching `spec.failover.group`. Coordination uses a single Cloudflare **DNS TXT lease record** at `_cfzt-lease.<hash8(group)>.<zone>`. The lease holder is Primary and alone writes the shared public CNAME and Access application set; the CNAME points at the holder's tunnel. Promotion is automatic when the lease TTL expires. When a standby promotes, it re-discovers the group-owned Access applications remotely and continues from the live Cloudflare state instead of stale status.
 
 The lease is **best-effort, not a distributed lock.** Cloudflare DNS offers no conditional write, so correctness does not rely on the lease being atomic — it rests on the data plane: there is one CNAME (so two sites can never serve different origins at once), and a failed primary's `cloudflared` drops its edge connection within seconds, so Cloudflare stops routing to it regardless of the lease. The lease's job is to elect a single writer and stop the CNAME flapping between healthy sites.
 

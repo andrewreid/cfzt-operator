@@ -53,21 +53,55 @@ var _ = Describe("CRD admission", func() {
 		{"rejects exposure origin port out of range", exposureWith("bad-port", func(e *cfztv1alpha1.CloudflareExposure) {
 			e.Spec.Origin.Port = 70000
 		}), "spec.origin.port", nil},
-		{"rejects missing access policy reference when enabled", exposureWith("missing-policy", func(e *cfztv1alpha1.CloudflareExposure) {
-			e.Spec.Access.PolicyRef.UUID = ""
-		}), "access.policyRef requires exactly one of uuid or name", nil},
+		{"rejects access enabled without applications", exposureWith("missing-apps", func(e *cfztv1alpha1.CloudflareExposure) {
+			e.Spec.Access.Applications = nil
+		}), "access.enabled=true requires spec.hostname and access.applications[]", nil},
+		{"rejects removed top-level access policyRef", exposureWith("policyref-removed", func(e *cfztv1alpha1.CloudflareExposure) {
+			e.Spec.Access.PolicyRef = &cfztv1alpha1.AccessPolicyRef{UUID: "00000000-0000-4000-8000-000000000002"}
+		}), "access.policyRef was removed in v1alpha1; use access.applications[]", nil},
+		{"accepts nested applications without removed top-level policyRef", exposureWith("policyref-absent", func(e *cfztv1alpha1.CloudflareExposure) {
+			e.Spec.Access.PolicyRef = nil
+		}), "", func(obj client.Object) {
+			created := obj.(*cfztv1alpha1.CloudflareExposure)
+			Expect(created.Spec.Access.PolicyRef).To(BeNil())
+			Expect(created.Spec.Access.Applications).To(HaveLen(1))
+		}},
 		{"accepts access policy UUID alone", exposureWith("policyref-uuid-alone", func(e *cfztv1alpha1.CloudflareExposure) {
-			e.Spec.Access.PolicyRef = cfztv1alpha1.AccessPolicyRef{UUID: "00000000-0000-4000-8000-000000000002"}
+			e.Spec.Access.Applications[0].Policies[0].PolicyRef = cfztv1alpha1.AccessPolicyRef{UUID: "00000000-0000-4000-8000-000000000002"}
 		}), "", nil},
 		{"accepts access policy name alone", exposureWith("policyref-name-alone", func(e *cfztv1alpha1.CloudflareExposure) {
-			e.Spec.Access.PolicyRef = cfztv1alpha1.AccessPolicyRef{Name: "family-only"}
+			e.Spec.Access.Applications[0].Policies[0].PolicyRef = cfztv1alpha1.AccessPolicyRef{Name: "family-only"}
 		}), "", nil},
 		{"rejects access policy UUID and name together", exposureWith("policyref-both", func(e *cfztv1alpha1.CloudflareExposure) {
-			e.Spec.Access.PolicyRef = cfztv1alpha1.AccessPolicyRef{UUID: "00000000-0000-4000-8000-000000000003", Name: "family-only"}
-		}), "access.policyRef requires exactly one of uuid or name", nil},
+			e.Spec.Access.Applications[0].Policies[0].PolicyRef = cfztv1alpha1.AccessPolicyRef{UUID: "00000000-0000-4000-8000-000000000003", Name: "family-only"}
+		}), "policyRef requires exactly one of uuid or name", nil},
 		{"rejects empty access policy reference when enabled", exposureWith("policyref-neither", func(e *cfztv1alpha1.CloudflareExposure) {
-			e.Spec.Access.PolicyRef = cfztv1alpha1.AccessPolicyRef{}
-		}), "access.policyRef requires exactly one of uuid or name", nil},
+			e.Spec.Access.Applications[0].Policies[0].PolicyRef = cfztv1alpha1.AccessPolicyRef{}
+		}), "policyRef requires exactly one of uuid or name", nil},
+		{"rejects access application domain outside hostname", exposureWith("bad-app-domain", func(e *cfztv1alpha1.CloudflareExposure) {
+			e.Spec.Access.Applications[0].Domains = []cfztv1alpha1.AccessApplicationDomain{"other.example.com"}
+		}), "access.applications[].domains", nil},
+		{"accepts duplicate canonical access coverage within one app for controller-side validation", exposureWith("same-app-canonical-duplicate", func(e *cfztv1alpha1.CloudflareExposure) {
+			e.Spec.Access.Applications[0].Domains = append(e.Spec.Access.Applications[0].Domains, cfztv1alpha1.AccessApplicationDomain(e.Spec.Hostname+"/*"))
+		}), "", nil},
+		{"accepts duplicate canonical access coverage across apps for controller-side validation", exposureWith("cross-app-canonical-duplicate", func(e *cfztv1alpha1.CloudflareExposure) {
+			e.Spec.Access.Applications = append(e.Spec.Access.Applications, cfztv1alpha1.AccessApplicationTarget{
+				Name:    "wildcard",
+				Domains: []cfztv1alpha1.AccessApplicationDomain{cfztv1alpha1.AccessApplicationDomain(e.Spec.Hostname + "/*")},
+				Policies: []cfztv1alpha1.AccessApplicationPolicyBinding{{
+					PolicyRef: cfztv1alpha1.AccessPolicyRef{UUID: "00000000-0000-4000-8000-000000000001"},
+				}},
+			})
+		}), "", nil},
+		{"accepts root and specific path access coverage", exposureWith("path-access-coverage", func(e *cfztv1alpha1.CloudflareExposure) {
+			e.Spec.Access.Applications = append(e.Spec.Access.Applications, cfztv1alpha1.AccessApplicationTarget{
+				Name:    "path",
+				Domains: []cfztv1alpha1.AccessApplicationDomain{cfztv1alpha1.AccessApplicationDomain(e.Spec.Hostname + "/alerts-*")},
+				Policies: []cfztv1alpha1.AccessApplicationPolicyBinding{{
+					PolicyRef: cfztv1alpha1.AccessPolicyRef{UUID: "00000000-0000-4000-8000-000000000001"},
+				}},
+			})
+		}), "", nil},
 		{"accepts Service sourceRef without origin", exposureWith("service-source", func(e *cfztv1alpha1.CloudflareExposure) {
 			e.Spec.SourceRef = &cfztv1alpha1.SourceRef{ApiVersion: "v1", Kind: "Service", Name: "jellyfin"}
 			e.Spec.Origin = nil
@@ -75,6 +109,8 @@ var _ = Describe("CRD admission", func() {
 		{"accepts HTTPRoute sourceRef without hostname", exposureWith("httproute-source", func(e *cfztv1alpha1.CloudflareExposure) {
 			e.Spec.SourceRef = &cfztv1alpha1.SourceRef{ApiVersion: "gateway.networking.k8s.io/v1", Kind: "HTTPRoute", Name: "jellyfin"}
 			e.Spec.Hostname = ""
+			e.Spec.Access.Enabled = false
+			e.Spec.Access.Applications = nil
 		}), "", nil},
 		{"rejects missing hostname without HTTPRoute sourceRef", exposureWith("missing-hostname", func(e *cfztv1alpha1.CloudflareExposure) {
 			e.Spec.Hostname = ""
@@ -177,6 +213,8 @@ var _ = Describe("CRD admission", func() {
 		{"allows first HTTPRoute-derived hostname write", exposureWith("httproute-hostname-default", func(e *cfztv1alpha1.CloudflareExposure) {
 			e.Spec.SourceRef = &cfztv1alpha1.SourceRef{ApiVersion: "gateway.networking.k8s.io/v1", Kind: "HTTPRoute", Name: "jellyfin"}
 			e.Spec.Hostname = ""
+			e.Spec.Access.Enabled = false
+			e.Spec.Access.Applications = nil
 		}), func(obj client.Object) {
 			obj.(*cfztv1alpha1.CloudflareExposure).Spec.Hostname = "derived.example.com"
 		}, ""},
@@ -257,8 +295,14 @@ func validAdmissionExposure(name string) *cfztv1alpha1.CloudflareExposure {
 			TunnelRef: cfztv1alpha1.TunnelRef{Name: "homelab"},
 			Origin:    &cfztv1alpha1.OriginSpec{Protocol: "http", Host: "jellyfin.default.svc.cluster.local", Port: 8096},
 			Access: cfztv1alpha1.AccessSpec{
-				Enabled:   true,
-				PolicyRef: cfztv1alpha1.AccessPolicyRef{UUID: "00000000-0000-4000-8000-000000000001"},
+				Enabled: true,
+				Applications: []cfztv1alpha1.AccessApplicationTarget{{
+					Name:    "root",
+					Domains: []cfztv1alpha1.AccessApplicationDomain{cfztv1alpha1.AccessApplicationDomain(name + ".example.com")},
+					Policies: []cfztv1alpha1.AccessApplicationPolicyBinding{{
+						PolicyRef: cfztv1alpha1.AccessPolicyRef{UUID: "00000000-0000-4000-8000-000000000001"},
+					}},
+				}},
 			},
 		},
 	}
@@ -288,8 +332,18 @@ func failoverYAMLExposure(name, group string) *unstructured.Unstructured {
 			"tunnelRef": map[string]any{"name": "homelab"},
 			"origin":    map[string]any{"protocol": "http", "host": "jellyfin.default.svc.cluster.local", "port": int64(8096)},
 			"access": map[string]any{
-				"enabled":   true,
-				"policyRef": map[string]any{"uuid": "00000000-0000-4000-8000-000000000001"},
+				"enabled": true,
+				"applications": []any{
+					map[string]any{
+						"name":    "root",
+						"domains": []any{name + ".example.com"},
+						"policies": []any{
+							map[string]any{
+								"policyRef": map[string]any{"uuid": "00000000-0000-4000-8000-000000000001"},
+							},
+						},
+					},
+				},
 			},
 			"failover": failover,
 		},

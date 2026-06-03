@@ -225,10 +225,12 @@ func (r *CloudflareAccessPolicyReconciler) SetupWithManager(mgr ctrl.Manager) er
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&cfztv1alpha1.CloudflareAccessPolicy{}).
 		Watches(&cfztv1alpha1.CloudflareExposure{}, handler.EnqueueRequestsFromMapFunc(enqueueNamed(func(exposure *cfztv1alpha1.CloudflareExposure) []types.NamespacedName {
-			if exposure.Spec.Access.PolicyRef.Name == "" {
-				return nil
+			names := exposurePolicyRefNames(exposure)
+			requests := make([]types.NamespacedName, 0, len(names))
+			for _, name := range names {
+				requests = append(requests, types.NamespacedName{Name: name})
 			}
-			return []types.NamespacedName{{Name: exposure.Spec.Access.PolicyRef.Name}}
+			return requests
 		}))).
 		Named("cloudflareaccesspolicy").
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).

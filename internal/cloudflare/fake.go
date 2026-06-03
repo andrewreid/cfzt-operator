@@ -253,7 +253,7 @@ func (a *fakeAccessApplications) List(_ context.Context, domain string) ([]Acces
 	defer a.fc.mu.Unlock()
 	var out []AccessApplication
 	for _, app := range a.fc.accessApps {
-		if domain != "" && app.Domain != domain {
+		if !accessApplicationMatchesHostname(*app, domain) {
 			continue
 		}
 		out = append(out, copyAccessApplication(app))
@@ -478,13 +478,13 @@ func copyConfiguration(config TunnelConfiguration) *TunnelConfiguration {
 }
 
 func applyAccessApplication(app *AccessApplication, in AccessApplicationInput) {
+	domains := accessApplicationInputDomains(in)
+	policyUUIDs := accessApplicationInputPolicyUUIDs(in)
+
 	app.Name = in.Name
-	app.Domain = in.Domain
-	if in.PolicyUUID == "" {
-		app.PolicyUUIDs = nil
-	} else {
-		app.PolicyUUIDs = []string{in.PolicyUUID}
-	}
+	app.Domains = append([]string(nil), domains...)
+	app.Domain = accessApplicationPrimaryDomain(domains)
+	app.PolicyUUIDs = append([]string(nil), policyUUIDs...)
 	app.Tags = append([]string(nil), in.Tags...)
 }
 
@@ -496,6 +496,7 @@ func ensureFakeAccessTagsLocked(fc *FakeClient, tags []string) {
 
 func copyAccessApplication(app *AccessApplication) AccessApplication {
 	copy := *app
+	copy.Domains = append([]string(nil), app.Domains...)
 	copy.PolicyUUIDs = append([]string(nil), app.PolicyUUIDs...)
 	copy.Tags = append([]string(nil), app.Tags...)
 	return copy

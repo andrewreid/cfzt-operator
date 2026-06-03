@@ -407,9 +407,7 @@ func (h *smokeHarness) publicExposureObject() *cfztv1alpha1.CloudflareExposure {
 }
 
 func (h *smokeHarness) accessExposureObject() *cfztv1alpha1.CloudflareExposure {
-	exposure := h.exposureObject(accessExposure, h.cfg.accessHostname, true)
-	exposure.Spec.Access.PolicyRef.Name = h.cfg.accessPolicy
-	return exposure
+	return h.exposureObject(accessExposure, h.cfg.accessHostname, true)
 }
 
 func (h *smokeHarness) createConflictExposure() {
@@ -420,7 +418,7 @@ func (h *smokeHarness) createConflictExposure() {
 }
 
 func (h *smokeHarness) exposureObject(name, hostname string, accessEnabled bool) *cfztv1alpha1.CloudflareExposure {
-	return &cfztv1alpha1.CloudflareExposure{
+	exposure := &cfztv1alpha1.CloudflareExposure{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: h.cfg.smokeNamespace},
 		Spec: cfztv1alpha1.CloudflareExposureSpec{
 			TunnelRef: cfztv1alpha1.TunnelRef{Name: h.cfg.tunnelName},
@@ -431,6 +429,31 @@ func (h *smokeHarness) exposureObject(name, hostname string, accessEnabled bool)
 				Name:       echoName,
 			},
 			Access: cfztv1alpha1.AccessSpec{Enabled: accessEnabled},
+		},
+	}
+	if accessEnabled {
+		exposure.Spec.Access.Applications = h.accessApplications(hostname)
+	}
+	return exposure
+}
+
+func (h *smokeHarness) accessApplications(hostname string) []cfztv1alpha1.AccessApplicationTarget {
+	return []cfztv1alpha1.AccessApplicationTarget{
+		{
+			Name:    "root",
+			Domains: []cfztv1alpha1.AccessApplicationDomain{cfztv1alpha1.AccessApplicationDomain(hostname)},
+			Policies: []cfztv1alpha1.AccessApplicationPolicyBinding{{
+				PolicyRef: cfztv1alpha1.AccessPolicyRef{Name: h.cfg.accessPolicy},
+			}},
+		},
+		{
+			Name: "admin",
+			Domains: []cfztv1alpha1.AccessApplicationDomain{
+				cfztv1alpha1.AccessApplicationDomain(hostname + "/admin"),
+			},
+			Policies: []cfztv1alpha1.AccessApplicationPolicyBinding{{
+				PolicyRef: cfztv1alpha1.AccessPolicyRef{Name: h.cfg.accessPolicy},
+			}},
 		},
 	}
 }
@@ -565,15 +588,15 @@ func (h *smokeHarness) waitPublicRoute() {
 	})
 }
 
-func (h *smokeHarness) assertAccessChallenged() {
+func (h *smokeHarness) assertAccessChallenged(path string) {
 	httpClient := smokeHTTPClient()
-	h.t.Logf("checking unauthenticated Access response for https://%s/hostname", h.cfg.accessHostname)
+	h.t.Logf("checking unauthenticated Access response for https://%s%s", h.cfg.accessHostname, path)
 	var lastStatus int
 	var lastLocation string
 	var lastBody string
 	var lastErr error
 	err := wait.PollUntilContextTimeout(h.ctx, 5*time.Second, accessHTTPTimeout, true, func(context.Context) (bool, error) {
-		req, err := http.NewRequestWithContext(h.ctx, http.MethodGet, "https://"+h.cfg.accessHostname+"/hostname", nil)
+		req, err := http.NewRequestWithContext(h.ctx, http.MethodGet, "https://"+h.cfg.accessHostname+path, nil)
 		if err != nil {
 			return false, err
 		}
@@ -604,7 +627,7 @@ func (h *smokeHarness) assertAccessChallenged() {
 		h.dumpDiagnostics("Access hostname challenge")
 		h.t.Fatalf("timed out waiting for Access hostname challenge: %v; last status=%d location=%q transport/read error=%v body=%q", err, lastStatus, lastLocation, lastErr, lastBody)
 	}
-	h.t.Logf("Access hostname returned expected unauthenticated status %d location=%q", lastStatus, lastLocation)
+	h.t.Logf("Access path returned expected unauthenticated status %d location=%q", lastStatus, lastLocation)
 }
 
 func (h *smokeHarness) assertOneAccessPolicy(policyID string) {
@@ -627,35 +650,87 @@ func (h *smokeHarness) assertOneAccessPolicy(policyID string) {
 	assertEqual(h.t, "managed Access policy ID", policyID, matches[0].ID)
 }
 
-func (h *smokeHarness) assertAccessApplication(appID, policyID string) {
+func (h *smokeHarness) accessApplicationStatus(statuses []cfztv1alpha1.ExposureAccessApplicationStatus, name string) cfztv1alpha1.ExposureAccessApplicationStatus {
+	for _, status := range statuses {
+		if status.Name == name {
+			return status
+		}
+	}
+	h.t.Fatalf("missing Access application status entry %q in %v", name, statuses)
+	return cfztv1alpha1.ExposureAccessApplicationStatus{}
+}
+
+func (h *smokeHarness) assertAccessApplications(statuses []cfztv1alpha1.ExposureAccessApplicationStatus, policyID string) {
+	if len(statuses) != 2 {
+		h.t.Fatalf("expected two Access application status entries, got %d: %v", len(statuses), statuses)
+	}
+	rootStatus := h.accessApplicationStatus(statuses, "root")
+	adminStatus := h.accessApplicationStatus(statuses, "admin")
+	for _, status := range []cfztv1alpha1.ExposureAccessApplicationStatus{rootStatus, adminStatus} {
+		if status.AppID == "" {
+			h.t.Fatalf("Access application status entry %q missing app ID: %v", status.Name, statuses)
+		}
+		if status.CanonicalDomainHash == "" {
+			h.t.Fatalf("Access application status entry %q missing domain hash: %v", status.Name, statuses)
+		}
+		if status.PolicyHash == "" {
+			h.t.Fatalf("Access application status entry %q missing policy hash: %v", status.Name, statuses)
+		}
+	}
 	apps, err := h.cf.AccessApplications().List(h.ctx, h.cfg.accessHostname)
 	if err != nil {
 		h.t.Fatalf("list Access applications for %s: %v", h.cfg.accessHostname, err)
 	}
-	var matches []cloudflare.AccessApplication
-	for _, app := range apps {
-		if app.ID == appID {
-			matches = append(matches, app)
+	if len(apps) != 2 {
+		h.t.Fatalf("expected exactly two Access applications for %s, got %d: %v", h.cfg.accessHostname, len(apps), apps)
+	}
+	var rootApp *cloudflare.AccessApplication
+	var adminApp *cloudflare.AccessApplication
+	for i := range apps {
+		app := &apps[i]
+		switch app.Name {
+		case accessExposure + "-root-cfzt":
+			rootApp = app
+		case accessExposure + "-admin-cfzt":
+			adminApp = app
 		}
 	}
-	if len(matches) != 1 {
-		h.t.Fatalf("expected exactly one Access application %s for %s, got %d", appID, h.cfg.accessHostname, len(matches))
+	if rootApp == nil || adminApp == nil {
+		h.t.Fatalf("expected root and admin Access applications for %s, got %v", h.cfg.accessHostname, apps)
 	}
-	app := matches[0]
-	assertEqual(h.t, "Access application domain", h.cfg.accessHostname, app.Domain)
-	assertEqual(h.t, "Access application name", accessExposure+"-cfzt", app.Name)
-	if len(app.PolicyUUIDs) != 1 || app.PolicyUUIDs[0] != policyID {
-		h.t.Fatalf("expected Access application policies [%s], got %v", policyID, app.PolicyUUIDs)
-	}
-	if !containsString(app.Tags, "managed-by=cfzt-operator") {
-		h.t.Fatalf("Access application missing managed-by tag: %v", app.Tags)
-	}
-	for _, tag := range app.Tags {
-		if strings.HasPrefix(tag, "source-uid-0=") {
-			return
+	assertEqual(h.t, "root Access application domain", h.cfg.accessHostname, rootApp.Domain)
+	assertEqual(h.t, "root Access application name", accessExposure+"-root-cfzt", rootApp.Name)
+	assertEqual(h.t, "admin Access application domain", h.cfg.accessHostname+"/admin", adminApp.Domain)
+	assertEqual(h.t, "admin Access application name", accessExposure+"-admin-cfzt", adminApp.Name)
+	for _, app := range []*cloudflare.AccessApplication{rootApp, adminApp} {
+		if len(app.PolicyUUIDs) != 1 || app.PolicyUUIDs[0] != policyID {
+			h.t.Fatalf("expected Access application %s policies [%s], got %v", app.Name, policyID, app.PolicyUUIDs)
+		}
+		if len(app.Domains) != 1 {
+			h.t.Fatalf("expected Access application %s to have exactly one domain, got %v", app.Name, app.Domains)
+		}
+		if !containsString(app.Tags, "managed-by=cfzt-operator") {
+			h.t.Fatalf("Access application missing managed-by tag: %v", app.Tags)
+		}
+		var hasSourceUID bool
+		for _, tag := range app.Tags {
+			if strings.HasPrefix(tag, "source-uid-0=") {
+				hasSourceUID = true
+				break
+			}
+		}
+		if !hasSourceUID {
+			h.t.Fatalf("Access application missing source UID chunk tag: %v", app.Tags)
 		}
 	}
-	h.t.Fatalf("Access application missing source UID chunk tag: %v", app.Tags)
+	rootStatusID := h.accessApplicationStatus(statuses, "root").AppID
+	adminStatusID := h.accessApplicationStatus(statuses, "admin").AppID
+	if rootStatusID != rootApp.ID {
+		h.t.Fatalf("root Access application status app ID = %s, want %s", rootStatusID, rootApp.ID)
+	}
+	if adminStatusID != adminApp.ID {
+		h.t.Fatalf("admin Access application status app ID = %s, want %s", adminStatusID, adminApp.ID)
+	}
 }
 
 func (h *smokeHarness) expectedAccessPolicyName() string {

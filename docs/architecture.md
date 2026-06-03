@@ -18,7 +18,7 @@ Every decision below follows from these constraints.
 
 `CloudflareTunnel`, `CloudflareExposure`, `CloudflareAccessPolicy`, and `CloudflareTunnelRoute` are reconciled by separate controllers. The key asymmetry: **only the Tunnel controller writes the tunnel-config doc.**
 
-Exposure controllers validate, ensure Access apps and DNS records, then enqueue the owning Tunnel. The AccessPolicy controller manages reusable Cloudflare Access policies referenced by Exposure `policyRef.name`. The Tunnel controller lists all referencing Exposures, computes the full ingress document, and PUTs it in a single call. This is safe because:
+Exposure controllers validate, ensure Access applications and DNS records, then enqueue the owning Tunnel. The AccessPolicy controller manages reusable Cloudflare Access policies referenced by Exposure app policy bindings. The Tunnel controller lists all referencing Exposures, computes the full ingress document, and PUTs it in a single call. This is safe because:
 
 - D11: the doc is computed entirely from Kubernetes state on every reconcile
 - D12: leader election means one operator process per cluster
@@ -34,11 +34,11 @@ Tunnel controller watches `CloudflareExposure` (cluster-wide, maps to owning Tun
 
 Exposure controller watches `CloudflareTunnel` (maps to all Exposures referencing that Tunnel) so Tunnel status writes (route hashes) propagate back to Exposure `Ready` gating.
 
-Exposure controller also watches `CloudflareAccessPolicy` (maps to Exposures using `policyRef.name`) so policy readiness and policy ID changes propagate into Access application binding. AccessPolicy controller watches `CloudflareExposure` (maps by `policyRef.name`) so `status.referencedBy[]` and deletion blocking stay current.
+Exposure controller also watches `CloudflareAccessPolicy` (maps to Exposures using `access.applications[].policies[].policyRef.name`) so policy readiness and policy ID changes propagate into Access application binding. AccessPolicy controller watches `CloudflareExposure` (maps by those nested policy refs) so `status.referencedBy[]` and deletion blocking stay current.
 
 TunnelRoute controller watches `CloudflareTunnel` (maps to routes by `spec.tunnelRef.name`) so route reconciliation follows Tunnel readiness and ID changes.
 
-Exposure lookups are indexed by `spec.tunnelRef.name`, `spec.hostname`, `spec.access.policyRef.name`, and `spec.failover.group`; TunnelRoute lookups are indexed by `spec.tunnelRef.name`. Map functions, duplicate-host checks, and the failover group-conflict check should use those indexes rather than cluster-wide scans.
+Exposure lookups are indexed by `spec.tunnelRef.name`, `spec.hostname`, `spec.access.applications[].policies[].policyRef.name`, and `spec.failover.group`; TunnelRoute lookups are indexed by `spec.tunnelRef.name`. Map functions, duplicate-host checks, and the failover group-conflict check should use those indexes rather than cluster-wide scans.
 
 ## Ownership model
 
@@ -53,7 +53,7 @@ Exposure lookups are indexed by `spec.tunnelRef.name`, `spec.hostname`, `spec.ac
 
 **Mutation rule:** before updating or deleting an Access app, DNS record, or tunnel route, the operator verifies the resource's `source-uid` matches a current local CR. Mismatch → `Ready=False, Reason=ForeignResource` or route-specific `ForeignRoute`, no write.
 
-**Failover exception (D26):** for an Exposure with `spec.failover`, the shared Access app and DNS CNAME carry the **failover-group ID** as their `source-uid` instead of the per-CR uid (`ownership.FromFailoverGroup`), so either cluster recognizes them as owned. `MatchesComment`/`MatchesTags` accept either a per-CR uid (non-failover) or a group ID (failover). See [DR failover](#dr-failover-d26).
+**Failover exception (D26):** for an Exposure with `spec.failover`, the shared Access application set and DNS CNAME carry the **failover-group ID** as their `source-uid` instead of the per-CR uid (`ownership.FromFailoverGroup`), so either cluster recognizes them as owned. `MatchesComment`/`MatchesTags` accept either a per-CR uid (non-failover) or a group ID (failover). See [DR failover](#dr-failover-d26).
 
 **Hostname conflict:** a resource exists for a hostname and its `source-uid` does not match → `Ready=False, Reason=HostnameConflict`. Do not touch. Requeue after 30 seconds. Two Exposures claiming the same hostname → builder detects the collision at compile time and marks both `HostnameConflict`.
 
@@ -81,7 +81,7 @@ If you cannot prove a code path is idempotent, it is wrong.
 
 All owning CRDs use finalizer `cfzt.reid.ee/finalizer`.
 
-**Exposure finalizer:** on deletion, removes the DNS record and Access app (for owned resources only), then enqueues the owning Tunnel so the ingress doc is rewritten without the deleted Exposure. For a failover Exposure it first proves *live* lease ownership and removes the shared CNAME/Access only when this site holds the lease, otherwise removing just its own lease record (see [DR failover](#dr-failover-d26)).
+**Exposure finalizer:** on deletion, removes the DNS record and Access applications (for owned resources only), then enqueues the owning Tunnel so the ingress doc is rewritten without the deleted Exposure. For a failover Exposure it first proves *live* lease ownership and removes the shared CNAME / Access app set only when this site holds the lease, otherwise removing just its own lease record (see [DR failover](#dr-failover-d26)).
 
 **Tunnel finalizer:** blocks deletion while any `CloudflareExposure` references this tunnel (`Reason=BlockedByExposures`) or any `CloudflareTunnelRoute` references it (`Reason=BlockedByRoutes`). Once all dependants are deleted, the finalizer removes the Cloudflare tunnel, token Secret, and DaemonSet.
 
@@ -93,7 +93,7 @@ Deletion only touches resources the local CR demonstrably owns. Partial cleanup 
 
 ## DR failover (D26)
 
-Active-passive multi-cluster DR is opt-in per Exposure via `spec.failover`. Two clusters apply the same Exposure (matching `spec.failover.group`, each with its own `CloudflareTunnel` and its own `--site-id`) and cooperate over one hostname. Exactly one cluster is Primary and writes the shared public CNAME + Access application; the others are warm Standbys. Nothing in this section runs for Exposures without `spec.failover`.
+Active-passive multi-cluster DR is opt-in per Exposure via `spec.failover`. Two clusters apply the same Exposure (matching `spec.failover.group`, each with its own `CloudflareTunnel` and its own `--site-id`) and cooperate over one hostname. Exactly one cluster is Primary and writes the shared public CNAME + Access application set; the others are warm Standbys. Nothing in this section runs for Exposures without `spec.failover`.
 
 ### Best-effort lease, not a lock
 
@@ -118,7 +118,7 @@ For a failover Exposure the controller resolves role **before** any shared Acces
 4. `internal/dr.Decide` (pure state machine over now / site / previous role / observed lease / leaseSeconds / force token) returns one of: **Wait** (peer holds live lease → Standby, early return, no shared writes), **Acquire** (absent or expired or force), **Renew** (self-owned), **SplitBrain** (was Primary, peer now holds a live lease → demote).
 5. Acquire/Renew write the lease then **read back and verify** the surviving single record names this site; otherwise demote. This bounds the dual-writer window to ~one reconcile.
 
-Only a verified Primary proceeds to the shared Access/DNS writes (with the group-ID `source-uid`) and requeues at `leaseSeconds/2` to renew.
+Only a verified Primary proceeds to the shared Access/DNS writes (with the group-ID `source-uid`) and requeues at `leaseSeconds/2` to renew. A promoted standby re-lists the group-owned Access applications remotely, so the shared set is discovered from Cloudflare rather than stale local status.
 
 ### Deterministic duplicate resolution
 
@@ -156,7 +156,7 @@ All owning CRDs expose exactly `Ready` and `Progressing`. Detail is in `Reason` 
 | `HostnameConflict` | CF resource for hostname owned by different CR |
 | `ForeignResource` | CF resource owned by unknown source |
 | `ForeignTunnel` | Name-matching tunnel exists with no local ID record |
-| `AccessAppPending` | Access app not yet confirmed ready |
+| `AccessAppPending` | Access app set not yet confirmed ready |
 | `PolicyNotFound` | Access policy UUID not found in account |
 | `PolicyNotReady` | Referenced `CloudflareAccessPolicy` is missing, deleting, stale, or not ready |
 | `DNSWriteFailed` | DNS record creation or update failed |
@@ -296,7 +296,7 @@ The cloudflared image is pinned to a specific version as a Go constant in `inter
 | D6 | `CloudflareTunnel` is cluster-scoped. cloudflared workload is namespaced. |
 | D7 | DaemonSet only. No Deployment option. |
 | D8 | `Ready` + `Progressing` conditions only. Detail in Reason/Message. |
-| D9 | Tunnel ownership via local `status.tunnelId`, not a CF-side tag. Name collision without local ID → `ForeignTunnel`. Access apps, DNS records, and TunnelRoutes carry `source-uid` ownership markers; Access policies are tracked by `status.policyId`. Superseded by D26 for failover Exposures (group-ID `source-uid` on the shared Access app + CNAME). |
+| D9 | Tunnel ownership via local `status.tunnelId`, not a CF-side tag. Name collision without local ID → `ForeignTunnel`. Access applications, DNS records, and TunnelRoutes carry `source-uid` ownership markers; Access policies are tracked by `status.policyId`. Superseded by D26 for failover Exposures (group-ID `source-uid` on the shared Access application set + CNAME). |
 | D10 | Origin may be explicit, or partially derived by `sourceRef`: Service can derive host/port; HTTPRoute can derive hostname. |
 | D11 | Single writer for tunnel-config doc: Tunnel controller only. Exposure controller never calls the configurations endpoint. |
 | D12 | Leader election required ON. |
@@ -311,7 +311,7 @@ The cloudflared image is pinned to a specific version as a Go constant in `inter
 | D21 | Finalizer string: `cfzt.reid.ee/finalizer` on all owning CRDs. |
 | D22 | Minimum Kubernetes 1.27 (stable CEL CRD validation). |
 | D23 | Helm CRDs are install-only. ArgoCD/Flux users: document in NOTES.txt. |
-| D24 | `CloudflareAccessPolicy` CRD is in scope. Exposures bind exactly one of `policyRef.uuid` or `policyRef.name` when Access is enabled. |
+| D24 | `CloudflareAccessPolicy` CRD is in scope. Exposures bind Access applications through nested `access.applications[].policies[].policyRef` entries when Access is enabled. |
 | D25 | `CloudflareTunnelRoute` CRD is in scope. Tunnel private-network routes are reconciled independently and block Tunnel deletion while present. |
 | D26 | Active-passive multi-cluster DR is in scope as a per-Exposure opt-in (`spec.failover`), supersedes D9 for failover Exposures. Mandatory `--site-id` per process. Coordination via a best-effort Cloudflare DNS TXT lease (not linearizable). DNS-only — no external coordination (Workers KV / LB / etcd). Active-active and cross-cluster federation remain out of scope. See [DR failover](#dr-failover-d26). |
 

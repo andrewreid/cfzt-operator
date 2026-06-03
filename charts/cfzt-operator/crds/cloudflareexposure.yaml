@@ -65,6 +65,73 @@ spec:
                 default: {}
                 description: AccessSpec controls Cloudflare Access protection.
                 properties:
+                  applications:
+                    items:
+                      description: |-
+                        AccessApplicationTarget describes one Cloudflare Access self-hosted
+                        application owned by a CloudflareExposure.
+                      properties:
+                        domains:
+                          description: |-
+                            Domains is the ordered list of self-hosted domain targets for this Access
+                            application. The first entry is the Cloudflare primary domain.
+                          items:
+                            description: |-
+                              AccessApplicationDomain is one canonical self-hosted domain target for an
+                              Access application.
+                            maxLength: 253
+                            pattern: ^[^\s?#:]+(?:/[^\s?#:]*)?$
+                            type: string
+                          maxItems: 3
+                          minItems: 1
+                          type: array
+                          x-kubernetes-list-type: atomic
+                        name:
+                          maxLength: 63
+                          minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                          type: string
+                        policies:
+                          items:
+                            description: |-
+                              AccessApplicationPolicyBinding references one policy attached to an Access
+                              application. The policy ref shape stays shared with the legacy top-level
+                              access.policyRef field, but only nested bindings are accepted in v1alpha1.
+                            properties:
+                              policyRef:
+                                description: AccessPolicyRef points at an existing
+                                  Cloudflare Access policy.
+                                properties:
+                                  name:
+                                    maxLength: 253
+                                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                                    type: string
+                                  uuid:
+                                    pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$
+                                    type: string
+                                type: object
+                            required:
+                            - policyRef
+                            type: object
+                            x-kubernetes-validations:
+                            - message: policyRef requires exactly one of uuid or name
+                              rule: (has(self.policyRef.uuid) && size(self.policyRef.uuid)
+                                > 0) != (has(self.policyRef.name) && size(self.policyRef.name)
+                                > 0)
+                          maxItems: 3
+                          minItems: 1
+                          type: array
+                      required:
+                      - domains
+                      - name
+                      - policies
+                      type: object
+                    maxItems: 3
+                    minItems: 1
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
                   enabled:
                     default: false
                     type: boolean
@@ -179,15 +246,21 @@ spec:
                 is Service
               rule: (has(self.sourceRef) && self.sourceRef.kind == 'Service') || (has(self.origin)
                 && has(self.origin.protocol) && has(self.origin.host) && has(self.origin.port))
-            - message: hostname is required unless sourceRef.kind is HTTPRoute
+            - message: hostname is required unless sourceRef.kind is HTTPRoute and
+                access is disabled
               rule: has(self.hostname) || (has(self.sourceRef) && self.sourceRef.kind
-                == 'HTTPRoute')
-            - message: access.policyRef requires exactly one of uuid or name when
-                access.enabled is true
-              rule: '!has(self.access) || !self.access.enabled || (has(self.access.policyRef)
-                && ((has(self.access.policyRef.uuid) && size(self.access.policyRef.uuid)
-                > 0) != (has(self.access.policyRef.name) && size(self.access.policyRef.name)
-                > 0)))'
+                == 'HTTPRoute' && (!has(self.access) || !self.access.enabled))
+            - message: access.enabled=true requires spec.hostname and access.applications[]
+              rule: '!has(self.access) || !self.access.enabled || (has(self.hostname)
+                && size(self.hostname) > 0 && has(self.access.applications) && size(self.access.applications)
+                > 0)'
+            - message: access.policyRef was removed in v1alpha1; use access.applications[]
+              rule: '!has(self.access) || !has(self.access.policyRef)'
+            - message: access.applications[].domains must equal spec.hostname or start
+                with spec.hostname + "/"
+              rule: '!has(self.access) || !self.access.enabled || self.access.applications.all(app,
+                app.domains.all(domain, domain == self.hostname || domain.startsWith(self.hostname
+                + ''/'')))'
             - message: hostname is immutable except when initially derived from an
                 HTTPRoute sourceRef
               rule: 'has(oldSelf.hostname) ? (has(self.hostname) && self.hostname
@@ -205,8 +278,28 @@ spec:
                 description: ExposureCloudflareStatus records Cloudflare-side resources
                   for one exposure.
                 properties:
-                  accessApplicationId:
-                    type: string
+                  accessApplications:
+                    items:
+                      description: |-
+                        ExposureAccessApplicationStatus records one reconciled Access application for
+                        a CloudflareExposure.
+                      properties:
+                        appId:
+                          type: string
+                        canonicalDomainHash:
+                          type: string
+                        name:
+                          minLength: 1
+                          type: string
+                        policyHash:
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
                   dnsRecordId:
                     type: string
                   publicHostnameRouteHash:
