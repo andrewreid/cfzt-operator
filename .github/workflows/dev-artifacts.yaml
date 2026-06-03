@@ -17,14 +17,19 @@ env:
   HELM_VERSION: v3.16.0
 
 jobs:
-  publish:
-    name: publish dev artifacts
+  validate:
+    name: validate dev artifacts
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.ref_name == 'main' ||
       (github.event_name == 'push' && contains(github.event.head_commit.message, '[publish-dev]'))
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      image_ref: ${{ steps.version.outputs.image_ref }}
+      image_name: ${{ steps.version.outputs.image_name }}
+      chart_package_name: ${{ steps.version.outputs.chart_package_name }}
     concurrency:
       group: dev-artifacts-${{ github.sha }}
       cancel-in-progress: false
@@ -42,8 +47,9 @@ jobs:
           {
             echo "short_sha=${SHORT_SHA}"
             echo "version=${DEV_VERSION}"
+            echo "image_name=${REGISTRY}/${IMAGE_NAME}"
             echo "image_ref=${REGISTRY}/${IMAGE_NAME}:${DEV_VERSION}"
-            echo "chart_package=dist/cfzt-operator-${DEV_VERSION}.tgz"
+            echo "chart_package_name=cfzt-operator-${DEV_VERSION}.tgz"
           } >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-go@v6
@@ -55,11 +61,9 @@ jobs:
         with:
           version: ${{ env.HELM_VERSION }}
 
-      - uses: docker/setup-qemu-action@v4
-
       - uses: docker/setup-buildx-action@v4
 
-      - name: log in to ghcr for images
+      - name: log in to ghcr for artifact checks
         uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
@@ -96,35 +100,155 @@ jobs:
 
       - name: package dev chart
         run: |
+          mkdir -p dist
           helm package charts/cfzt-operator \
             --version "${{ steps.version.outputs.version }}" \
             --app-version "${{ steps.version.outputs.version }}" \
             --destination dist
 
-      - name: build + push dev image
+      - name: upload dev chart package
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-chart-package
+          path: dist/${{ steps.version.outputs.chart_package_name }}
+          if-no-files-found: error
+          retention-days: 1
+
+  build-image:
+    name: build ${{ matrix.platform }}
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            platform_pair: linux-amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            platform_pair: linux-arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: docker/setup-buildx-action@v4
+        with:
+          platforms: ${{ matrix.platform }}
+
+      - name: log in to ghcr for images
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: build and push digest
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.version.outputs.image_ref }}
-          cache-from: type=gha,scope=operator-image
-          cache-to: type=gha,mode=max,scope=operator-image
+          platforms: ${{ matrix.platform }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.validate.outputs.version }}
+          outputs: type=image,name=${{ needs.validate.outputs.image_name }},push-by-digest=true,name-canonical=true,push=true,oci-mediatypes=true
+          cache-from: type=gha,scope=operator-image-${{ matrix.platform_pair }}
+          cache-to: type=gha,mode=max,scope=operator-image-${{ matrix.platform_pair }}
+
+      - name: export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.platform_pair }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge-image:
+    name: merge dev image
+    needs:
+      - validate
+      - build-image
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: docker/setup-buildx-action@v4
+
+      - name: log in to ghcr for images
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: create image manifest
+        working-directory: /tmp/digests
+        env:
+          IMAGE_NAME: ${{ needs.validate.outputs.image_name }}
+          IMAGE_REF: ${{ needs.validate.outputs.image_ref }}
+        run: |
+          sources=()
+          for digest in *; do
+            sources+=("${IMAGE_NAME}@sha256:${digest}")
+          done
+          docker buildx imagetools create \
+            -t "${IMAGE_REF}" \
+            "${sources[@]}"
 
       - name: verify dev image
-        run: docker buildx imagetools inspect "${{ steps.version.outputs.image_ref }}"
+        run: docker buildx imagetools inspect "${{ needs.validate.outputs.image_ref }}"
+
+  publish-chart:
+    name: publish dev chart
+    needs:
+      - validate
+      - merge-image
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: azure/setup-helm@v5
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: log in to ghcr for charts
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login \
+            -u "${{ github.actor }}" --password-stdin "${REGISTRY}"
+
+      - name: download dev chart package
+        uses: actions/download-artifact@v4
+        with:
+          name: dev-chart-package
+          path: dist
 
       - name: push dev chart
-        run: helm push "${{ steps.version.outputs.chart_package }}" "${CHART_REPO}"
+        run: helm push "dist/${{ needs.validate.outputs.chart_package_name }}" "${CHART_REPO}"
 
       - name: verify dev chart
-        run: helm show chart "${CHART_REPO}/cfzt-operator" --version "${{ steps.version.outputs.version }}"
+        run: helm show chart "${CHART_REPO}/cfzt-operator" --version "${{ needs.validate.outputs.version }}"
 
       - name: summary
         run: |
           {
             echo "## Dev artifacts"
             echo
-            echo "Image: \`${{ steps.version.outputs.image_ref }}\`"
-            echo "Chart: \`${CHART_REPO}/cfzt-operator --version ${{ steps.version.outputs.version }}\`"
+            echo "Image: \`${{ needs.validate.outputs.image_ref }}\`"
+            echo "Chart: \`${CHART_REPO}/cfzt-operator --version ${{ needs.validate.outputs.version }}\`"
           } >> "$GITHUB_STEP_SUMMARY"

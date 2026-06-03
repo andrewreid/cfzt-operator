@@ -23,10 +23,18 @@ env:
   HELM_VERSION: v3.16.0
 
 jobs:
-  release:
+  release-gates:
+    name: release gates
     runs-on: ubuntu-latest
     timeout-minutes: 60
     concurrency: live-cloudflare-smoke
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+      image_name: ${{ steps.version.outputs.image_name }}
+      image_tags: ${{ steps.version.outputs.image_tags }}
+      chart_package_name: ${{ steps.version.outputs.chart_package_name }}
     env:
       CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
       CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
@@ -91,8 +99,9 @@ jobs:
             echo "tag=${TAG}"
             echo "prerelease=${PRERELEASE}"
             echo "tag_exists=${TAG_EXISTS}"
+            echo "image_name=${REGISTRY}/${IMAGE_NAME}"
             echo "image_tags=${IMAGE_TAGS}"
-            echo "chart_package=dist/cfzt-operator-${VERSION}.tgz"
+            echo "chart_package_name=cfzt-operator-${VERSION}.tgz"
           } >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-go@v6
@@ -103,8 +112,6 @@ jobs:
       - uses: azure/setup-helm@v5
         with:
           version: ${{ env.HELM_VERSION }}
-
-      - uses: docker/setup-qemu-action@v4
 
       - uses: docker/setup-buildx-action@v4
 
@@ -128,6 +135,7 @@ jobs:
 
       - name: package candidate chart
         run: |
+          mkdir -p dist
           helm package charts/cfzt-operator \
             --version "${{ steps.version.outputs.version }}" \
             --app-version "${{ steps.version.outputs.tag }}" \
@@ -140,8 +148,8 @@ jobs:
           platforms: linux/amd64
           load: true
           tags: ${{ env.CANDIDATE_IMAGE_REPOSITORY }}:${{ env.CANDIDATE_IMAGE_TAG }}
-          cache-from: type=gha,scope=operator-image
-          cache-to: type=gha,mode=max,scope=operator-image
+          cache-from: type=gha,scope=operator-image-candidate
+          cache-to: type=gha,mode=max,scope=operator-image-candidate
 
       - name: create chart smoke kind cluster
         uses: helm/kind-action@v1
@@ -154,7 +162,7 @@ jobs:
 
       - name: smoke test candidate chart on kind
         run: |
-          helm install cfzt-operator "${{ steps.version.outputs.chart_package }}" \
+          helm install cfzt-operator "dist/${{ steps.version.outputs.chart_package_name }}" \
             --namespace cfzt-system \
             --create-namespace \
             --set image.repository="${CANDIDATE_IMAGE_REPOSITORY}" \
@@ -185,7 +193,7 @@ jobs:
 
       - name: live smoke candidate against Cloudflare
         env:
-          CHART_REF: ./${{ steps.version.outputs.chart_package }}
+          CHART_REF: ./dist/${{ steps.version.outputs.chart_package_name }}
           IMAGE_REPOSITORY: ${{ env.CANDIDATE_IMAGE_REPOSITORY }}
           IMAGE_TAG: ${{ env.CANDIDATE_IMAGE_TAG }}
         run: go test -tags=live ./test/live -run '^TestCloudflareLifecycle$' -count=1 -timeout=30m -v
@@ -204,39 +212,163 @@ jobs:
           git tag -a "${TAG}" -m "${TAG}"
           git push origin "${TAG}"
 
-      - name: log in to ghcr
+      - name: upload release chart package
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-chart-package
+          path: dist/${{ steps.version.outputs.chart_package_name }}
+          if-no-files-found: error
+          retention-days: 1
+
+  build-release-image:
+    name: build release ${{ matrix.platform }}
+    needs: release-gates
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            platform_pair: linux-amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            platform_pair: linux-arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: docker/setup-buildx-action@v4
+        with:
+          platforms: ${{ matrix.platform }}
+
+      - name: log in to ghcr for images
         uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: build + push release image
+      - name: build and push digest
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.version.outputs.image_tags }}
-          cache-from: type=gha,scope=operator-image
-          cache-to: type=gha,mode=max,scope=operator-image
+          platforms: ${{ matrix.platform }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.release-gates.outputs.tag }}
+          outputs: type=image,name=${{ needs.release-gates.outputs.image_name }},push-by-digest=true,name-canonical=true,push=true,oci-mediatypes=true
+          cache-from: type=gha,scope=operator-image-${{ matrix.platform_pair }}
+          cache-to: type=gha,mode=max,scope=operator-image-${{ matrix.platform_pair }}
+
+      - name: export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-digests-${{ matrix.platform_pair }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge-release-image:
+    name: merge release image
+    needs:
+      - release-gates
+      - build-release-image
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: docker/setup-buildx-action@v4
+
+      - name: log in to ghcr for images
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: release-digests-*
+          merge-multiple: true
+
+      - name: create release image manifest
+        working-directory: /tmp/digests
+        env:
+          IMAGE_TAGS: ${{ needs.release-gates.outputs.image_tags }}
+          IMAGE_NAME: ${{ needs.release-gates.outputs.image_name }}
+        run: |
+          tag_args=()
+          sources=()
+          IFS=',' read -ra refs <<< "${IMAGE_TAGS}"
+          for ref in "${refs[@]}"; do
+            tag_args+=("-t" "${ref}")
+          done
+          for digest in *; do
+            sources+=("${IMAGE_NAME}@sha256:${digest}")
+          done
+          docker buildx imagetools create \
+            "${tag_args[@]}" \
+            "${sources[@]}"
 
       - name: verify release image
-        run: docker buildx imagetools inspect "${REGISTRY}/${IMAGE_NAME}:${{ steps.version.outputs.tag }}"
+        run: docker buildx imagetools inspect "${{ needs.release-gates.outputs.image_name }}:${{ needs.release-gates.outputs.tag }}"
+
+  publish-release:
+    name: publish release chart
+    needs:
+      - release-gates
+      - merge-release-image
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: docker/setup-buildx-action@v4
+
+      - name: log in to ghcr for image verification
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: azure/setup-helm@v5
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: download release chart package
+        uses: actions/download-artifact@v4
+        with:
+          name: release-chart-package
+          path: dist
+
+      - name: verify release image
+        run: docker buildx imagetools inspect "${{ needs.release-gates.outputs.image_name }}:${{ needs.release-gates.outputs.tag }}"
 
       - name: push release chart
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login \
             -u "${{ github.actor }}" --password-stdin "${REGISTRY}"
-          helm push "${{ steps.version.outputs.chart_package }}" "${CHART_REPO}"
+          helm push "dist/${{ needs.release-gates.outputs.chart_package_name }}" "${CHART_REPO}"
 
       - name: verify release chart
-        run: helm show chart "${CHART_REPO}/cfzt-operator" --version "${{ steps.version.outputs.version }}"
+        run: helm show chart "${CHART_REPO}/cfzt-operator" --version "${{ needs.release-gates.outputs.version }}"
 
       - name: github release
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ steps.version.outputs.tag }}
+          tag_name: ${{ needs.release-gates.outputs.tag }}
           target_commitish: ${{ github.sha }}
           generate_release_notes: true
-          prerelease: ${{ steps.version.outputs.prerelease == 'true' }}
+          prerelease: ${{ needs.release-gates.outputs.prerelease == 'true' }}
