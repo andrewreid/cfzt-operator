@@ -501,7 +501,7 @@ func (t *realAccessTags) Delete(ctx context.Context, name string) error {
 func (a *realAccessApplications) List(ctx context.Context, domain string) ([]AccessApplication, error) {
 	var out []AccessApplication
 	err := a.client.withRetry(ctx, func() error {
-		params := zero_trust.AccessApplicationListParams{AccountID: cf.F(a.client.accountID)}
+		params := accessApplicationListParams(a.client.accountID, domain)
 		pager := a.client.api.ZeroTrust.Access.Applications.ListAutoPaging(ctx, params)
 		out = out[:0]
 		for pager.Next() {
@@ -514,6 +514,14 @@ func (a *realAccessApplications) List(ctx context.Context, domain string) ([]Acc
 		return pager.Err()
 	})
 	return out, err
+}
+
+func accessApplicationListParams(accountID, domain string) zero_trust.AccessApplicationListParams {
+	params := zero_trust.AccessApplicationListParams{AccountID: cf.F(accountID)}
+	if domain != "" {
+		params.Domain = cf.F(domain)
+	}
+	return params
 }
 
 func (a *realAccessApplications) Create(ctx context.Context, in AccessApplicationInput) (*AccessApplication, error) {

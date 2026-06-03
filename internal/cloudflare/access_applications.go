@@ -19,11 +19,6 @@ type AccessApplicationInput struct {
 	Domains     []string
 	PolicyUUIDs []string
 	Tags        []string
-
-	// Legacy single-host fields kept so existing callers in other slices keep
-	// compiling until they are moved over to the multi-domain input.
-	Domain     string
-	PolicyUUID string
 }
 
 type AccessApplications interface {
@@ -53,23 +48,11 @@ func accessApplicationDomainMatchesHostname(domain, hostname string) bool {
 }
 
 func accessApplicationInputDomains(in AccessApplicationInput) []string {
-	if len(in.Domains) > 0 {
-		return append([]string(nil), in.Domains...)
-	}
-	if in.Domain != "" {
-		return []string{in.Domain}
-	}
-	return nil
+	return append([]string(nil), in.Domains...)
 }
 
 func accessApplicationInputPolicyUUIDs(in AccessApplicationInput) []string {
-	if len(in.PolicyUUIDs) > 0 {
-		return append([]string(nil), in.PolicyUUIDs...)
-	}
-	if in.PolicyUUID != "" {
-		return []string{in.PolicyUUID}
-	}
-	return nil
+	return append([]string(nil), in.PolicyUUIDs...)
 }
 
 func accessApplicationPrimaryDomain(domains []string) string {

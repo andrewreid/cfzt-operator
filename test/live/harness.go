@@ -407,9 +407,7 @@ func (h *smokeHarness) publicExposureObject() *cfztv1alpha1.CloudflareExposure {
 }
 
 func (h *smokeHarness) accessExposureObject() *cfztv1alpha1.CloudflareExposure {
-	exposure := h.exposureObject(accessExposure, h.cfg.accessHostname, true)
-	exposure.Spec.Access.PolicyRef.Name = h.cfg.accessPolicy
-	return exposure
+	return h.exposureObject(accessExposure, h.cfg.accessHostname, true)
 }
 
 func (h *smokeHarness) createConflictExposure() {

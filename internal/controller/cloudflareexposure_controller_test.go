@@ -289,7 +289,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		Expect(apps[1].Domains).To(Equal([]string{"multi-access.example.com"}))
 	})
 
-	It("TestExposureAccessDisabledDeletesOnlyTrackedApps", func() {
+	It("TestExposureAccessDisabledDeletesOwnedLiveApps", func() {
 		tunnel := readyTunnel(ctx, tunnelReconciler, "access-toggle", "access-toggle")
 		exposure := createExposure(ctx, "toggleauth", tunnel.Name, "toggleauth.example.com", true)
 		exposure.Spec.Access.Applications = []cfztv1alpha1.AccessApplicationTarget{
@@ -318,10 +318,10 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		current := fetchExposure(ctx, exposure.Name)
 		Expect(current.Status.Cloudflare.AccessApplications).To(HaveLen(2))
 		_, err := fakeCF.AccessApplications().Create(ctx, cloudflare.AccessApplicationInput{
-			Name:       "toggleauth-reports-cfzt",
-			Domain:     "toggleauth.example.com/reports",
-			PolicyUUID: defaultPolicyUUID,
-			Tags:       exposureOwner(current).Tags(),
+			Name:        "toggleauth-reports-cfzt",
+			Domains:     []string{"toggleauth.example.com/reports"},
+			PolicyUUIDs: []string{defaultPolicyUUID},
+			Tags:        exposureOwner(current).Tags(),
 		})
 		Expect(err).NotTo(HaveOccurred())
 		drainRecordedEvents(exposureRecorder)
@@ -334,8 +334,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		Expect(updated.Status.Cloudflare.AccessApplications).To(BeEmpty())
 		apps, err := fakeCF.AccessApplications().List(ctx, "toggleauth.example.com")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(apps).To(HaveLen(1))
-		Expect(apps[0].Name).To(Equal("toggleauth-reports-cfzt"))
+		Expect(apps).To(BeEmpty())
 	})
 
 	It("TestExposureDNSManageToggleOffDeletesOwnedRecord", func() {
@@ -445,10 +444,10 @@ var _ = Describe("CloudflareExposure Controller", func() {
 	It("TestExposureForeignTaggedAccessApplicationIsHostnameConflict", func() {
 		tunnel := readyTunnel(ctx, tunnelReconciler, "foreign-resource", "foreign-resource")
 		_, err := fakeCF.AccessApplications().Create(ctx, cloudflare.AccessApplicationInput{
-			Name:       "manual",
-			Domain:     "foreign.example.com",
-			PolicyUUID: defaultPolicyUUID,
-			Tags:       []string{"managed-by=cfzt-operator", "source-uid=other-exposure"},
+			Name:        "manual",
+			Domains:     []string{"foreign.example.com"},
+			PolicyUUIDs: []string{defaultPolicyUUID},
+			Tags:        []string{"managed-by=cfzt-operator", "source-uid=other-exposure"},
 		})
 		Expect(err).NotTo(HaveOccurred())
 		exposure := createExposure(ctx, "foreign", tunnel.Name, "foreign.example.com", true)
@@ -470,10 +469,10 @@ var _ = Describe("CloudflareExposure Controller", func() {
 	It("TestExposureForeignMixedDomainAccessApplicationIsHostnameConflict", func() {
 		tunnel := readyTunnel(ctx, tunnelReconciler, "foreign-mixed", "foreign-mixed")
 		_, err := fakeCF.AccessApplications().Create(ctx, cloudflare.AccessApplicationInput{
-			Name:       "manual",
-			Domains:    []string{"foreign-mixed.example.com", "foreign-mixed.example.com/reports", "other.example.net/reports"},
-			PolicyUUID: defaultPolicyUUID,
-			Tags:       []string{"managed-by=cfzt-operator", "source-uid=other-exposure"},
+			Name:        "manual",
+			Domains:     []string{"foreign-mixed.example.com", "foreign-mixed.example.com/reports", "other.example.net/reports"},
+			PolicyUUIDs: []string{defaultPolicyUUID},
+			Tags:        []string{"managed-by=cfzt-operator", "source-uid=other-exposure"},
 		})
 		Expect(err).NotTo(HaveOccurred())
 		exposure := createExposure(ctx, "foreign-mixed", tunnel.Name, "foreign-mixed.example.com", true)
@@ -574,10 +573,10 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		appIDs := []string{current.Status.Cloudflare.AccessApplications[0].AppID, current.Status.Cloudflare.AccessApplications[1].AppID}
 		recordID := current.Status.Cloudflare.DnsRecordId
 		_, err := fakeCF.AccessApplications().Create(ctx, cloudflare.AccessApplicationInput{
-			Name:       "delete-me-reports-cfzt",
-			Domain:     "delete-me.example.com/reports",
-			PolicyUUID: defaultPolicyUUID,
-			Tags:       exposureOwner(current).Tags(),
+			Name:        "delete-me-reports-cfzt",
+			Domains:     []string{"delete-me.example.com/reports"},
+			PolicyUUIDs: []string{defaultPolicyUUID},
+			Tags:        exposureOwner(current).Tags(),
 		})
 		Expect(err).NotTo(HaveOccurred())
 		drainRecordedEvents(exposureRecorder)
@@ -592,8 +591,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		}).Should(Succeed())
 		apps, err := fakeCF.AccessApplications().List(ctx, "delete-me.example.com")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(apps).To(HaveLen(1))
-		Expect(apps[0].Name).To(Equal("delete-me-reports-cfzt"))
+		Expect(apps).To(BeEmpty())
 		records, err := fakeCF.DNSRecords().List(ctx, "zone-example", "delete-me.example.com", "CNAME")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(records).To(BeEmpty())
@@ -822,10 +820,10 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		tunnel := readyTunnel(ctx, tunnelReconciler, "owned-mixed", "owned-mixed")
 		exposure := createExposure(ctx, "owned-mixed", tunnel.Name, "owned-mixed.example.com", true)
 		_, err := fakeCF.AccessApplications().Create(ctx, cloudflare.AccessApplicationInput{
-			Name:       desiredAccessApplicationName(exposure, "root"),
-			Domains:    []string{"owned-mixed.example.com", "owned-mixed.example.com/reports", "other.example.net/reports"},
-			PolicyUUID: defaultPolicyUUID,
-			Tags:       exposureOwner(exposure).Tags(),
+			Name:        desiredAccessApplicationName(exposure, "root"),
+			Domains:     []string{"owned-mixed.example.com", "owned-mixed.example.com/reports", "other.example.net/reports"},
+			PolicyUUIDs: []string{defaultPolicyUUID},
+			Tags:        exposureOwner(exposure).Tags(),
 		})
 		Expect(err).NotTo(HaveOccurred())
 
@@ -872,10 +870,10 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		current := fetchExposure(ctx, exposure.Name)
 		Expect(current.Status.Cloudflare.AccessApplications).To(HaveLen(2))
 		_, err := fakeCF.AccessApplications().Create(ctx, cloudflare.AccessApplicationInput{
-			Name:       "removed-app-reports-cfzt",
-			Domain:     "removed-app.example.com/reports",
-			PolicyUUID: defaultPolicyUUID,
-			Tags:       exposureOwner(current).Tags(),
+			Name:        "removed-app-reports-cfzt",
+			Domains:     []string{"removed-app.example.com/reports"},
+			PolicyUUIDs: []string{defaultPolicyUUID},
+			Tags:        exposureOwner(current).Tags(),
 		})
 		Expect(err).NotTo(HaveOccurred())
 		current.Spec.Access.Applications = current.Spec.Access.Applications[:1]
@@ -889,9 +887,8 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		Expect(updated.Status.Cloudflare.AccessApplications[0].Name).To(Equal("root"))
 		apps, err := fakeCF.AccessApplications().List(ctx, exposure.Spec.Hostname)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(apps).To(HaveLen(2))
-		sort.Slice(apps, func(i, j int) bool { return apps[i].Name < apps[j].Name })
-		Expect([]string{apps[0].Name, apps[1].Name}).To(Equal([]string{"removed-app-reports-cfzt", "removed-app-root-cfzt"}))
+		Expect(apps).To(HaveLen(1))
+		Expect(apps[0].Name).To(Equal("removed-app-root-cfzt"))
 	})
 
 	It("TestExposureAccessApplicationsPolicyRefNameNotReady", func() {

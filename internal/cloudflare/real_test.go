@@ -81,6 +81,19 @@ func TestMapAPIErrorNotFound(t *testing.T) {
 	}
 }
 
+func TestAccessApplicationListParamsUsesBroadDomainFilter(t *testing.T) {
+	params := accessApplicationListParams("account-1", "jellyfin.example.com")
+	if params.AccountID.Value != "account-1" {
+		t.Fatalf("AccountID = %q, want account-1", params.AccountID.Value)
+	}
+	if params.Domain.Value != "jellyfin.example.com" {
+		t.Fatalf("Domain = %q, want broad hostname filter", params.Domain.Value)
+	}
+	if params.Exact.Value {
+		t.Fatal("Exact = true, want broad domain filter without exact matching")
+	}
+}
+
 func TestAccessAppFromListResponseCapturesDomainsAndPolicyIDs(t *testing.T) {
 	app := accessAppFromListResponse(zero_trust.AccessApplicationListResponse{
 		ID:     "app-1",

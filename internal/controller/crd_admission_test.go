@@ -57,8 +57,15 @@ var _ = Describe("CRD admission", func() {
 			e.Spec.Access.Applications = nil
 		}), "access.enabled=true requires spec.hostname and access.applications[]", nil},
 		{"rejects removed top-level access policyRef", exposureWith("policyref-removed", func(e *cfztv1alpha1.CloudflareExposure) {
-			e.Spec.Access.PolicyRef = cfztv1alpha1.AccessPolicyRef{UUID: "00000000-0000-4000-8000-000000000002"}
+			e.Spec.Access.PolicyRef = &cfztv1alpha1.AccessPolicyRef{UUID: "00000000-0000-4000-8000-000000000002"}
 		}), "access.policyRef was removed in v1alpha1; use access.applications[]", nil},
+		{"accepts nested applications without removed top-level policyRef", exposureWith("policyref-absent", func(e *cfztv1alpha1.CloudflareExposure) {
+			e.Spec.Access.PolicyRef = nil
+		}), "", func(obj client.Object) {
+			created := obj.(*cfztv1alpha1.CloudflareExposure)
+			Expect(created.Spec.Access.PolicyRef).To(BeNil())
+			Expect(created.Spec.Access.Applications).To(HaveLen(1))
+		}},
 		{"accepts access policy UUID alone", exposureWith("policyref-uuid-alone", func(e *cfztv1alpha1.CloudflareExposure) {
 			e.Spec.Access.Applications[0].Policies[0].PolicyRef = cfztv1alpha1.AccessPolicyRef{UUID: "00000000-0000-4000-8000-000000000002"}
 		}), "", nil},

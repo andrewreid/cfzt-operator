@@ -100,10 +100,13 @@ type AccessApplicationTarget struct {
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Name string `json:"name"`
 
+	// Domains is the ordered list of self-hosted domain targets for this Access
+	// application. The first entry is the Cloudflare primary domain.
+	//
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=3
-	// +listType=set
+	// +listType=atomic
 	Domains []AccessApplicationDomain `json:"domains"`
 
 	// +kubebuilder:validation:Required
@@ -119,7 +122,7 @@ type AccessSpec struct {
 	Enabled bool `json:"enabled"`
 
 	// +kubebuilder:validation:Optional
-	PolicyRef AccessPolicyRef `json:"policyRef,omitempty,omitzero"`
+	PolicyRef *AccessPolicyRef `json:"policyRef,omitempty"`
 
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:validation:MinItems=1
@@ -197,10 +200,6 @@ type CloudflareExposureSpec struct {
 
 // ExposureCloudflareStatus records Cloudflare-side resources for one exposure.
 type ExposureCloudflareStatus struct {
-	// AccessApplicationId is retained only so older controller code compiles
-	// during the Slice 8a API migration; it is not serialized into the CRD.
-	AccessApplicationId string `json:"-"`
-
 	// +listType=map
 	// +listMapKey=name
 	// +optional

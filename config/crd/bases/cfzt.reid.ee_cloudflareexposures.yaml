@@ -72,6 +72,9 @@ spec:
                         application owned by a CloudflareExposure.
                       properties:
                         domains:
+                          description: |-
+                            Domains is the ordered list of self-hosted domain targets for this Access
+                            application. The first entry is the Cloudflare primary domain.
                           items:
                             description: |-
                               AccessApplicationDomain is one canonical self-hosted domain target for an
@@ -82,7 +85,7 @@ spec:
                           maxItems: 3
                           minItems: 1
                           type: array
-                          x-kubernetes-list-type: set
+                          x-kubernetes-list-type: atomic
                         name:
                           maxLength: 63
                           minLength: 1

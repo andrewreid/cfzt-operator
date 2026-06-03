@@ -136,7 +136,11 @@ func (h *smokeHarness) waitExposureFailoverRole(role string, timeout time.Durati
 }
 
 func (h *smokeHarness) readFailoverLease() (dr.Lease, *cloudflare.DNSRecord) {
-	records, err := h.cf.DNSRecords().List(h.ctx, h.cfg.zoneID, h.failoverLeaseName(), "TXT")
+	return h.readFailoverLeaseWithContext(h.ctx)
+}
+
+func (h *smokeHarness) readFailoverLeaseWithContext(ctx context.Context) (dr.Lease, *cloudflare.DNSRecord) {
+	records, err := h.cf.DNSRecords().List(ctx, h.cfg.zoneID, h.failoverLeaseName(), "TXT")
 	if err != nil {
 		h.t.Fatalf("list failover lease TXT: %v", err)
 	}
@@ -196,7 +200,7 @@ func (h *smokeHarness) cleanupFailover() {
 
 	// The operator removes the lease TXT + CNAME when it owned them; if a
 	// simulated peer lease is the last writer, remove it directly.
-	if _, record := h.readFailoverLease(); record != nil {
+	if _, record := h.readFailoverLeaseWithContext(cleanupCtx); record != nil {
 		if err := h.cf.DNSRecords().Delete(cleanupCtx, h.cfg.zoneID, record.ID); err != nil {
 			h.t.Errorf("cleanup: delete failover lease TXT: %v", err)
 		}

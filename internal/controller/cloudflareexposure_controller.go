@@ -228,7 +228,7 @@ func (r *CloudflareExposureReconciler) reconcileExposureAccess(ctx context.Conte
 				return ctrl.Result{}, true, err
 			}
 		}
-		statuses, _, err := r.reconcileOwnedAccessApplications(ctx, exposure, cfClient, desired, owned, status.AccessApplications, exposure.Spec.Failover != nil)
+		statuses, _, err := r.reconcileOwnedAccessApplications(ctx, exposure, cfClient, desired, owned)
 		if err != nil {
 			status.AccessApplications = statuses
 			if statusErr := r.setExposureStatus(ctx, exposure, *status, false, ReasonAccessAppPending, err.Error()); statusErr != nil {
@@ -242,7 +242,7 @@ func (r *CloudflareExposureReconciler) reconcileExposureAccess(ctx context.Conte
 		}
 		return ctrl.Result{}, false, nil
 	}
-	deleted, err := r.deleteAccessApplications(ctx, exposure, cfClient, exposure.Spec.Failover != nil, status.AccessApplications)
+	deleted, err := r.deleteAccessApplications(ctx, exposure, cfClient, status.AccessApplications)
 	if err != nil {
 		return ctrl.Result{}, true, err
 	}
@@ -468,14 +468,12 @@ func accessApplicationCoverageKey(domains []string) string {
 	return strings.Join(sortedCopy(domains), "\x00")
 }
 
-func (r *CloudflareExposureReconciler) reconcileOwnedAccessApplications(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, cfClient cloudflare.Client, desired []desiredAccessApplication, owned []ownedAccessApplication, tracked []cfztv1alpha1.ExposureAccessApplicationStatus, deleteAll bool) ([]cfztv1alpha1.ExposureAccessApplicationStatus, accessApplicationReconcileAction, error) {
+func (r *CloudflareExposureReconciler) reconcileOwnedAccessApplications(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, cfClient cloudflare.Client, desired []desiredAccessApplication, owned []ownedAccessApplication) ([]cfztv1alpha1.ExposureAccessApplicationStatus, accessApplicationReconcileAction, error) {
 	statuses := make([]cfztv1alpha1.ExposureAccessApplicationStatus, 0, len(desired))
 	matched := make(map[string]struct{}, len(desired))
-	byID := make(map[string]ownedAccessApplication, len(owned))
 	byName := make(map[string]ownedAccessApplication, len(owned))
 	byCoverage := make(map[string]ownedAccessApplication, len(owned))
 	for _, app := range owned {
-		byID[app.app.ID] = app
 		byName[app.app.Name] = app
 		byCoverage[accessApplicationCoverageKey(app.canonicalDomains)] = app
 	}
@@ -508,40 +506,8 @@ func (r *CloudflareExposureReconciler) reconcileOwnedAccessApplications(ctx cont
 		r.Recorder.Eventf(exposure, corev1.EventTypeNormal, EventCreatedAccessApp, "Created Cloudflare Access application %s for %s", created.ID, exposure.Spec.Hostname)
 		statuses = append(statuses, accessApplicationStatusFrom(want.spec.Name, created))
 	}
-	if deleteAll {
-		for _, app := range owned {
-			if _, ok := matched[app.app.ID]; ok {
-				continue
-			}
-			if err := cfClient.AccessApplications().Delete(ctx, app.app.ID); err != nil && !errors.Is(err, cloudflare.ErrNotFound) {
-				return statuses, action, err
-			}
-			action = accessApplicationReconcileUpdated
-			r.Recorder.Eventf(exposure, corev1.EventTypeNormal, EventDeletedAccessApp, "Deleted Cloudflare Access application %s for %s", app.app.ID, exposure.Spec.Hostname)
-		}
-		sort.Slice(statuses, func(i, j int) bool {
-			return statuses[i].Name < statuses[j].Name
-		})
-		return statuses, action, nil
-	}
-	trackedByID := make(map[string]struct{}, len(tracked))
-	for _, app := range tracked {
-		if app.AppID != "" {
-			trackedByID[app.AppID] = struct{}{}
-		}
-	}
-	for _, trackedApp := range tracked {
-		if trackedApp.AppID == "" {
-			continue
-		}
-		if _, ok := matched[trackedApp.AppID]; ok {
-			continue
-		}
-		if _, ok := trackedByID[trackedApp.AppID]; !ok {
-			continue
-		}
-		app, ok := byID[trackedApp.AppID]
-		if !ok {
+	for _, app := range owned {
+		if _, ok := matched[app.app.ID]; ok {
 			continue
 		}
 		if err := cfClient.AccessApplications().Delete(ctx, app.app.ID); err != nil && !errors.Is(err, cloudflare.ErrNotFound) {
@@ -791,7 +757,7 @@ func (r *CloudflareExposureReconciler) reconcileDelete(ctx context.Context, expo
 	if deletedDNS {
 		r.Recorder.Eventf(exposure, corev1.EventTypeNormal, EventDeletedDNSRecord, "Deleted Cloudflare DNS CNAME record %s for %s", exposure.Status.Cloudflare.DnsRecordId, exposure.Spec.Hostname)
 	}
-	deletedAccess, err := r.deleteAccessApplications(ctx, exposure, cfClient, failover, exposure.Status.Cloudflare.AccessApplications)
+	deletedAccess, err := r.deleteAccessApplications(ctx, exposure, cfClient, exposure.Status.Cloudflare.AccessApplications)
 	if err != nil {
 		if errors.Is(err, errForeignResource) {
 			return r.setExposureStatusAndRequeue(ctx, exposure, exposure.Status.Cloudflare, ReasonForeignResource, "Access application is not owned by this CloudflareExposure")
@@ -805,7 +771,7 @@ func (r *CloudflareExposureReconciler) reconcileDelete(ctx context.Context, expo
 	return ctrl.Result{}, r.Update(ctx, exposure)
 }
 
-func (r *CloudflareExposureReconciler) deleteAccessApplications(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, cfClient cloudflare.Client, deleteAll bool, tracked []cfztv1alpha1.ExposureAccessApplicationStatus) (bool, error) {
+func (r *CloudflareExposureReconciler) deleteAccessApplications(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, cfClient cloudflare.Client, tracked []cfztv1alpha1.ExposureAccessApplicationStatus) (bool, error) {
 	apps, err := cfClient.AccessApplications().List(ctx, exposure.Spec.Hostname)
 	if err != nil {
 		return false, err
@@ -820,38 +786,24 @@ func (r *CloudflareExposureReconciler) deleteAccessApplications(ctx context.Cont
 		}
 	}
 	deleted := false
-	if deleteAll {
-		for id := range owned {
-			if err := cfClient.AccessApplications().Delete(ctx, id); err != nil && !errors.Is(err, cloudflare.ErrNotFound) {
-				return false, err
-			}
-			deleted = true
-		}
-		if deleted {
-			if err := r.deleteOwnedAccessTags(ctx, cfClient, owner); err != nil {
-				return false, err
-			}
-		}
-		return deleted, nil
-	}
 	for _, trackedApp := range tracked {
 		if trackedApp.AppID == "" {
 			continue
 		}
-		app, ok := owned[trackedApp.AppID]
-		if !ok {
-			if _, exists := byID[trackedApp.AppID]; exists {
-				return false, errForeignResource
-			}
+		if _, ok := owned[trackedApp.AppID]; ok {
 			continue
 		}
-		if err := cfClient.AccessApplications().Delete(ctx, app.ID); err != nil && !errors.Is(err, cloudflare.ErrNotFound) {
+		if _, exists := byID[trackedApp.AppID]; exists {
+			return false, errForeignResource
+		}
+	}
+	for id := range owned {
+		if err := cfClient.AccessApplications().Delete(ctx, id); err != nil && !errors.Is(err, cloudflare.ErrNotFound) {
 			return false, err
 		}
 		deleted = true
-		delete(owned, app.ID)
 	}
-	if deleted && len(owned) == 0 {
+	if deleted {
 		if err := r.deleteOwnedAccessTags(ctx, cfClient, owner); err != nil {
 			return false, err
 		}

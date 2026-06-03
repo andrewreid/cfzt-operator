@@ -1294,12 +1294,12 @@ Per `spec.md ## Implementation slices ### Slice 7b` and D27. Outcome: one `Cloud
 
 4. **Exposure reconcile create/update/delete for app sets.**
    - Files: `internal/controller/cloudflareexposure_controller.go`.
-   - Implements: list apps for the hostname, match owned apps by source-uid and desired canonical targets, create missing apps, update name/domain/policy/tag drift, delete owned apps removed from spec, and delete owned apps when `access.enabled` flips false. For non-failover Exposures, deletion is limited to status-tracked apps. For failover Primary, deletion also includes live-discovered group-owned apps under `spec.hostname`, because a newly-promoted site may not have the former Primary's `status.cloudflare.accessApplications[]` entries. Keep status writes deterministic.
+   - Implements: list apps for the hostname, match owned apps by source-uid and desired canonical targets, create missing apps, update name/domain/policy/tag drift, delete owned apps removed from spec, and delete owned apps when `access.enabled` flips false. Non-failover cleanup discovers owned live apps under `spec.hostname` rather than relying only on status-tracked IDs. For failover Primary, deletion also includes live-discovered group-owned apps under `spec.hostname`, because a newly-promoted site may not have the former Primary's `status.cloudflare.accessApplications[]` entries. Keep status writes deterministic.
    - Tests: `TestExposureAccessApplicationsCreateRootAndPaths`, `TestExposureAccessApplicationsPolicyOrderDrift`, `TestExposureAccessApplicationRemovedDeletesOnlyOwnedApp`, `TestExposureAccessDisabledDeletesAllOwnedApps`, `TestFailoverAccessApplicationsPromotedStandbyDeletesRemovedGroupOwnedApp`.
 
 5. **Ownership, finalizer, and failover paths.**
    - Files: `internal/controller/cloudflareexposure_controller.go`, `conditions.go` if reason/event constants need expansion.
-   - Implements: non-failover finalizer deletes owned status-tracked apps and leaves foreign-tagged apps alone; `access.enabled: false` cleanup removes owned apps; failover Primary validates and writes the full app set with failover-group `source-uid`; Standby writes none of it. Failover cleanup first proves live lease ownership, then deletes all group-owned apps discovered under the hostname; stale `status.failover.role=Primary` is not sufficient.
+   - Implements: non-failover finalizer discovers and deletes owned live apps under the hostname and leaves foreign-tagged apps alone; `access.enabled: false` cleanup removes owned apps; failover Primary validates and writes the full app set with failover-group `source-uid`; Standby writes none of it. Failover cleanup first proves live lease ownership, then deletes all group-owned apps discovered under the hostname; stale `status.failover.role=Primary` is not sufficient.
    - Tests: `TestExposureFinalizerDeletesAllAccessApps`, `TestExposureFinalizerLeavesForeignAccessApps`, `TestFailoverAccessApplicationsPrimaryWritesFullSet`, `TestFailoverAccessApplicationsStandbyWritesNone`, `TestFailoverFinalizerDeletesDiscoveredGroupOwnedAppsOnlyWithLiveLease`, `TestFailoverFinalizerIgnoresStalePrimaryStatus`.
 
 6. **Ready/status semantics for failover app sets.**
@@ -1320,7 +1320,7 @@ Per `spec.md ## Implementation slices ### Slice 7b` and D27. Outcome: one `Cloud
 **Definition of done**
 
 - Explicit `access.applications[]` reconciles root + path Access apps for one hostname, with expected `self_hosted_domains`, ordered policy links, ownership tags, deterministic status entries, and no duplicate writes on reapply.
-- Removing an app entry deletes only that owned app; disabling Access deletes all owned Access apps; finalizer deletes all owned Access apps and preserves foreign-tagged apps. For failover Primary, "owned" includes live-discovered group-owned apps under the hostname, not only this cluster's status entries.
+- Removing an app entry deletes owned live apps no longer desired; disabling Access deletes all owned Access apps; finalizer deletes all owned Access apps and preserves foreign-tagged apps. For failover Primary, "owned" includes live-discovered group-owned apps under the hostname, not only this cluster's status entries.
 - Foreign exact target collision gives `Ready=False, Reason=HostnameConflict`; no Access app, DNS record, or tunnel ingress write is attempted as part of resolving the conflict.
 - Failover Primary owns the entire app set with failover-group tags; Standby never writes the shared Access app set. Promotion validates the full app set before public CNAME writes, and Standby readiness does not require local app status for the Primary-owned set.
 - `make manifests generate && git diff --exit-code`, `go test ./...`, and `helm lint charts/cfzt-operator` are clean.
@@ -1330,7 +1330,7 @@ Per `spec.md ## Implementation slices ### Slice 7b` and D27. Outcome: one `Cloud
 
 - **Cloudflare path matching assumptions.** Cloudflare documents root applications as covering paths and more-specific path apps as taking precedence. Live smoke must verify the root-plus-specific-path shape before recommending it broadly.
 - **Policy precedence misunderstanding.** The operator preserves listed policy order inside each app, but Cloudflare evaluates action classes first. Document that order cannot force Allow ahead of Bypass/Service Auth.
-- **Deletion blast radius.** Removed app entries are real deletes. Only delete status-tracked, ownership-tag-matching apps; never infer deletion solely from a same-name or same-domain remote object.
+- **Deletion blast radius.** Removed app entries are real deletes. Only delete ownership-tag-matching live apps under the Exposure hostname; never infer deletion solely from a same-name or same-domain remote object.
 - **Failover status locality.** `status.cloudflare.accessApplications[]` is per cluster, but the failover Access app set is shared. A promoted standby must discover group-owned apps remotely for drift/deletion; otherwise removed path apps can leak until the old primary returns.
 - **Duplicate target ambiguity.** Treat `<host>` and `<host>/*` as duplicate desired coverage to avoid users creating two apps that both claim the root. Keep different specific paths independent.
 - **Cloudflare discovery blind spot.** `Exact=true` misses path apps. Broad/list-all discovery with client-side canonical filtering is mandatory, even if the exact query looks neater.
