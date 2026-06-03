@@ -107,7 +107,7 @@ jobs:
             --destination dist
 
       - name: upload dev chart package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dev-chart-package
           path: dist/${{ steps.version.outputs.chart_package_name }}
@@ -165,7 +165,7 @@ jobs:
           touch "/tmp/digests/${digest#sha256:}"
 
       - name: upload digest
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: digests-${{ matrix.platform_pair }}
           path: /tmp/digests/*
@@ -191,7 +191,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: download digests
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: /tmp/digests
           pattern: digests-*
@@ -233,7 +233,7 @@ jobs:
             -u "${{ github.actor }}" --password-stdin "${REGISTRY}"
 
       - name: download dev chart package
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: dev-chart-package
           path: dist

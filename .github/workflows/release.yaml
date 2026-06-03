@@ -213,7 +213,7 @@ jobs:
           git push origin "${TAG}"
 
       - name: upload release chart package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-chart-package
           path: dist/${{ steps.version.outputs.chart_package_name }}
@@ -271,7 +271,7 @@ jobs:
           touch "/tmp/digests/${digest#sha256:}"
 
       - name: upload digest
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-digests-${{ matrix.platform_pair }}
           path: /tmp/digests/*
@@ -297,7 +297,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: download digests
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: /tmp/digests
           pattern: release-digests-*
@@ -348,7 +348,7 @@ jobs:
           version: ${{ env.HELM_VERSION }}
 
       - name: download release chart package
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-chart-package
           path: dist
