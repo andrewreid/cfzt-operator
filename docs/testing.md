@@ -76,7 +76,7 @@ There are two tests:
 10. Wait for both Exposures to become `Ready=True`.
 11. Call the public hostname and require HTTP 200 from the echo workload.
 12. Call the Access hostname and the path-scoped Access URL without credentials and require an Access challenge or denial, not HTTP 200.
-13. Reapply no-op spec updates, restart the operator Deployment, and verify the Cloudflare object IDs, route hashes, Access application names/domains/policy bindings, and Tunnel ingress document hash do not change.
+13. Reapply no-op spec updates, restart the operator Deployment, and verify the Cloudflare object IDs, route hashes, Access application names/ordered domains/policy bindings, and Tunnel ingress document hash do not change. This includes round-tripping the root app and path app domains in Cloudflare's returned order.
 14. Create a foreign DNS CNAME for a conflict hostname, create a conflicting Exposure, and verify the operator reports `HostnameConflict` or `ForeignResource` without changing the foreign record.
 15. Create a foreign Cloudflare tunnel route, create a conflicting `CloudflareTunnelRoute`, and verify the operator reports `ForeignRoute` without changing the foreign route.
 16. Delete the Kubernetes resources, wait for finalizers, and verify managed DNS records, Access applications, Access policy, tunnel route, and tunnel are gone.

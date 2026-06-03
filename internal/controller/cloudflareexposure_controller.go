@@ -237,9 +237,6 @@ func (r *CloudflareExposureReconciler) reconcileExposureAccess(ctx context.Conte
 			return ctrl.Result{}, true, err
 		}
 		status.AccessApplications = statuses
-		if err := r.setExposureStatus(ctx, exposure, *status, false, ReasonAccessAppPending, "reconciling Cloudflare Access applications"); err != nil {
-			return ctrl.Result{}, true, err
-		}
 		return ctrl.Result{}, false, nil
 	}
 	deleted, err := r.deleteAccessApplications(ctx, exposure, cfClient, status.AccessApplications)

@@ -1222,8 +1222,8 @@ Therefore implementation must not use `Exact=true` for path-app discovery. Use b
 
 1. **CRD/API fields + generated output.**
    - Files: `api/v1alpha1/cloudflareexposure_types.go`, generated deepcopy, CRDs, Helm CRD copy.
-   - Implements: `AccessApplicationTarget`, `AccessApplicationPolicyBinding`, `ExposureAccessApplicationStatus`; `spec.access.applications[]` as a map list keyed by `name`; `status.cloudflare.accessApplications[]` as a map list keyed by `name`; remove `status.cloudflare.accessApplicationId` from current readiness/drift semantics.
-   - Validation: `access.enabled=true` requires explicit `spec.hostname` and non-empty `applications[]`; top-level `spec.access.policyRef` is rejected if present with `access.policyRef was removed in v1alpha1; use access.applications[]`; nested policy bindings require exactly one of `{uuid, name}`; domains must equal `spec.hostname` or start with `spec.hostname + "/"`; reject empty policies.
+   - Implements: `AccessApplicationTarget`, `AccessApplicationPolicyBinding`, `ExposureAccessApplicationStatus`; `spec.access.applications[]` as a map list keyed by `name`; `domains[]` as an ordered list where the first entry is the Cloudflare primary app domain; `status.cloudflare.accessApplications[]` as a map list keyed by `name`; remove `status.cloudflare.accessApplicationId` from current readiness/drift semantics.
+   - Validation: `access.enabled=true` requires explicit `spec.hostname` and non-empty `applications[]`; top-level `spec.access.policyRef` is rejected if present with `access.policyRef was removed in v1alpha1; use access.applications[]`; nested policy bindings require exactly one of `{uuid, name}`; admission checks domains equal `spec.hostname` or start with `spec.hostname + "/"`; controller-side validation rejects unsupported URL components, path/glob grammar errors, and duplicate canonical coverage before mutation.
    - Tests: `TestExposureAccessApplicationsCRDValidation`, `TestExposurePolicyRefRemovedValidation`, existing Slice 2/4 Access tests migrated to the new one-entry app list.
 
 2. **Access target canonicalization + hashes.**
@@ -1332,7 +1332,7 @@ Per `spec.md ## Implementation slices ### Slice 7b` and D27. Outcome: one `Cloud
 - **Policy precedence misunderstanding.** The operator preserves listed policy order inside each app, but Cloudflare evaluates action classes first. Document that order cannot force Allow ahead of Bypass/Service Auth.
 - **Deletion blast radius.** Removed app entries are real deletes. Only delete ownership-tag-matching live apps under the Exposure hostname; never infer deletion solely from a same-name or same-domain remote object.
 - **Failover status locality.** `status.cloudflare.accessApplications[]` is per cluster, but the failover Access app set is shared. A promoted standby must discover group-owned apps remotely for drift/deletion; otherwise removed path apps can leak until the old primary returns.
-- **Duplicate target ambiguity.** Treat `<host>` and `<host>/*` as duplicate desired coverage to avoid users creating two apps that both claim the root. Keep different specific paths independent.
+- **Duplicate target ambiguity.** Treat `<host>` and `<host>/*` as duplicate desired coverage to avoid users creating two apps that both claim the root. Keep this check in controller-side validation rather than brittle bounded CEL comparisons, so the API can scale beyond small fixed app counts while still refusing to mutate Cloudflare on ambiguous desired state. Keep different specific paths independent.
 - **Cloudflare discovery blind spot.** `Exact=true` misses path apps. Broad/list-all discovery with client-side canonical filtering is mandatory, even if the exact query looks neater.
 - **Failover partial writes.** DR promotion must validate the whole app set before mutating anything. A Primary that creates the root app and then discovers a foreign path app leaves a mess.
 

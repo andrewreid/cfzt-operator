@@ -158,6 +158,8 @@ spec:
 
 Root plus specific path overrides are the recommended pattern. A bare host and `host/*` describe the same coverage, so do not list them both.
 
+`access.applications[].domains` is ordered. The first value becomes the Cloudflare Access application's primary domain, and the full list is written to Cloudflare as `self_hosted_domains` in the same order. Model path-specific behaviour as a root application for `host` plus more-specific path applications such as `host/admin`, `host/alerts-*`, or `host/v1/health`. Do not add a redundant `host/*` app beside the root app; the controller treats that as duplicate coverage and reports `Ready=False, Reason=HostnameConflict` without writing Cloudflare resources.
+
 Register a private-network route on the same tunnel:
 
 ```yaml
@@ -210,6 +212,7 @@ Field notes:
 | `spec.origin.protocol`, `host`, `port` | Origin target; host and port can be derived only from `sourceRef.kind: Service`. |
 | `spec.access.enabled` | Enables Cloudflare Access applications. |
 | `spec.access.applications[]` | Defines the Access applications to create. |
+| `spec.access.applications[].domains[]` | Ordered Access targets for that app; first entry is the primary Cloudflare app domain. |
 | `spec.access.applications[].policies[].policyRef.uuid` or `name` | Exactly one is required for each policy binding. |
 | `spec.failover.group` | Opts into DR failover; cross-cluster logical-exposure identity (see [Disaster Recovery](#disaster-recovery-dr-failover)). |
 | `spec.failover.leaseSeconds` | Lease TTL; default 60, min 30, max 600. The primary renews at half this interval. |

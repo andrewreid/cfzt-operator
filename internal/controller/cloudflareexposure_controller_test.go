@@ -130,6 +130,33 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		}
 	})
 
+	It("TestExposureReadyStatusIsStableOnAccessNoop", func() {
+		tunnel := readyTunnel(ctx, tunnelReconciler, "stable-status", "stable-status")
+		exposure := createExposure(ctx, "stable-status", tunnel.Name, "stable-status.example.com", true)
+
+		reconcileExposure(ctx, exposureReconciler, exposure)
+		reconcileTunnel(ctx, tunnelReconciler, tunnel.Name)
+		reconcileExposure(ctx, exposureReconciler, exposure)
+
+		current := fetchExposure(ctx, exposure.Name)
+		ready := meta.FindStatusCondition(current.Status.Conditions, ConditionReady)
+		Expect(ready).NotTo(BeNil())
+		Expect(ready.Status).To(Equal(metav1.ConditionTrue))
+		transitionBefore := ready.LastTransitionTime
+		resourceVersionBefore := current.ResourceVersion
+		time.Sleep(10 * time.Millisecond)
+
+		reconcileExposure(ctx, exposureReconciler, current)
+
+		updated := fetchExposure(ctx, exposure.Name)
+		updatedReady := meta.FindStatusCondition(updated.Status.Conditions, ConditionReady)
+		Expect(updatedReady).NotTo(BeNil())
+		Expect(updatedReady.Status).To(Equal(metav1.ConditionTrue))
+		Expect(updatedReady.Reason).To(Equal(ReasonReconciled))
+		Expect(updatedReady.LastTransitionTime).To(Equal(transitionBefore))
+		Expect(updated.ResourceVersion).To(Equal(resourceVersionBefore))
+	})
+
 	It("TestTunnelConfigUpdateSkippedWhenUnchanged", func() {
 		tunnel := readyTunnel(ctx, tunnelReconciler, "skip-config", "skip-config")
 		drainRecordedEvents(tunnelRecorder)
@@ -521,6 +548,55 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		_, err := exposureReconciler.desiredAccessApplications(ctx, exposure)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("both cover \"dup-canon.example.com\""))
+	})
+
+	It("TestExposureAccessApplicationsDuplicateCanonicalCoverageDoesNotMutate", func() {
+		tunnel := readyTunnel(ctx, tunnelReconciler, "dup-canon-reconcile", "dup-canon-reconcile")
+		exposure := createExposure(ctx, "dup-canon-reconcile", tunnel.Name, "dup-canon-reconcile.example.com", true)
+		exposure.Spec.Access.Applications[0].Domains = append(
+			exposure.Spec.Access.Applications[0].Domains,
+			cfztv1alpha1.AccessApplicationDomain("dup-canon-reconcile.example.com/*"),
+		)
+		Expect(k8sClient.Update(ctx, exposure)).To(Succeed())
+
+		reconcileExposureExpectRequeueAfter30(ctx, exposureReconciler, exposure)
+
+		current := fetchExposure(ctx, exposure.Name)
+		Expect(meta.FindStatusCondition(current.Status.Conditions, ConditionReady).Reason).To(Equal(ReasonHostnameConflict))
+		Expect(current.Status.Cloudflare.AccessApplications).To(BeEmpty())
+		Expect(current.Status.Cloudflare.DnsRecordId).To(BeEmpty())
+		apps, err := fakeCF.AccessApplications().List(ctx, exposure.Spec.Hostname)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(apps).To(BeEmpty())
+		records, err := fakeCF.DNSRecords().List(ctx, "zone-example", exposure.Spec.Hostname, "CNAME")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(records).To(BeEmpty())
+	})
+
+	It("TestExposureAccessApplicationsDuplicateCanonicalCoverageAcrossAppsDoesNotMutate", func() {
+		tunnel := readyTunnel(ctx, tunnelReconciler, "dup-canon-apps", "dup-canon-apps")
+		exposure := createExposure(ctx, "dup-canon-apps", tunnel.Name, "dup-canon-apps.example.com", true)
+		exposure.Spec.Access.Applications = append(exposure.Spec.Access.Applications, cfztv1alpha1.AccessApplicationTarget{
+			Name:    "wildcard",
+			Domains: []cfztv1alpha1.AccessApplicationDomain{cfztv1alpha1.AccessApplicationDomain("dup-canon-apps.example.com/*")},
+			Policies: []cfztv1alpha1.AccessApplicationPolicyBinding{{
+				PolicyRef: cfztv1alpha1.AccessPolicyRef{UUID: defaultPolicyUUID},
+			}},
+		})
+		Expect(k8sClient.Update(ctx, exposure)).To(Succeed())
+
+		reconcileExposureExpectRequeueAfter30(ctx, exposureReconciler, exposure)
+
+		current := fetchExposure(ctx, exposure.Name)
+		Expect(meta.FindStatusCondition(current.Status.Conditions, ConditionReady).Reason).To(Equal(ReasonHostnameConflict))
+		Expect(current.Status.Cloudflare.AccessApplications).To(BeEmpty())
+		Expect(current.Status.Cloudflare.DnsRecordId).To(BeEmpty())
+		apps, err := fakeCF.AccessApplications().List(ctx, exposure.Spec.Hostname)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(apps).To(BeEmpty())
+		records, err := fakeCF.DNSRecords().List(ctx, "zone-example", exposure.Spec.Hostname, "CNAME")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(records).To(BeEmpty())
 	})
 
 	It("TestExposureDNSForeignRecordConflict", func() {
