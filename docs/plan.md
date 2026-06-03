@@ -1152,6 +1152,8 @@ Subtask-derived additions: `TestEnqueueNamedExtracts`,
 
 ### Slice 7 — DR failover (spec Slice 6, D26)
 
+> **⚠️ SUPERSEDED PLANNING TEXT.** This block is the *original* pre-implementation design and still describes a "CAS-by-record_id" lease (`CreateCAS` / `UpdateCAS` / "CAS Update" / "fake models CAS" / "CAS retry loop" / two-managers-in-process envtest). **None of that shipped.** Cloudflare DNS has no conditional-write precondition or TXT uniqueness, so the lease was implemented as a *best-effort, eventually-consistent* coordination record with read-back verification + deterministic duplicate resolution (`internal/dr.Resolve`), a cluster-wide group-uniqueness guard, and single-reconciler + seeded-peer envtests. For the as-built behaviour see **`## 2. Current state` → the Slice 7 review-remediation entries (rounds 1–3)** and `spec.md ## DR failover`. The text below is retained only as a historical planning record.
+
 > **Numbering note.** `spec.md ## Implementation slices` labels this **Slice 6 — DR failover** (the next *product* slice after Slice 5 routes). This plan already used "Slice 6" for the interstitial engineering-only "Pre-MVP cleanup" slice above, so the plan calls the DR work **Slice 7** to avoid a local collision. They are the same body of work: plan Slice 7 ≡ spec Slice 6.
 
 Per `spec.md ## Implementation slices ### Slice 6` and `spec.md ## DR failover` (D26). Outcome: `CloudflareExposure.spec.failover` lets the same Exposure, applied to two clusters (each with its own `--site-id` and its own `CloudflareTunnel`), cooperate over one hostname via a Cloudflare DNS TXT lease. Exactly one cluster is Primary and serves traffic; the standby auto-promotes on lease expiry; a recovered former primary stands down without thrashing CF state.

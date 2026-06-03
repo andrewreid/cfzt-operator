@@ -19,8 +19,8 @@ const (
 
 // Action is the work the role gate has decided the controller should
 // perform during this reconcile pass. Every reconcile resolves to exactly
-// one Action; the controller dispatches it through the CAS-capable DNS
-// writer and updates status accordingly.
+// one Action; the controller dispatches it through the best-effort DNS lease
+// writer (write + read-back verify) and updates status accordingly.
 type Action int
 
 const (
@@ -30,10 +30,11 @@ const (
 	// until the observed expiry plus per-site jitter.
 	ActionWait Action = iota
 
-	// ActionAcquire attempts a CreateCAS. Used when no lease exists, when
-	// the observed lease has expired, or when the user has set the
-	// force-promote annotation. Success transitions the controller to
-	// Primary; failure (CAS conflict) keeps it Standby.
+	// ActionAcquire writes the lease (create if absent, else update the
+	// observed record) then read-back verifies. Used when no lease exists,
+	// when the observed lease has expired, or when the user has set the
+	// force-promote token. A verified single self-owned record transitions
+	// the controller to Primary; a lost race keeps it Standby.
 	ActionAcquire
 
 	// ActionRenew updates the existing lease record this site already
@@ -106,8 +107,8 @@ type Decision struct {
 
 // Decide reads the snapshot and returns the next role + action for this
 // reconcile pass. Pure function — no IO, no global state. The controller
-// dispatches the returned Action through the CAS-capable DNS writer and
-// then writes the returned NextRole / LeaseOwner / LeaseExpiresAt into
+// dispatches the returned Action through the best-effort DNS lease writer
+// and then writes the returned NextRole / LeaseOwner / LeaseExpiresAt into
 // status.
 func Decide(in Inputs) Decision {
 	leaseTTL := time.Duration(in.LeaseSeconds) * time.Second
@@ -120,7 +121,7 @@ func Decide(in Inputs) Decision {
 	half := max(leaseTTL/2, time.Second)
 
 	// No lease observed: anyone can acquire. Stay Standby until the
-	// caller's CreateCAS succeeds.
+	// caller's lease write + read-back verification succeeds.
 	if in.Observed == nil {
 		return Decision{
 			NextRole: RoleStandby,
