@@ -13,6 +13,7 @@ const (
 	exposureIndexTunnelRefName = "spec.tunnelRef.name"
 	exposureIndexHostname      = "spec.hostname"
 	exposureIndexPolicyRefName = "spec.access.policyRef.name"
+	exposureIndexFailoverGroup = "spec.failover.group"
 	tunnelRouteIndexTunnelRef  = "spec.tunnelRef.name"
 )
 
@@ -36,12 +37,21 @@ func indexCloudflareExposureFields(ctx context.Context, mgr ctrl.Manager) error 
 	}); err != nil {
 		return err
 	}
-	return indexer.IndexField(ctx, &cfztv1alpha1.CloudflareExposure{}, exposureIndexPolicyRefName, func(obj client.Object) []string {
+	if err := indexer.IndexField(ctx, &cfztv1alpha1.CloudflareExposure{}, exposureIndexPolicyRefName, func(obj client.Object) []string {
 		exposure := obj.(*cfztv1alpha1.CloudflareExposure)
 		if exposure.Spec.Access.PolicyRef.Name == "" {
 			return nil
 		}
 		return []string{exposure.Spec.Access.PolicyRef.Name}
+	}); err != nil {
+		return err
+	}
+	return indexer.IndexField(ctx, &cfztv1alpha1.CloudflareExposure{}, exposureIndexFailoverGroup, func(obj client.Object) []string {
+		exposure := obj.(*cfztv1alpha1.CloudflareExposure)
+		if exposure.Spec.Failover == nil || exposure.Spec.Failover.Group == "" {
+			return nil
+		}
+		return []string{exposure.Spec.Failover.Group}
 	})
 }
 
@@ -81,6 +91,10 @@ func listExposuresByHostname(ctx context.Context, c client.Client, hostname stri
 
 func listExposuresByPolicy(ctx context.Context, c client.Client, policyName string) ([]cfztv1alpha1.CloudflareExposure, error) {
 	return listCloudflareExposuresByField(ctx, c, exposureIndexPolicyRefName, policyName)
+}
+
+func listExposuresByFailoverGroup(ctx context.Context, c client.Client, group string) ([]cfztv1alpha1.CloudflareExposure, error) {
+	return listCloudflareExposuresByField(ctx, c, exposureIndexFailoverGroup, group)
 }
 
 func listRoutesByTunnel(ctx context.Context, c client.Client, tunnelName string) ([]cfztv1alpha1.CloudflareTunnelRoute, error) {

@@ -66,7 +66,7 @@ These are resolved. Treat them as binding constraints, not options.
 | D23 | **GitOps caveat for Helm CRDs**: D17 places CRDs in `charts/cfzt-operator/crds/` (Helm 3 native install-only behaviour). ArgoCD users who render the chart and apply manifests via Application sync will see CRDs *not* upgraded on chart upgrade — matches D15 delete-and-recreate policy. Flux users should set `install.crds: Create` and `upgrade.crds: CreateReplace` with care, again matching D15. Document this in chart `NOTES.txt`. |
 | D24 | **`CloudflareAccessPolicy` CRD is in scope, ships in Slice 4.** Cluster-scoped CRD modelling reusable account-level Cloudflare Access policies with a structured rule subset (decisions: allow/deny/bypass/non_identity; rule types: email, email_domain, ip, everyone, service_token, geo; rule groups: include/exclude/require). `CloudflareExposure.spec.access.policyRef` gains a `name` field that references a managed Policy CR; exactly one of `{uuid, name}` is required when `access.enabled: true`. Name-colliding pre-existing CF policies are NOT auto-adopted (mirrors D9): `Reason=ForeignPolicy`. Deletion of a Policy CR is blocked while ≥1 `CloudflareExposure` references it (`Reason=BlockedByExposures`). Policy ownership is recorded via `status.policyId`; the CF-side policy carries `managed-by=cfzt-operator` and `source-uid=<CloudflareAccessPolicy.uid>` in its tags/decoration field (verify via Cloudflare MCP at implementation time — fall back to ID-only tracking like tunnels if no taggable field exists). |
 | D25 | **`CloudflareTunnelRoute` CRD is in scope, ships in Slice 5.** Cluster-scoped CRD modelling a single Cloudflare Tunnel private-network route (CIDR → tunnel binding). One CR → one CF route. `spec.tunnelRef.name` references a `CloudflareTunnel`; `spec.network` is a single IPv4 or IPv6 CIDR; `spec.virtualNetworkId` is optional. When unset, the operator omits `virtual_network_id` from Cloudflare route create/update/list calls and lets Cloudflare apply the account default VNet; it does not manage or resolve VNets in Slice 5. `spec.comment` is optional human text, capped to fit beside the compact operator ownership tag in Cloudflare's 100-character route comment. Ownership is recorded via `status.routeId`; the CF-side route `comment` MUST carry `managed-by=cfzt source-uid=<CloudflareTunnelRoute.uid>`. Pre-existing CF routes with the same target CIDR/VNet and no matching source-uid are NOT auto-adopted: `Reason=ForeignRoute`. Tunnel deletion is blocked while ≥1 `CloudflareTunnelRoute` references the tunnel: `Reason=BlockedByRoutes`. WARP / Cloudflare One Client Split Tunnels, Gateway network policies, private DNS, and packet-level validation remain deferred — this CRD only registers the route on the tunnel side. |
-| D26 | **Multi-cluster DR is in scope as a per-Exposure opt-in (supersedes D9).** Active-active and cross-cluster federation remain out of scope. Every operator process carries a **mandatory `--site-id`** (Helm `values.site.id`, sane default for clean single-site upgrades). Each cluster runs its own `CloudflareTunnel` (own `metadata.uid`, own generated name, own tunnel ID, own cloudflared DaemonSet), preserving the per-tunnel single-writer invariants (D11+D12+D19) **inside each cluster**. Cross-cluster coordination for a `CloudflareExposure` with `spec.failover` set is mediated by a Cloudflare **DNS TXT lease record** at `_cfzt-lease.<hash8(failover.group)>.<zone>`, using optimistic concurrency via the DNS `record_id` (compare-and-swap). Exactly one site holds the lease and is **Primary**; it alone writes the public DNS CNAME and the Access application for the hostname. Promotion is **automatic on lease TTL expiry**; an emergency `cfzt.reid.ee/force-promote` annotation overrides. A recovered former primary that finds the lease held by another site **demotes itself to Standby** and does not auto-steal back. For failover-enabled Exposures the `source-uid` on the shared Access application and public DNS CNAME is the **failover-group ID**, not the per-CR `uid`; ownership-tag verification accepts that group ID from either cluster. `dns.manage: true` on the referenced `CloudflareTunnel` is **required**; the lease TXT reuses the existing `Zone:DNS:Edit` scope. The collision-safety mechanics of the superseded D9 (generated tunnel names + `status.tunnelId`, source-uid tags on Access apps and DNS records, untagged ingress rules per D11) remain in force unchanged. |
+| D26 | **Multi-cluster DR is in scope as a per-Exposure opt-in (supersedes D9).** Active-active and cross-cluster federation remain out of scope. Every operator process carries a **mandatory `--site-id`** (Helm `values.site.id`, sane default for clean single-site upgrades). Each cluster runs its own `CloudflareTunnel` (own `metadata.uid`, own generated name, own tunnel ID, own cloudflared DaemonSet), preserving the per-tunnel single-writer invariants (D11+D12+D19) **inside each cluster**. Cross-cluster coordination for a `CloudflareExposure` with `spec.failover` set is mediated by a **best-effort** Cloudflare **DNS TXT lease record** at `_cfzt-lease.<hash8(failover.group)>.<zone>`. Cloudflare DNS offers no conditional-write precondition nor TXT-uniqueness guarantee, so the lease is **not linearizable** — it is an optimistic, eventually-consistent coordination hint, **not a mutual-exclusion lock**. Correctness does not depend on lease atomicity. Safety rests on two properties: (1) a single public CNAME targets at most one tunnel ID, so two sites can never serve divergent origins; (2) a failed primary loses its `cloudflared` edge connection within seconds, so Cloudflare stops routing to its tunnel ID regardless of lease state. The lease's only job is to **damp CNAME flapping** between two healthy sites by electing a single writer. Simultaneous acquisition of an absent lease can transiently create duplicate TXT records; the controller detects `>1` group-owned record and **resolves deterministically** (among unexpired records the lowest `site-id` wins; losers delete their own duplicate and demote), converging to one record without human intervention. Unresolvable ambiguity **fails closed** (`Ready=False, Reason=LeaseConflict`, no shared write). Exactly one site holds the lease and is **Primary**; it alone writes the public DNS CNAME and the Access application for the hostname. Promotion is **automatic on lease TTL expiry**; an emergency `cfzt.reid.ee/force-promote` **token** annotation overrides expiry. The controller records the last-honored token in `status.failover` and never mutates the annotation, so a re-applied (GitOps) token does not replay. A recovered former primary that finds the lease held by another site **demotes itself to Standby** and does not auto-steal back. For failover-enabled Exposures the `source-uid` on the shared Access application and public DNS CNAME is the **failover-group ID**, not the per-CR `uid`; ownership-tag verification accepts that group ID from either cluster. Two failover Exposures in the **same cluster** MUST NOT share a `group` (cluster-wide guard; controller surfaces `Reason=FailoverGroupConflict`, no CF write). `dns.manage: true` on the referenced `CloudflareTunnel` is **required**; the lease TXT reuses the existing `Zone:DNS:Edit` scope. `--site-id` must be **distinct per cluster**: a failover Exposure on a process still running the chart-default `site.id` goes `Ready=False, Reason=FailoverRequiresDistinctSiteID`. The collision-safety mechanics of the superseded D9 (generated tunnel names + `status.tunnelId`, source-uid tags on Access apps and DNS records, untagged ingress rules per D11) remain in force unchanged. |
 
 ## Design philosophy
 
@@ -356,6 +356,7 @@ status:
     leaseRenewedAt: 2026-06-02T09:59:30Z
     lastRoleTransitionAt: 2026-06-02T09:30:00Z
     observedPrimaryTunnelId: ""      # tunnel ID recorded in the lease record
+    lastForcePromoteToken: ""        # last honored cfzt.reid.ee/force-promote token (replay guard)
   conditions: []
 ```
 
@@ -618,7 +619,7 @@ spec:
     leaseSeconds: 60           # optional; default 60, min 30, max 600
 ```
 
-`group` is an explicit, user-supplied identifier. Exposures sharing the same `group` across clusters are treated as **one logical exposure**. It is deliberately **not** derived from `spec.hostname` so that renaming a hostname does not silently break the failover relationship. Two failover-enabled Exposures in the same cluster MUST NOT share a `group` (builder/controller surfaces a conflict).
+`group` is an explicit, user-supplied identifier. Exposures sharing the same `group` across clusters are treated as **one logical exposure**. It is deliberately **not** derived from `spec.hostname` so that renaming a hostname does not silently break the failover relationship. Two failover-enabled Exposures in the **same cluster** MUST NOT share a `group` (controller surfaces `Reason=FailoverGroupConflict`, no CF write). The guard is cluster-wide, not per-namespace: the lease name carries no namespace and all Exposures in a cluster share one `--site-id`, so two same-group members in one cluster would resolve to the same lease record and each read it as self-owned with no mutual exclusion. The legitimate cross-cluster pair lives in separate apiservers, so each operator only ever lists its own cluster and never trips this guard.
 
 Failover requires the referenced `CloudflareTunnel` to have `dns.manage: true`. With `dns.manage: false` the operator creates no DNS records and has no lease substrate, so the Exposure goes `Ready=False, Reason=FailoverRequiresManagedDNS` and writes no lease (see `## CRD validation`). `access.enabled: false` is allowed: there is no Access application to coordinate, but the lease still arbitrates which cluster owns the public DNS CNAME.
 
@@ -641,36 +642,55 @@ v=1 site=<site-id> tunnel=<tunnelId> exp=<unix-epoch> renewed=<unix-epoch>
 - `exp` — lease expiry, `renewed + leaseSeconds`.
 - `renewed` — last successful renewal time.
 
-### Compare-and-swap protocol
+### Lease write protocol (best-effort, not atomic)
 
-Cloudflare DNS record updates address a record by its `record_id`. The operator uses this for optimistic concurrency:
+**Cloudflare DNS provides no conditional-write precondition and no TXT-uniqueness guarantee.** There is no `record_id`-conditioned update and no "create if absent". The lease is therefore an *optimistic* coordination record, not a compare-and-swap lock; the protocol is designed to **converge** and to **fail closed**, not to be linearizable. Each reconcile:
 
-1. **Read** the lease TXT (note its `record_id` `R`, or absence).
-2. **Compute** the desired payload.
-3. **Write** conditionally:
-   - Absent → `Create`. If a concurrent create already won, the create returns a conflict and the loser falls back to step 1.
-   - Present → `Update` against `record_id == R`. If another site renewed/acquired in between, `R` is stale and the update is rejected; the loser falls back to step 1.
-4. On repeated conflict, back off with jitter; after a bounded number of attempts surface `Ready=False, Reason=LeaseConflict` and requeue (30s, see `## Reconciliation Rules` requeue policy).
+1. **List** the lease TXT records at the lease name and filter to group-owned ones (`MatchesComment` with the failover-group ID).
+2. **Count**:
+   - `0` records → no lease. Acquire path: `Create` the lease, then **read back** (step 4).
+   - `1` record → the normal case. Feed it to the role state machine; on a write (acquire/renew) `Update` by its `record_id`, then read back (step 4).
+   - `>1` records → a create race produced duplicates. **Resolve deterministically** (see `### Duplicate-lease resolution`).
+3. **Renew / acquire** writes the desired payload. Because the write is not conditional, two sites racing from an absent lease can both `Create`; that is expected and handled by steps 2/4, not prevented.
+4. **Read-back verification**: after any acquire/renew write, re-list. If `>1` group-owned record now exists, resolve (step 2 `>1`). If the surviving single record is not this site's, this site lost the race → demote to Standby. This bounds the dual-writer window to roughly one reconcile.
 
-This guarantees at most one site transitions to Primary at any instant. (The operator surfaces `record_id` through the `internal/cloudflare` DNS interface for this; the existing `MatchesComment` ownership check remains a secondary mutation guard on the lease record itself.)
+`record_id` is used only as the address for `Update`/`Delete` of a record this site has just observed; it is **not** a precondition and confers no atomicity. The `MatchesComment` ownership check is the guard that keeps the controller from ever touching a foreign (non-group) TXT record at the lease name.
+
+### Duplicate-lease resolution
+
+When `>1` group-owned lease records exist at the lease name, every site computes the **same** winner from the record set, so resolution is deterministic and needs no coordination:
+
+1. Among **unexpired** records, the winner is the one with the lexicographically-lowest `site`; if all are expired, the lowest `site` across all records wins; ties on `site` break on lowest `record_id`.
+2. If this site is the winner, it **deletes the other** group-owned duplicates by `record_id` and keeps its own.
+3. If this site is not the winner, it **deletes only its own** duplicate (if present) and demotes to Standby; it never touches the winner's record.
+
+Both sites perform idempotent deletes (`ErrNotFound` tolerated), so the set converges to a single record within a reconcile or two. If duplicates persist beyond resolution (e.g. a record cannot be parsed), the controller **fails closed**: `Ready=False, Reason=LeaseConflict`, no shared Access/DNS write, requeue 30s. This race only arises from simultaneous acquisition of an *absent* lease (a cold start); renewals operate on the single owned record and never create duplicates.
 
 ### Role state machine
 
 ```text
-Unknown ──read lease──▶ Standby ──CAS acquire (expiry or force)──▶ Primary
-                          ▲                                          │
-                          └──────── lease lost / observed foreign ───┘
+Unknown ──read lease──▶ Standby ──acquire (expiry or force token)──▶ Primary
+                          ▲                                           │
+                          └──────── lease lost / observed foreign ────┘
 ```
 
 - **Unknown** — initial, before the first lease read.
 - **Standby** — lease held by another unexpired site. The controller writes status (`role`, `leaseOwner`, `leaseExpiresAt`, `observedPrimaryTunnelId`) and **returns without touching the shared Access application or public DNS CNAME**. It continues to reconcile its own tunnel + connector (warm).
 - **Primary** — this site holds the lease. It writes the public DNS CNAME (pointing at its own `<tunnelId>.cfargotunnel.com`) and the Access application, and runs a renewal loop renewing at `leaseSeconds/2`.
 
-**Promotion (auto):** a Standby that observes `now > leaseExpiresAt + jitter` attempts a CAS acquire. Success → emit `PromotedToPrimary`, write Access + DNS, set `role=Primary`, start the renewal loop.
+**Promotion (auto):** a Standby that observes `now > leaseExpiresAt + jitter` attempts an acquire (`Create` if absent / `Update` of the expired record), then read-back verifies. Success → emit `PromotedToPrimary`, write Access + DNS, set `role=Primary`, renew at `leaseSeconds/2`.
 
-**Promotion (manual):** the `cfzt.reid.ee/force-promote=true` annotation on the Exposure makes a Standby attempt a CAS acquire **regardless of expiry**. The controller removes the annotation after a successful acquisition and emits `ForcePromoted`. This is an emergency tool; the split-brain risk is the operator's responsibility.
+**Promotion (manual):** the `cfzt.reid.ee/force-promote` annotation carries a caller-chosen **token** (timestamp, nonce, UUID — any non-empty value). A Standby attempts an acquire **regardless of expiry** only when the annotation token differs from `status.failover.lastForcePromoteToken`. On a successful acquire the controller records the token in `status.failover.lastForcePromoteToken` and emits `ForcePromoted`; it **does not modify the annotation**. A GitOps reconcile that re-applies the same token is therefore ignored (no replay). To force again, change the token. This is an emergency tool; the split-brain risk is the operator's responsibility.
 
-**Demotion (returning primary):** a recovered former primary reconciles and reads the lease **before writing anything**. If `leaseOwner != my site-id`, it emits `DemotedToStandby`, sets `role=Standby`, and performs **no** Cloudflare writes for the shared hostname. It never auto-steals the lease back; the current holder keeps it until its own TTL lapses. This is the mechanism that makes a recovered primary "aware it is no longer the primary".
+**Demotion (returning primary):** a recovered former primary reconciles and reads the lease **before writing anything**. If `leaseOwner != my site-id`, it emits `DemotedToStandby`, sets `role=Standby`, and performs **no** Cloudflare writes for the shared hostname. It never auto-steals the lease back; the current holder keeps it until its own TTL lapses. Role decisions are driven by the **live lease read every reconcile**, never by the persisted `status.failover.role` alone — including in the finalizer (see `### Deletion`).
+
+### Deletion
+
+Failover deletion proves **current** ownership, not persisted role. On finalizer:
+
+- Re-read the live lease. Delete the shared public CNAME + Access application **only if** `lease.Site == r.SiteID` at read time. A site whose persisted `status.failover.role` is stale `Primary` (a peer has since acquired) must **not** tear down the surface the peer is now serving.
+- Always remove **this site's own** lease record if it owns it (idempotent); never delete a peer's lease.
+- Otherwise (Standby, or peer-held) drop the finalizer without touching shared resources.
 
 ### Ownership tagging for failover Exposures
 
@@ -678,10 +698,10 @@ For a failover-enabled Exposure, the shared Access application and public DNS CN
 
 ### Split-brain bounding
 
-The lease TTL plus acquire jitter is the worst-case dual-writer window. Defaults: `leaseSeconds: 60`, `±5s` jitter. Two mitigations keep the data-plane exposure small:
+The lease is best-effort, so a brief dual-writer window is possible; it is bounded by lease TTL + acquire jitter and made harmless by the data plane. Defaults: `leaseSeconds: 60`, `±5s` jitter. What keeps the exposure small:
 
-- A genuinely partitioned primary loses its cloudflared connection to the Cloudflare edge within seconds of a real outage, so Cloudflare stops routing traffic to the old tunnel ID regardless of who holds the lease.
-- CAS-by-`record_id` makes it impossible for two sites to *acquire* the lease in the same instant; at most one wins each round.
+- A genuinely partitioned primary loses its cloudflared connection to the Cloudflare edge within seconds of a real outage, so Cloudflare stops routing traffic to the old tunnel ID regardless of who holds the lease. This — not the lease — is the actual safety mechanism.
+- There is one CNAME with one target at a time, so two sites can never serve divergent origins; the worst control-plane symptom is transient CNAME flapping, which the single-writer election + read-back + duplicate resolution converge away within a reconcile or two.
 
 If a Primary reads the lease during renewal and finds `leaseOwner != my site-id` (it was promoted away while it believed itself Primary), it emits `SplitBrainDetected`, demotes to Standby, and stops writing.
 
@@ -691,8 +711,9 @@ If a Primary reads the lease during renewal and finds `leaseOwner != my site-id`
 |---|---|---|---|---|---|
 | Primary | held by self, unexpired | write/maintain | write/maintain | reconcile | renew at `leaseSeconds/2` |
 | Standby | held by other, unexpired | leave alone | leave alone | reconcile (warm) | read only |
-| Standby | expired (or force-promote) | — (after CAS → Primary) | — (after CAS → Primary) | reconcile | CAS acquire |
-| any | CAS conflict | leave alone | leave alone | reconcile | retry → `LeaseConflict` |
+| Standby | expired (or force-promote token) | — (after acquire → Primary) | — (after acquire → Primary) | reconcile | acquire + read-back |
+| any | duplicate records | resolve, then act on winner | resolve, then act on winner | reconcile | deterministic resolution |
+| any | unresolvable ambiguity | leave alone | leave alone | reconcile | `Ready=False, Reason=LeaseConflict`, requeue |
 
 ### Non-goals
 
@@ -747,7 +768,7 @@ Every CRD exposes exactly two conditions:
 - `AccessAppPending`, `PolicyNotFound`, `PolicyNotReady`, `DNSWriteFailed`, `RouteWriteFailed`
 - `TunnelNotReady`
 - `BlockedByExposures`, `BlockedByRoutes`
-- `Standby`, `WaitingForLease`, `LeaseConflict`, `SplitBrainDetected`, `ForcePromoted`, `FailoverRequiresManagedDNS` (Slice 6, D26)
+- `Standby`, `LeaseConflict`, `FailoverRequiresManagedDNS`, `FailoverRequiresDistinctSiteID`, `FailoverGroupConflict` (Slice 6, D26)
 - `UnsupportedDrift`, `Reconciled`
 
 ## Credentials
@@ -997,9 +1018,10 @@ internal/workload/
   token_secret.go
 
 internal/dr/            # Slice 6 (D26) — DR failover
-  lease.go              # TXT lease parse / serialise + record-name hashing
-  cas.go                # compare-and-swap via DNS record_id, bounded backoff + jitter
-  role.go               # role state machine (Unknown/Standby/Primary) + renewal loop wiring
+  lease.go              # TXT lease parse / serialise
+  jitter.go             # symmetric acquire jitter
+  resolve.go            # deterministic duplicate-lease resolution (best-effort, fail-closed)
+  role.go               # role state machine (Unknown/Standby/Primary)
 
 cmd/
   main.go               # kubebuilder-generated manager entrypoint; --site-id flag (Slice 6, D26)
@@ -1221,24 +1243,27 @@ The implementer ships in slices. Each slice has a measurable definition of done.
 
 1. `--site-id` flag on the manager (mandatory, non-empty validated at boot); Helm `values.site.id` with a sane default; plumb the site ID into the Exposure controller. (`cmd/main.go`, chart Deployment template + `values.yaml`.)
 2. `CloudflareExposure` `spec.failover { group, leaseSeconds }` + `status.failover { role, siteId, leaseOwner, leaseExpiresAt, leaseRenewedAt, lastRoleTransitionAt, observedPrimaryTunnelId }` types; CEL/validation markers; `Role` printcolumn. Regenerate manifests + deepcopy; sync Helm CRDs.
-3. `internal/cloudflare` DNS interface: surface DNS `record_id` on reads; add a CAS-capable Update path (update conditioned on `record_id`). Model CAS-by-record_id and shared CF state in `fake.go`.
-4. `internal/dr/` package: lease parse/serialise (`v=1 site=… tunnel=… exp=… renewed=…`), record-name hashing (`_cfzt-lease.<hash8(group)>.<zone>`), CAS retry loop with bounded backoff + jitter, role state machine, renewal loop wiring (renew at `leaseSeconds/2`).
+3. `internal/cloudflare` DNS interface: `Create` / `Update` support TXT records (not only CNAME). No conditional-write or CAS primitive — the API has none; the fake models real semantics (`Create` is non-atomic and can yield duplicate TXT records). Coordination lives in the controller + `internal/dr`, not the client.
+4. `internal/dr/` package: lease parse/serialise (`v=1 site=… tunnel=… exp=… renewed=…`), symmetric acquire jitter, deterministic duplicate-lease resolution (`Resolve`), role state machine (renew at `leaseSeconds/2`). No CAS retry loop.
 5. `internal/ownership`: `FromFailoverGroup(groupID)` constructor; `MatchesComment` / `MatchesTags` accept either a per-CR uid OR a failover-group ID.
 6. `internal/naming`: `FailoverLeaseTXTName(groupID, zone)` helper.
-7. Exposure controller: read lease + determine role at the top of reconcile (before Access/DNS); Standby early-returns after writing `status.failover`; Primary writes Access + DNS with the group-ID `source-uid` and renews the lease; promotion (auto on expiry / `cfzt.reid.ee/force-promote` annotation, cleared after success); demotion + `SplitBrainDetected` handling; `FailoverRequiresManagedDNS` refusal on unmanaged-DNS tunnels; emit the Slice 6 events; update the Slice 6 metrics.
-8. envtest coverage using a two-manager-in-process pattern (two managers with distinct `--site-id`, one shared fake CF client).
-9. Live smoke extension: a two-`--site-id` lifecycle scenario in `test/live/cloudflare_smoke_test.go`.
+7. Exposure controller: reject `spec.failover` when `--site-id` is the chart default (`FailoverRequiresDistinctSiteID`) and reject same-cluster duplicate `group` (`FailoverGroupConflict`, cluster-wide); read lease + determine role at the top of reconcile (before Access/DNS); on `>1` group-owned record resolve deterministically; Standby early-returns after writing `status.failover`; Primary writes Access + DNS with the group-ID `source-uid`, renews the lease, and read-back verifies; promotion (auto on expiry / `cfzt.reid.ee/force-promote` **token** vs `status.lastForcePromoteToken`, no annotation mutation); demotion + `SplitBrainDetected`; `FailoverRequiresManagedDNS` on unmanaged-DNS tunnels; deletion proves **live** lease ownership before tearing down shared resources; emit the Slice 6 events; update the Slice 6 metrics (labelled with `site_id`).
+8. envtest coverage using a two-manager-in-process pattern (two managers with distinct `--site-id`, one shared fake CF client), including duplicate-lease resolution, force-promote token replay, group conflict, default-site rejection, and delete-ownership.
+9. Live smoke extension: a failover lifecycle scenario in `test/live/` (peer simulated via the CF API when only one operator runs in the local cluster).
 
 **Definition of done**:
 
 - Two clusters apply an identical `CloudflareExposure` with matching `spec.failover.group` and distinct `--site-id` → exactly one reports `status.failover.role == Primary`; the other reports `Standby` with `leaseOwner` set to the primary's site ID.
 - Stopping the primary's lease renewer for `leaseSeconds + jitter` → the standby auto-promotes; the CF Access app `source-uid` remains the failover-group ID; the public DNS CNAME flips to the new tunnel ID; `PromotedToPrimary` / `LeaseAcquired` events emit.
 - A returning former primary self-demotes (`DemotedToStandby`) on its first reconcile and performs no Cloudflare writes for the shared hostname.
-- `cfzt.reid.ee/force-promote=true` on a standby Exposure causes an immediate CAS acquire regardless of expiry; the controller removes the annotation after a successful acquire and emits `ForcePromoted`.
+- A new `cfzt.reid.ee/force-promote` **token** on a standby Exposure causes an immediate acquire regardless of expiry; the controller records the token in `status.failover.lastForcePromoteToken` and emits `ForcePromoted`. Re-applying the same token (GitOps) is a no-op; the annotation is never mutated by the controller.
 - A failover Exposure on a `dns.manage: false` tunnel goes `Ready=False, Reason=FailoverRequiresManagedDNS` and writes no lease.
+- A failover Exposure on a process running the chart-default `site.id` goes `Ready=False, Reason=FailoverRequiresDistinctSiteID` and writes no lease.
+- Two same-cluster failover Exposures sharing a `group` both go `Ready=False, Reason=FailoverGroupConflict` with no Cloudflare write.
+- Duplicate group-owned lease TXT records converge to one via deterministic resolution; a returning primary's deletion only tears down shared resources when it holds the live lease.
 - Empty `--site-id` is a fatal manager start-up error.
-- envtest tests pass: `TestFailoverLeaseAcquire`, `TestFailoverLeaseRenew`, `TestFailoverAutoPromoteOnExpiry`, `TestFailoverReturnedPrimaryStandsDown`, `TestFailoverCASConflictRetries`, `TestFailoverForcePromoteAnnotation`, `TestFailoverOwnershipTagAcceptsGroupID`, `TestFailoverDNSManagedRequired`, `TestFailoverSiteIDMandatoryAtBoot`.
-- Live smoke (`TestFailoverLifecycle`): two `--site-id` processes against a real Cloudflare account and a single test hostname assert one primary, auto-promote on primary kill, and returning-primary self-demote.
+- envtest tests pass: `TestFailoverLeaseAcquire`, `TestFailoverLeaseRenew`, `TestFailoverAutoPromoteOnExpiry`, `TestFailoverReturnedPrimaryStandsDown`, `TestFailoverDuplicateLeaseResolves`, `TestFailoverForcePromoteTokenReplayIgnored`, `TestFailoverGroupConflict`, `TestFailoverRequiresDistinctSiteID`, `TestFailoverDeleteRequiresLiveOwnership`, `TestFailoverOwnershipTagAcceptsGroupID`, `TestFailoverDNSManagedRequired`, `TestFailoverSiteIDMandatoryAtBoot`.
+- Live smoke (`TestFailoverLifecycle`): one operator + a peer simulated via the CF API asserts one Primary, returning-primary self-demote on peer takeover, and auto-promote on peer-lease expiry.
 - `ci.yaml` green; `helm lint` clean; manual: `dig TXT _cfzt-lease.<hash>.<zone> @1.1.1.1` shows the current lease owner and TTL.
 
 ### Post-MVP

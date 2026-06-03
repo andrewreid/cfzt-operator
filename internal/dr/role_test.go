@@ -1,0 +1,165 @@
+package dr_test
+
+import (
+	"math/rand"
+	"testing"
+	"time"
+
+	"github.com/andrewreid/cfzt-operator/internal/dr"
+)
+
+const (
+	siteSelf = "homelab-primary"
+	sitePeer = "homelab-dr"
+	tunnelID = "t-1"
+)
+
+func mkLease(site string, expires, renewed time.Time) *dr.Lease {
+	return &dr.Lease{Version: 1, Site: site, Tunnel: tunnelID, Expires: expires, Renewed: renewed}
+}
+
+func TestFailoverLeaseAcquire(t *testing.T) {
+	now := time.Unix(1700000000, 0).UTC()
+	in := dr.Inputs{
+		Now:          now,
+		SiteID:       siteSelf,
+		PreviousRole: dr.RoleUnknown,
+		Observed:     nil,
+		LeaseSeconds: 60,
+	}
+	d := dr.Decide(in)
+	if d.Action != dr.ActionAcquire {
+		t.Fatalf("Action = %v, want ActionAcquire (no lease present)", d.Action)
+	}
+	if d.NextRole != dr.RoleStandby {
+		t.Fatalf("NextRole = %v, want RoleStandby until acquire succeeds", d.NextRole)
+	}
+	if d.Requeue != 30*time.Second {
+		t.Fatalf("Requeue = %v, want 30s (leaseSeconds/2)", d.Requeue)
+	}
+}
+
+func TestFailoverLeaseRenew(t *testing.T) {
+	now := time.Unix(1700000000, 0).UTC()
+	lease := mkLease(siteSelf, now.Add(40*time.Second), now.Add(-20*time.Second))
+	d := dr.Decide(dr.Inputs{
+		Now:          now,
+		SiteID:       siteSelf,
+		PreviousRole: dr.RolePrimary,
+		Observed:     lease,
+		LeaseSeconds: 60,
+	})
+	if d.Action != dr.ActionRenew {
+		t.Fatalf("Action = %v, want ActionRenew (self-owned live lease)", d.Action)
+	}
+	if d.NextRole != dr.RolePrimary {
+		t.Fatalf("NextRole = %v, want RolePrimary", d.NextRole)
+	}
+	if d.LeaseOwner != siteSelf {
+		t.Fatalf("LeaseOwner = %q, want %q", d.LeaseOwner, siteSelf)
+	}
+	if d.Requeue != 30*time.Second {
+		t.Fatalf("Requeue = %v, want 30s (leaseSeconds/2)", d.Requeue)
+	}
+}
+
+func TestFailoverDecideWaitsForLivePeer(t *testing.T) {
+	now := time.Unix(1700000000, 0).UTC()
+	lease := mkLease(sitePeer, now.Add(40*time.Second), now.Add(-20*time.Second))
+	d := dr.Decide(dr.Inputs{
+		Now:           now,
+		SiteID:        siteSelf,
+		PreviousRole:  dr.RoleStandby,
+		Observed:      lease,
+		LeaseSeconds:  60,
+		AcquireJitter: 5 * time.Second,
+		Rand:          rand.New(rand.NewSource(1)),
+	})
+	if d.Action != dr.ActionWait {
+		t.Fatalf("Action = %v, want ActionWait (peer holds live lease)", d.Action)
+	}
+	if d.LeaseOwner != sitePeer {
+		t.Fatalf("LeaseOwner = %q, want %q", d.LeaseOwner, sitePeer)
+	}
+	// Requeue ≈ 40s ± 5s jitter, with the 1s floor never tripping at this scale.
+	if d.Requeue < 35*time.Second || d.Requeue > 45*time.Second {
+		t.Fatalf("Requeue = %v, want ~40s ± 5s jitter", d.Requeue)
+	}
+}
+
+func TestFailoverDecideAcquiresExpiredPeer(t *testing.T) {
+	now := time.Unix(1700000000, 0).UTC()
+	lease := mkLease(sitePeer, now.Add(-1*time.Second), now.Add(-61*time.Second))
+	d := dr.Decide(dr.Inputs{
+		Now:          now,
+		SiteID:       siteSelf,
+		PreviousRole: dr.RoleStandby,
+		Observed:     lease,
+		LeaseSeconds: 60,
+	})
+	if d.Action != dr.ActionAcquire {
+		t.Fatalf("Action = %v, want ActionAcquire (peer expired)", d.Action)
+	}
+	if d.NextRole != dr.RoleStandby {
+		t.Fatalf("NextRole = %v, want RoleStandby until acquire succeeds", d.NextRole)
+	}
+}
+
+func TestFailoverDecideForcePromoteOverridesLivePeer(t *testing.T) {
+	now := time.Unix(1700000000, 0).UTC()
+	lease := mkLease(sitePeer, now.Add(40*time.Second), now.Add(-20*time.Second))
+	d := dr.Decide(dr.Inputs{
+		Now:          now,
+		SiteID:       siteSelf,
+		PreviousRole: dr.RoleStandby,
+		Observed:     lease,
+		LeaseSeconds: 60,
+		ForcePromote: true,
+	})
+	if d.Action != dr.ActionAcquire {
+		t.Fatalf("Action = %v, want ActionAcquire under ForcePromote", d.Action)
+	}
+}
+
+func TestFailoverDecideForcePromoteNoopOnSelf(t *testing.T) {
+	now := time.Unix(1700000000, 0).UTC()
+	lease := mkLease(siteSelf, now.Add(40*time.Second), now.Add(-20*time.Second))
+	d := dr.Decide(dr.Inputs{
+		Now:          now,
+		SiteID:       siteSelf,
+		PreviousRole: dr.RolePrimary,
+		Observed:     lease,
+		LeaseSeconds: 60,
+		ForcePromote: true,
+	})
+	if d.Action != dr.ActionRenew {
+		t.Fatalf("Action = %v, want ActionRenew (force-promote against own lease is a no-op)", d.Action)
+	}
+}
+
+func TestFailoverDecideSplitBrainDemote(t *testing.T) {
+	now := time.Unix(1700000000, 0).UTC()
+	lease := mkLease(sitePeer, now.Add(40*time.Second), now.Add(-20*time.Second))
+	d := dr.Decide(dr.Inputs{
+		Now:          now,
+		SiteID:       siteSelf,
+		PreviousRole: dr.RolePrimary,
+		Observed:     lease,
+		LeaseSeconds: 60,
+	})
+	if d.Action != dr.ActionSplitBrain {
+		t.Fatalf("Action = %v, want ActionSplitBrain (was Primary, peer holds live lease)", d.Action)
+	}
+	if d.NextRole != dr.RoleStandby {
+		t.Fatalf("NextRole = %v, want RoleStandby (must demote)", d.NextRole)
+	}
+}
+
+func TestFailoverDecideRenewWindowClampedAtOneSecond(t *testing.T) {
+	now := time.Unix(1700000000, 0).UTC()
+	// leaseSeconds=0 falls back to the 60s default inside Decide.
+	d := dr.Decide(dr.Inputs{Now: now, SiteID: siteSelf, LeaseSeconds: 0})
+	if d.Requeue < time.Second {
+		t.Fatalf("Requeue = %v, want ≥1s floor under degenerate input", d.Requeue)
+	}
+}

@@ -1,6 +1,6 @@
 ---
 name: cfzt-cr-authoring
-description: Create, review, or validate CFZT operator Kubernetes YAML and GitOps manifests for cfzt.reid.ee/v1alpha1 resources. Use when working with CloudflareTunnel, CloudflareExposure, CloudflareAccessPolicy, CloudflareTunnelRoute, Cloudflare Access policy binding by UUID or managed policy name, Service or HTTPRoute sourceRef, external origins, DNS opt-out, cloudflared hostNetwork, or private tunnel CIDR routes.
+description: Create, review, or validate CFZT operator Kubernetes YAML and GitOps manifests for cfzt.reid.ee/v1alpha1 resources. Use when working with CloudflareTunnel, CloudflareExposure, CloudflareAccessPolicy, CloudflareTunnelRoute, Cloudflare Access policy binding by UUID or managed policy name, Service or HTTPRoute sourceRef, external origins, DNS opt-out, cloudflared hostNetwork, private tunnel CIDR routes, or active-passive multi-cluster DR failover (spec.failover, force-promote).
 ---
 
 # CFZT CR Authoring
@@ -13,6 +13,7 @@ Use this skill to produce accurate `cfzt.reid.ee/v1alpha1` manifests for the CFZ
    - Public hostname through a tunnel: `CloudflareTunnel` if missing, plus one `CloudflareExposure`.
    - Reusable Cloudflare Access rules: `CloudflareAccessPolicy`, then `CloudflareExposure.spec.access.policyRef.name`.
    - Private network routing: `CloudflareTunnelRoute` referencing an existing tunnel.
+   - Active-passive multi-cluster DR: the same `CloudflareExposure` (matching `spec.failover.group`) applied to each cluster, each cluster with its own `CloudflareTunnel`. `--site-id` is an operator install setting (Helm `site.id`), not a CR field; flag the per-cluster requirement but do not emit it as CR YAML.
 2. Prefer the current repo implementation when available:
    - Use `api/v1alpha1/*_types.go` as the field contract.
    - Use `README.md` examples as public-facing examples.
@@ -39,3 +40,4 @@ Before returning manifests:
 - Confirm HTTPRoute `sourceRef` examples keep explicit `origin`.
 - Confirm LAN/external-origin examples account for reachability, usually by setting `CloudflareTunnel.spec.cloudflared.hostNetwork: true` when node networking is required.
 - Confirm route examples use one CIDR in `spec.network` and omit `virtualNetworkId` unless a non-default Cloudflare VNet UUID is intentionally required.
+- Confirm failover Exposures set `spec.failover.group` (RFC 1123 label, 3–63 chars), reference a tunnel with `dns.manage: true` (the default), use a unique group within the cluster, and are applied identically across clusters except `tunnelRef.name`. Note that each cluster's operator must run a distinct `--site-id` (install setting). Emit the `cfzt.reid.ee/force-promote` annotation only with a fresh token value and only when an emergency manual promotion is requested.

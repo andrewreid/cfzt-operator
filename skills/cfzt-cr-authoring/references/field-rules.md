@@ -51,6 +51,15 @@ Immutable fields:
 - `spec.sourceRef`
 - `spec.hostname`, except when it was initially omitted and derived from an HTTPRoute sourceRef
 
+Failover (optional, D26):
+
+- `spec.failover` opts the Exposure into active-passive multi-cluster DR. Omit it for normal single-cluster Exposures.
+- `spec.failover.group`: required when the block is present. RFC 1123 label, 3–63 chars. The cross-cluster identity of one logical exposure; apply the same group in every participating cluster. Do not derive it from the hostname.
+- `spec.failover.leaseSeconds`: optional, default 60, min 30, max 600. Lease TTL; the primary renews at half this interval. Lower it to shrink the worst-case dual-writer window.
+- Status: `status.failover` reports `role` (`Primary`/`Standby`/`Unknown`), `siteId`, `leaseOwner`, `leaseExpiresAt`, and `lastForcePromoteToken`. The `Role` print column shows the role.
+- Prerequisites (not CR fields): the referenced `CloudflareTunnel` must have `dns.manage: true`; each cluster's operator must run a distinct `--site-id` (Helm `site.id`); the group must be unique within a cluster. Violations surface `FailoverRequiresManagedDNS`, `FailoverRequiresDistinctSiteID`, or `FailoverGroupConflict`.
+- Emergency manual promotion: set annotation `cfzt.reid.ee/force-promote` to a fresh, unique token (e.g. a timestamp). It is a one-shot token compared against `status.failover.lastForcePromoteToken`; the operator records the honored token and never edits the annotation, so committing it to Git is safe and re-applying the same value does not re-promote. Change the value to force again.
+
 ## CloudflareAccessPolicy
 
 Required:

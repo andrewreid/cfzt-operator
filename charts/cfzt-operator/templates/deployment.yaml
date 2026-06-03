@@ -40,6 +40,7 @@ spec:
             - --metrics-secure={{ .Values.metrics.secure }}
             {{- end }}
             - --leader-elect=true
+            - --site-id={{ required "site.id is required (D26: every operator process must carry a stable site identity)" .Values.site.id }}
             - --zap-log-level={{ .Values.logLevel }}
           ports:
             {{- if .Values.metrics.enabled }}

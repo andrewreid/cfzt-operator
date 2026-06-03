@@ -82,6 +82,32 @@ type AccessSpec struct {
 	PolicyRef AccessPolicyRef `json:"policyRef,omitempty"`
 }
 
+// FailoverSpec opts a CloudflareExposure into D26 active-passive multi-cluster
+// DR. Two Exposures applied to two clusters with matching spec.failover.group
+// and distinct --site-id cooperate over one hostname via a Cloudflare DNS TXT
+// lease record; exactly one cluster is Primary and writes the shared CNAME +
+// Access app, the other warms its tunnel and waits.
+type FailoverSpec struct {
+	// Group is the cross-cluster identity for this logical exposure. It is
+	// explicitly user-supplied (not derived from hostname) so renaming a
+	// hostname does not silently break the failover relationship. RFC 1123
+	// label, min 3 / max 63 chars.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=3
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Group string `json:"group"`
+
+	// LeaseSeconds is the TTL of the DNS TXT lease record. The Primary
+	// renews at leaseSeconds/2. Default 60s; min 30s (Cloudflare DNS TTL
+	// floor + safe renewer headroom); max 600s (caps split-brain window).
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:default=60
+	// +kubebuilder:validation:Minimum=30
+	// +kubebuilder:validation:Maximum=600
+	LeaseSeconds int32 `json:"leaseSeconds,omitempty"`
+}
+
 // CloudflareExposureSpec defines the desired state of CloudflareExposure.
 //
 // +kubebuilder:validation:XValidation:rule="(has(self.sourceRef) && self.sourceRef.kind == 'Service') || (has(self.origin) && has(self.origin.protocol) && has(self.origin.host) && has(self.origin.port))",message="origin protocol, host, and port are required unless sourceRef.kind is Service"
@@ -111,6 +137,9 @@ type CloudflareExposureSpec struct {
 	// +kubebuilder:validation:Optional
 	// +kubebuilder:default={}
 	Access AccessSpec `json:"access,omitempty"`
+
+	// +kubebuilder:validation:Optional
+	Failover *FailoverSpec `json:"failover,omitempty"`
 }
 
 // ExposureCloudflareStatus records Cloudflare-side resources for one exposure.
@@ -120,9 +149,51 @@ type ExposureCloudflareStatus struct {
 	DnsRecordId             string `json:"dnsRecordId,omitempty"`
 }
 
+// ExposureFailoverStatus records this site's view of the D26 failover lease
+// for one Exposure. Empty when spec.failover is unset.
+type ExposureFailoverStatus struct {
+	// Role is this site's current failover role.
+	// +kubebuilder:validation:Enum=Unknown;Standby;Primary
+	Role string `json:"role,omitempty"`
+
+	// SiteID is this operator process's --site-id, recorded on every
+	// status write so external operators can correlate role + identity.
+	SiteID string `json:"siteId,omitempty"`
+
+	// LeaseOwner is the site-id last observed holding the lease (may be
+	// this site or a peer).
+	LeaseOwner string `json:"leaseOwner,omitempty"`
+
+	// LeaseExpiresAt is the lease expiry read from / written to the
+	// lease TXT record.
+	LeaseExpiresAt *metav1.Time `json:"leaseExpiresAt,omitempty"`
+
+	// LeaseRenewedAt is the last successful renewal by this site as
+	// Primary; empty on Standby.
+	LeaseRenewedAt *metav1.Time `json:"leaseRenewedAt,omitempty"`
+
+	// LastRoleTransitionAt records the most recent Role change observed
+	// by this site.
+	LastRoleTransitionAt *metav1.Time `json:"lastRoleTransitionAt,omitempty"`
+
+	// ObservedPrimaryTunnelID is the Cloudflare tunnel ID the current
+	// Primary published in the lease record (split-brain diagnostic).
+	ObservedPrimaryTunnelID string `json:"observedPrimaryTunnelId,omitempty"`
+
+	// LastForcePromoteToken is the most recent cfzt.reid.ee/force-promote
+	// annotation value this site has honored. A force-promote fires only
+	// when the annotation token differs from this, so a GitOps re-apply of
+	// the same token does not replay the emergency promotion (D26).
+	LastForcePromoteToken string `json:"lastForcePromoteToken,omitempty"`
+}
+
 // CloudflareExposureStatus defines the observed state of CloudflareExposure.
 type CloudflareExposureStatus struct {
 	Cloudflare ExposureCloudflareStatus `json:"cloudflare,omitempty"`
+
+	// Failover is this site's view of the D26 failover lease. Empty
+	// (zero-valued) when spec.failover is unset.
+	Failover ExposureFailoverStatus `json:"failover,omitempty"`
 
 	// +listType=map
 	// +listMapKey=type
@@ -136,6 +207,7 @@ type CloudflareExposureStatus struct {
 // +kubebuilder:printcolumn:name=Hostname,type=string,JSONPath=`.spec.hostname`
 // +kubebuilder:printcolumn:name=Tunnel,type=string,JSONPath=`.spec.tunnelRef.name`
 // +kubebuilder:printcolumn:name=Access,type=boolean,JSONPath=`.spec.access.enabled`
+// +kubebuilder:printcolumn:name=Role,type=string,JSONPath=`.status.failover.role`
 // +kubebuilder:printcolumn:name=Ready,type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name=Age,type=date,JSONPath=`.metadata.creationTimestamp`
 

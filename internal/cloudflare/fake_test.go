@@ -202,6 +202,71 @@ func TestFakeDNSRecordIdempotent(t *testing.T) {
 	}
 }
 
+func TestFakeDNSRecordIDStable(t *testing.T) {
+	ctx := context.Background()
+	fake := cloudflare.NewFake()
+	created, err := fake.DNSRecords().Create(ctx, cloudflare.DNSRecordInput{
+		ZoneID:  "zone-1",
+		Name:    "_cfzt-lease.deadbeef.example.com",
+		Type:    "TXT",
+		Content: "v=1 site=primary tunnel=t-1 exp=200 renewed=100",
+	})
+	if err != nil {
+		t.Fatalf("Create returned error: %v", err)
+	}
+	updated, err := fake.DNSRecords().Update(ctx, created.ID, cloudflare.DNSRecordInput{
+		ZoneID:  "zone-1",
+		Name:    "_cfzt-lease.deadbeef.example.com",
+		Type:    "TXT",
+		Content: "v=1 site=primary tunnel=t-1 exp=260 renewed=130",
+	})
+	if err != nil {
+		t.Fatalf("Update returned error: %v", err)
+	}
+	if updated.ID != created.ID {
+		t.Fatalf("Update rotated record id: got %q, want stable %q", updated.ID, created.ID)
+	}
+	listed, err := fake.DNSRecords().List(ctx, "zone-1", "_cfzt-lease.deadbeef.example.com", "TXT")
+	if err != nil {
+		t.Fatalf("List returned error: %v", err)
+	}
+	if len(listed) != 1 || listed[0].ID != created.ID {
+		t.Fatalf("List = %#v, want single record with id %q", listed, created.ID)
+	}
+}
+
+// TestFakeDNSCreateAllowsDuplicateTXT documents that the fake models real
+// Cloudflare semantics: TXT records are not unique at (zone,name,type), so two
+// Create calls produce two distinct records. The D26 failover controller must
+// therefore detect and resolve duplicate leases itself — the client offers no
+// create-if-absent guarantee.
+func TestFakeDNSCreateAllowsDuplicateTXT(t *testing.T) {
+	ctx := context.Background()
+	fake := cloudflare.NewFake()
+	in := cloudflare.DNSRecordInput{
+		ZoneID:  "zone-1",
+		Name:    "_cfzt-lease.deadbeef.example.com",
+		Type:    "TXT",
+		Content: "v=1 site=primary tunnel=t-1 exp=200 renewed=100",
+	}
+	first, err := fake.DNSRecords().Create(ctx, in)
+	if err != nil {
+		t.Fatalf("first Create returned error: %v", err)
+	}
+	in.Content = "v=1 site=standby tunnel=t-2 exp=300 renewed=150"
+	second, err := fake.DNSRecords().Create(ctx, in)
+	if err != nil {
+		t.Fatalf("second Create returned error: %v", err)
+	}
+	if first.ID == second.ID {
+		t.Fatalf("expected distinct record IDs, got %q twice", first.ID)
+	}
+	listed, _ := fake.DNSRecords().List(ctx, "zone-1", "_cfzt-lease.deadbeef.example.com", "TXT")
+	if len(listed) != 2 {
+		t.Fatalf("List len = %d, want 2 (duplicate TXT allowed, mirrors real Cloudflare)", len(listed))
+	}
+}
+
 func TestFakeDNSRecordDeleteRequiresZoneID(t *testing.T) {
 	ctx := context.Background()
 	fake := cloudflare.NewFake()

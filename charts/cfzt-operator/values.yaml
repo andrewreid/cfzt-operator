@@ -43,3 +43,10 @@ metrics:
 
 healthProbe:
   bindAddress: ":8081"
+
+# D26: stable identity this operator process uses to arbitrate DR failover
+# leases for CloudflareExposures with spec.failover set. Required; the
+# default keeps single-site installs upgrading cleanly without a values
+# change. Override per-cluster on multi-site installs.
+site:
+  id: cfzt-default-site
