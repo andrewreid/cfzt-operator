@@ -74,6 +74,27 @@ var _ = Describe("CRD admission", func() {
 		{"rejects access application domain outside hostname", exposureWith("bad-app-domain", func(e *cfztv1alpha1.CloudflareExposure) {
 			e.Spec.Access.Applications[0].Domains = []cfztv1alpha1.AccessApplicationDomain{"other.example.com"}
 		}), "access.applications[].domains", nil},
+		{"rejects duplicate canonical access coverage within one app", exposureWith("same-app-canonical-duplicate", func(e *cfztv1alpha1.CloudflareExposure) {
+			e.Spec.Access.Applications[0].Domains = append(e.Spec.Access.Applications[0].Domains, cfztv1alpha1.AccessApplicationDomain(e.Spec.Hostname+"/*"))
+		}), "duplicate canonical coverage within one application", nil},
+		{"rejects duplicate canonical access coverage across apps", exposureWith("cross-app-canonical-duplicate", func(e *cfztv1alpha1.CloudflareExposure) {
+			e.Spec.Access.Applications = append(e.Spec.Access.Applications, cfztv1alpha1.AccessApplicationTarget{
+				Name:    "wildcard",
+				Domains: []cfztv1alpha1.AccessApplicationDomain{cfztv1alpha1.AccessApplicationDomain(e.Spec.Hostname + "/*")},
+				Policies: []cfztv1alpha1.AccessApplicationPolicyBinding{{
+					PolicyRef: cfztv1alpha1.AccessPolicyRef{UUID: "00000000-0000-4000-8000-000000000001"},
+				}},
+			})
+		}), "duplicate canonical coverage across applications", nil},
+		{"accepts root and specific path access coverage", exposureWith("path-access-coverage", func(e *cfztv1alpha1.CloudflareExposure) {
+			e.Spec.Access.Applications = append(e.Spec.Access.Applications, cfztv1alpha1.AccessApplicationTarget{
+				Name:    "path",
+				Domains: []cfztv1alpha1.AccessApplicationDomain{cfztv1alpha1.AccessApplicationDomain(e.Spec.Hostname + "/alerts-*")},
+				Policies: []cfztv1alpha1.AccessApplicationPolicyBinding{{
+					PolicyRef: cfztv1alpha1.AccessPolicyRef{UUID: "00000000-0000-4000-8000-000000000001"},
+				}},
+			})
+		}), "", nil},
 		{"accepts Service sourceRef without origin", exposureWith("service-source", func(e *cfztv1alpha1.CloudflareExposure) {
 			e.Spec.SourceRef = &cfztv1alpha1.SourceRef{ApiVersion: "v1", Kind: "Service", Name: "jellyfin"}
 			e.Spec.Origin = nil

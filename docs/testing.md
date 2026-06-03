@@ -72,14 +72,14 @@ There are two tests:
 6. Create a managed `CloudflareAccessPolicy` and verify the policy ID and observed rules hash.
 7. Create a `CloudflareTunnel`, verify the tunnel ID and token Secret reference, and wait for the cloudflared DaemonSet.
 8. Create a `CloudflareTunnelRoute` and verify the real Cloudflare route and ownership comment.
-9. Create one public `CloudflareExposure` and one Access-enabled `CloudflareExposure`.
+9. Create one public `CloudflareExposure` and one Access-enabled `CloudflareExposure` with a root app plus a path override.
 10. Wait for both Exposures to become `Ready=True`.
 11. Call the public hostname and require HTTP 200 from the echo workload.
-12. Call the Access hostname without credentials and require an Access challenge or denial, not HTTP 200.
-13. Reapply no-op spec updates, restart the operator Deployment, and verify the Cloudflare object IDs, route hashes, Access application policy binding, and Tunnel ingress document hash do not change.
+12. Call the Access hostname and the path-scoped Access URL without credentials and require an Access challenge or denial, not HTTP 200.
+13. Reapply no-op spec updates, restart the operator Deployment, and verify the Cloudflare object IDs, route hashes, Access application names/domains/policy bindings, and Tunnel ingress document hash do not change.
 14. Create a foreign DNS CNAME for a conflict hostname, create a conflicting Exposure, and verify the operator reports `HostnameConflict` or `ForeignResource` without changing the foreign record.
 15. Create a foreign Cloudflare tunnel route, create a conflicting `CloudflareTunnelRoute`, and verify the operator reports `ForeignRoute` without changing the foreign route.
-16. Delete the Kubernetes resources, wait for finalizers, and verify managed DNS records, Access application, Access policy, tunnel route, and tunnel are gone.
+16. Delete the Kubernetes resources, wait for finalizers, and verify managed DNS records, Access applications, Access policy, tunnel route, and tunnel are gone.
 
 The harness uses a custom HTTP client that resolves through `1.1.1.1`, does not follow redirects, and disables TLS certificate verification. That keeps Access redirects visible and avoids local resolver cache surprises while Cloudflare DNS is settling.
 

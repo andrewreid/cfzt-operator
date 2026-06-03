@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 
@@ -894,6 +895,10 @@ func accessApplicationSelfHostedDomains(domains []string) []zero_trust.SelfHoste
 }
 
 func selfHostedListPolicyIDs(policies []zero_trust.AccessApplicationListResponseSelfHostedApplicationPolicy) []string {
+	policies = append([]zero_trust.AccessApplicationListResponseSelfHostedApplicationPolicy(nil), policies...)
+	sort.SliceStable(policies, func(i, j int) bool {
+		return policies[i].Precedence < policies[j].Precedence
+	})
 	out := make([]string, 0, len(policies))
 	for _, policy := range policies {
 		if policy.ID != "" {
@@ -904,6 +909,10 @@ func selfHostedListPolicyIDs(policies []zero_trust.AccessApplicationListResponse
 }
 
 func selfHostedNewPolicyIDs(policies []zero_trust.AccessApplicationNewResponseSelfHostedApplicationPolicy) []string {
+	policies = append([]zero_trust.AccessApplicationNewResponseSelfHostedApplicationPolicy(nil), policies...)
+	sort.SliceStable(policies, func(i, j int) bool {
+		return policies[i].Precedence < policies[j].Precedence
+	})
 	out := make([]string, 0, len(policies))
 	for _, policy := range policies {
 		if policy.ID != "" {
@@ -914,6 +923,10 @@ func selfHostedNewPolicyIDs(policies []zero_trust.AccessApplicationNewResponseSe
 }
 
 func selfHostedUpdatePolicyIDs(policies []zero_trust.AccessApplicationUpdateResponseSelfHostedApplicationPolicy) []string {
+	policies = append([]zero_trust.AccessApplicationUpdateResponseSelfHostedApplicationPolicy(nil), policies...)
+	sort.SliceStable(policies, func(i, j int) bool {
+		return policies[i].Precedence < policies[j].Precedence
+	})
 	out := make([]string, 0, len(policies))
 	for _, policy := range policies {
 		if policy.ID != "" {
@@ -924,6 +937,10 @@ func selfHostedUpdatePolicyIDs(policies []zero_trust.AccessApplicationUpdateResp
 }
 
 func selfHostedGetPolicyIDs(policies []zero_trust.AccessApplicationGetResponseSelfHostedApplicationPolicy) []string {
+	policies = append([]zero_trust.AccessApplicationGetResponseSelfHostedApplicationPolicy(nil), policies...)
+	sort.SliceStable(policies, func(i, j int) bool {
+		return policies[i].Precedence < policies[j].Precedence
+	})
 	out := make([]string, 0, len(policies))
 	for _, policy := range policies {
 		if policy.ID != "" {

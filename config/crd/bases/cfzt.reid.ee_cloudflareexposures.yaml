@@ -258,6 +258,38 @@ spec:
               rule: '!has(self.access) || !self.access.enabled || self.access.applications.all(app,
                 app.domains.all(domain, domain == self.hostname || domain.startsWith(self.hostname
                 + ''/'')))'
+            - message: access.applications[].domains must not duplicate canonical
+                coverage within one application
+              rule: '!has(self.access) || !self.access.enabled || self.access.applications.all(app,
+                size(app.domains) < 2 || !((size(app.domains) > 1 && ((app.domains[0]
+                == self.hostname && app.domains[1] == self.hostname + ''/*'') || (app.domains[0]
+                == self.hostname + ''/*'' && app.domains[1] == self.hostname))) ||
+                (size(app.domains) > 2 && ((app.domains[0] == self.hostname && app.domains[2]
+                == self.hostname + ''/*'') || (app.domains[0] == self.hostname + ''/*''
+                && app.domains[2] == self.hostname) || (app.domains[1] == self.hostname
+                && app.domains[2] == self.hostname + ''/*'') || (app.domains[1] ==
+                self.hostname + ''/*'' && app.domains[2] == self.hostname)))))'
+            - message: access.applications[].domains must not duplicate canonical
+                coverage across applications
+              rule: '!has(self.access) || !self.access.enabled || size(self.access.applications)
+                < 2 || !self.access.applications[0].domains.exists(domain, self.access.applications[1].domains.exists(otherDomain,
+                domain == otherDomain || ((domain == self.hostname && otherDomain
+                == self.hostname + ''/*'') || (domain == self.hostname + ''/*'' &&
+                otherDomain == self.hostname))))'
+            - message: access.applications[].domains must not duplicate canonical
+                coverage across applications
+              rule: '!has(self.access) || !self.access.enabled || size(self.access.applications)
+                < 3 || !self.access.applications[0].domains.exists(domain, self.access.applications[2].domains.exists(otherDomain,
+                domain == otherDomain || ((domain == self.hostname && otherDomain
+                == self.hostname + ''/*'') || (domain == self.hostname + ''/*'' &&
+                otherDomain == self.hostname))))'
+            - message: access.applications[].domains must not duplicate canonical
+                coverage across applications
+              rule: '!has(self.access) || !self.access.enabled || size(self.access.applications)
+                < 3 || !self.access.applications[1].domains.exists(domain, self.access.applications[2].domains.exists(otherDomain,
+                domain == otherDomain || ((domain == self.hostname && otherDomain
+                == self.hostname + ''/*'') || (domain == self.hostname + ''/*'' &&
+                otherDomain == self.hostname))))'
             - message: hostname is immutable except when initially derived from an
                 HTTPRoute sourceRef
               rule: 'has(oldSelf.hostname) ? (has(self.hostname) && self.hostname
