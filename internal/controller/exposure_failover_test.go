@@ -132,6 +132,31 @@ var _ = Describe("CloudflareExposure failover role gate", func() {
 		Expect(found).To(BeFalse())
 	})
 
+	It("TestFailoverGroupConflictCrossNamespace", func() {
+		// Same group in two different namespaces of one cluster must still
+		// conflict — the guard is cluster-wide, not per-namespace. This case
+		// would have passed under the previous namespace-scoped bug.
+		const otherNamespace = exposureTestNamespace + "-b"
+		ensureNamespace(ctx, otherNamespace)
+		tunnel := readyTunnel(ctx, tunnelReconciler, "fo-xns", "fo-xns")
+		a := createFailoverExposure(ctx, "fo-xns-a", tunnel.Name, "fo-xns-a.example.com", "xns-group")
+		b := createFailoverExposureInNamespace(ctx, otherNamespace, "fo-xns-b", tunnel.Name, "fo-xns-b.example.com", "xns-group")
+
+		reconcileExposureExpectRequeueAfter30(ctx, exposureRec, a)
+		reconcileExposureExpectRequeueAfter30(ctx, exposureRec, b)
+
+		for _, e := range []*cfztv1alpha1.CloudflareExposure{a, b} {
+			cur := &cfztv1alpha1.CloudflareExposure{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: e.Namespace, Name: e.Name}, cur)).To(Succeed())
+			ready := meta.FindStatusCondition(cur.Status.Conditions, ConditionReady)
+			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+			Expect(ready.Reason).To(Equal(ReasonFailoverGroupConflict))
+		}
+		// No TXT lease written for the contended group.
+		_, found := readLease("xns-group")
+		Expect(found).To(BeFalse())
+	})
+
 	It("TestFailoverRequiresDistinctSiteID", func() {
 		exposureRec.SiteID = defaultSiteID
 		tunnel := readyTunnel(ctx, tunnelReconciler, "fo-defsite", "fo-defsite")
@@ -377,14 +402,18 @@ var _ = Describe("CloudflareExposure failover role gate", func() {
 })
 
 func createFailoverExposure(ctx context.Context, name, tunnelName, hostname, group string) *cfztv1alpha1.CloudflareExposure {
+	return createFailoverExposureInNamespace(ctx, exposureTestNamespace, name, tunnelName, hostname, group)
+}
+
+func createFailoverExposureInNamespace(ctx context.Context, namespace, name, tunnelName, hostname, group string) *cfztv1alpha1.CloudflareExposure {
 	exposure := &cfztv1alpha1.CloudflareExposure{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: exposureTestNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Spec: cfztv1alpha1.CloudflareExposureSpec{
 			Hostname:  hostname,
 			TunnelRef: cfztv1alpha1.TunnelRef{Name: tunnelName},
 			Origin: &cfztv1alpha1.OriginSpec{
 				Protocol: "http",
-				Host:     name + "." + exposureTestNamespace + ".svc.cluster.local",
+				Host:     name + "." + namespace + ".svc.cluster.local",
 				Port:     8096,
 			},
 			Failover: &cfztv1alpha1.FailoverSpec{Group: group, LeaseSeconds: 60},
