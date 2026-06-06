@@ -1,3 +1,4 @@
+![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/andrewreid/cfzt-operator?utm_source=oss&utm_medium=github&utm_campaign=andrewreid%2Fcfzt-operator&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews)
 # cfzt-operator
 
 Kubernetes operator for managing Cloudflare Tunnel, public hostname exposure, Cloudflare Access, managed DNS, tunnel private-network routes, and optional active-passive multi-cluster DR failover from custom resources.
