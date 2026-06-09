@@ -53,12 +53,13 @@ These tests are mostly deployment smoke coverage. They do not exercise real Clou
 
 ## Live Cloudflare Smoke Tests
 
-The live smoke test entrypoint lives in `test/live/cloudflare_smoke_test.go`; shared Kubernetes and Cloudflare helpers live in `test/live/harness.go`. The package is behind the `live` build tag. It is intentionally excluded from normal test runs because it talks to a real Cloudflare account, creates real DNS records, creates real Zero Trust resources, installs the chart into kind, and depends on public DNS/Cloudflare propagation.
+The live smoke test entrypoints live in `test/live/cloudflare_smoke_test.go` and `test/live/failover_smoke_test.go`; shared Kubernetes and Cloudflare helpers live in `test/live/harness.go`. The package is behind the `live` build tag. It is intentionally excluded from normal test runs because it talks to a real Cloudflare account, creates real DNS records, creates real Zero Trust resources, installs the chart into kind, and depends on public DNS/Cloudflare propagation.
 
-There are two tests:
+There are three tests:
 
 - `TestCloudflarePreflight`: verifies the supplied Cloudflare credentials can list DNS records, Access policies, Access applications, and tunnels. It does not require a Kubernetes cluster.
 - `TestCloudflareLifecycle`: installs the operator Helm chart into Kubernetes, creates live cfzt resources, verifies public and Access-protected hostnames, checks idempotency after no-op updates and an operator restart, verifies foreign-resource safety, then deletes the resources and waits for Cloudflare cleanup.
+- `TestFailoverLifecycle`: installs the chart, creates a failover Exposure, verifies lease/CNAME behavior through initial promotion, peer takeover, automatic re-promotion, Manual `AwaitingPromotion`, force-promotion, and cleanup.
 
 ### What Lifecycle Covers
 
@@ -83,6 +84,21 @@ There are two tests:
 
 The harness uses a custom HTTP client that resolves through `1.1.1.1`, does not follow redirects, and disables TLS certificate verification. That keeps Access redirects visible and avoids local resolver cache surprises while Cloudflare DNS is settling.
 
+### What Failover Covers
+
+`TestFailoverLifecycle` exercises the D26 failover state machine against real Cloudflare DNS:
+
+1. Install the operator Helm chart with a non-default `site.id`.
+2. Create a tunnel and a failover Exposure with managed DNS.
+3. Wait for local promotion to `Primary`, verify the TXT lease names the local site, then wait for the public CNAME to exist and point at the local tunnel.
+4. Simulate peer takeover by writing a peer-held TXT lease and verify the local Exposure demotes to `Standby` without stealing the lease.
+5. Let the peer lease expire under `promotionPolicy: Automatic`, verify the local site re-promotes, and wait for the CNAME to return to the local tunnel.
+6. Switch to `promotionPolicy: Manual`, simulate another expired peer lease, and verify `Ready=False, Reason=AwaitingPromotion` with no lease steal.
+7. Add a new `cfzt.reid.ee/force-promote` token, verify promotion, lease ownership, and CNAME target.
+8. Delete the Kubernetes resources and verify the failover CNAME, TXT lease, and Cloudflare tunnel are absent.
+
+The smoke waits for the actual public CNAME target after each promotion. `status.failover.role=Primary` proves lease/status state, but the public-serving path is only complete once Cloudflare DNS has the expected CNAME.
+
 ### Required Cloudflare Setup
 
 Copy `.env.live.example` to `.env.live` for local runs:
@@ -105,7 +121,7 @@ Set `CF_ZONE_ID` when the token can manage DNS records but cannot list zones:
 export CF_ZONE_ID="..."
 ```
 
-The token must be able to perform the operations tested by the harness: list/create/delete Cloudflare tunnels, read tunnel tokens, list/create/update/delete Access policies and self-hosted Access applications, list/create/delete DNS CNAME records in the test zone, and list/create/delete tunnel private network routes. If `CF_ZONE_ID` is not set, it must also be able to list/resolve zones.
+The token must be able to perform the operations tested by the harness: list/create/delete Cloudflare tunnels, read tunnel tokens, list/create/update/delete Access policies and self-hosted Access applications, list/create/delete DNS CNAME records in the test zone, list/create/update/delete DNS TXT records for failover leases, and list/create/delete tunnel private network routes. If `CF_ZONE_ID` is not set, it must also be able to list/resolve zones.
 
 Use a disposable test zone or a delegated subdomain. The harness creates hostnames like:
 
@@ -113,6 +129,8 @@ Use a disposable test zone or a delegated subdomain. The harness creates hostnam
 public-<run-id>-<attempt>.<CF_TEST_ZONE>
 access-<run-id>-<attempt>.<CF_TEST_ZONE>
 conflict-<run-id>-<attempt>.<CF_TEST_ZONE>
+failover-<run-id>-<attempt>.<CF_TEST_ZONE>
+_cfzt-lease.<hash8(group)>.<CF_TEST_ZONE>
 ```
 
 The default private-route smoke CIDRs are:
@@ -138,6 +156,12 @@ Run the full lifecycle smoke:
 
 ```sh
 bash hack/live-cloudflare-local.sh lifecycle
+```
+
+Run the DR failover smoke after failover, DNS lease, or promotion-policy changes:
+
+```sh
+bash hack/live-cloudflare-local.sh failover
 ```
 
 Clean up the local kind cluster and Colima runtime when finished:
@@ -182,6 +206,15 @@ set +a
 go test -tags=live ./test/live -run '^TestCloudflareLifecycle$' -count=1 -timeout=15m -v
 ```
 
+Failover:
+
+```sh
+set -a
+source .env.live
+set +a
+go test -tags=live ./test/live -run '^TestFailoverLifecycle$' -count=1 -timeout=15m -v
+```
+
 For direct lifecycle runs, the current kubeconfig must point at the target cluster, `helm` must be installed, and the chart/image settings must be valid for that cluster. With the default local values, the image must already be loaded into kind because the chart is installed with `image.pullPolicy=Never`.
 
 ### Release Workflow
@@ -216,7 +249,7 @@ IMAGE_REPOSITORY=cfzt-operator
 IMAGE_TAG=release-candidate
 ```
 
-Use the separate `live smoke` workflow when you want to exercise the live harness without creating a release. It builds and loads a local image, installs `charts/cfzt-operator`, and never pushes tags, packages, images, or GitHub Releases.
+Use the separate `live smoke` workflow when you want to exercise the main live lifecycle harness without creating a release. It builds and loads a local image, installs `charts/cfzt-operator`, and never pushes tags, packages, images, or GitHub Releases. The failover smoke is currently run with the local helper or direct `go test` command above.
 
 ### Development Snapshots
 
@@ -273,7 +306,7 @@ The snapshot channel has the same CRD caveats as normal releases: breaking `v1al
 
 ### Cleanup and Failure Notes
 
-The lifecycle test registers cleanup with `t.Cleanup`, so it runs after test failure as long as the process is still alive. Cleanup deletes the cfzt Kubernetes resources first so their finalizers can remove owned Cloudflare resources, then it removes the intentionally created foreign DNS record and foreign tunnel route directly.
+The lifecycle and failover tests register cleanup with `t.Cleanup`, so it runs after test failure as long as the process is still alive. Cleanup deletes the cfzt Kubernetes resources first so their finalizers can remove owned Cloudflare resources, then it removes intentionally created foreign or peer resources directly. The failover cleanup also checks that the public CNAME, TXT lease, and Cloudflare tunnel are absent.
 
 If a run is interrupted hard, inspect both Kubernetes and Cloudflare for leftover resources whose names include the run suffix. Local runs default the suffix from `GITHUB_RUN_ID`, `GITHUB_RUN_ATTEMPT`, or a `local-<unix timestamp>` fallback. GitHub Actions runs use the real run ID and attempt.
 
@@ -284,4 +317,5 @@ Common failure causes:
 - private-route CIDR collision with existing Cloudflare routes;
 - candidate image or chart not available to the test cluster;
 - DNS or Access propagation taking longer than the harness timeout; and
+- Cloudflare API throttling from repeated local or CI smoke attempts; and
 - operator finalizer failures that leave Kubernetes resources deleting.
