@@ -917,6 +917,21 @@ func (h *smokeHarness) waitDNSAbsent(ctx context.Context, description, hostname 
 	h.t.Log(description + " absent")
 }
 
+// waitDNSCNAME polls until exactly one CNAME at hostname carries expectedContent,
+// the correct readiness signal for a promotion: status.failover.role=Primary is
+// written by the lease gate before the later Access/DNS reconcile writes the
+// CNAME (and Cloudflare's List is eventually consistent), so asserting DNS the
+// instant role flips races. Zero records or wrong content are readiness
+// transients → keep polling.
+//
+// More than one CNAME, however, fails fast (not "keep polling"): the
+// shared-surface invariant is one hostname → at most one tunnel. The operator
+// adopts/updates the group-owned record in place (see envtest
+// TestFailoverPrimaryAdoptsPeerGroupCNAME) and never creates parallel records,
+// and the smoke hostname is unique per run, so >1 means a real leak, duplicate
+// create, or foreign/API anomaly — a stronger failure signal than a timeout.
+// (Duplicate TXT *leases* are a modeled DR transient; duplicate public CNAMEs
+// are not.)
 func (h *smokeHarness) waitDNSCNAME(ctx context.Context, description, hostname, expectedContent string, timeout time.Duration) cloudflare.DNSRecord {
 	var record cloudflare.DNSRecord
 	h.waitForContext(ctx, description+" ready", timeout, func() (bool, error) {
