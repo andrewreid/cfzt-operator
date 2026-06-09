@@ -37,10 +37,13 @@ import (
 )
 
 const (
-	conditionReady         = "Ready"
-	reasonHostnameConflict = "HostnameConflict"
-	reasonForeignResource  = "ForeignResource"
-	reasonForeignRoute     = "ForeignRoute"
+	conditionReady          = "Ready"
+	reasonHostnameConflict  = "HostnameConflict"
+	reasonForeignResource   = "ForeignResource"
+	reasonForeignRoute      = "ForeignRoute"
+	reasonStandby           = "Standby"
+	reasonAwaitingPromotion = "AwaitingPromotion"
+	annotationForcePromote  = "cfzt.reid.ee/force-promote"
 
 	operatorReleaseName = "cfzt-operator"
 	credentialsSecret   = "cloudflare-credentials"
@@ -93,6 +96,10 @@ type smokeHarness struct {
 	k8s             client.Client
 	foreignRecordID string
 	foreignRouteID  string
+	// failoverPolicy is stamped onto the failover Exposure spec by
+	// failoverExposureObject so it survives the repeated noop spec updates the
+	// failover phases use to trigger reconciles. Empty => Automatic (default).
+	failoverPolicy cfztv1alpha1.PromotionPolicy
 }
 
 func loadSmokeConfig(t *testing.T) smokeConfig {
@@ -908,6 +915,41 @@ func (h *smokeHarness) waitDNSAbsent(ctx context.Context, description, hostname 
 		return len(records) == 0, nil
 	})
 	h.t.Log(description + " absent")
+}
+
+// waitDNSCNAME polls until exactly one CNAME at hostname carries expectedContent,
+// the correct readiness signal for a promotion: status.failover.role=Primary is
+// written by the lease gate before the later Access/DNS reconcile writes the
+// CNAME (and Cloudflare's List is eventually consistent), so asserting DNS the
+// instant role flips races. Zero records or wrong content are readiness
+// transients → keep polling.
+//
+// More than one CNAME, however, fails fast (not "keep polling"): the
+// shared-surface invariant is one hostname → at most one tunnel. The operator
+// adopts/updates the group-owned record in place (see envtest
+// TestFailoverPrimaryAdoptsPeerGroupCNAME) and never creates parallel records,
+// and the smoke hostname is unique per run, so >1 means a real leak, duplicate
+// create, or foreign/API anomaly — a stronger failure signal than a timeout.
+// (Duplicate TXT *leases* are a modeled DR transient; duplicate public CNAMEs
+// are not.)
+func (h *smokeHarness) waitDNSCNAME(ctx context.Context, description, hostname, expectedContent string, timeout time.Duration) cloudflare.DNSRecord {
+	var record cloudflare.DNSRecord
+	h.waitForContext(ctx, description+" ready", timeout, func() (bool, error) {
+		records, err := h.cf.DNSRecords().List(ctx, h.cfg.zoneID, hostname, "CNAME")
+		if err != nil {
+			return false, err
+		}
+		if len(records) > 1 {
+			return false, fmt.Errorf("expected at most one CNAME for %s, got %d", hostname, len(records))
+		}
+		if len(records) == 0 || records[0].Content != expectedContent {
+			return false, nil
+		}
+		record = records[0]
+		return true, nil
+	})
+	h.t.Log(description + " ready")
+	return record
 }
 
 func (h *smokeHarness) waitAccessApplicationsAbsent(ctx context.Context, timeout time.Duration) {

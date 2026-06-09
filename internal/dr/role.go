@@ -38,10 +38,21 @@ const (
 	ActionAcquire
 
 	// ActionRenew updates the existing lease record this site already
-	// owns. Used by Primary on every reconcile inside the renewal
-	// window. Success keeps the previous role Primary and pushes
-	// LeaseExpiresAt forward by LeaseSeconds.
+	// owns. Used by Primary once the renewal window has opened (now is at
+	// or past renewed+leaseSeconds/2). Success keeps the previous role
+	// Primary and pushes LeaseExpiresAt forward by LeaseSeconds.
 	ActionRenew
+
+	// ActionHoldPrimary fires when this site owns the lease but the renewal
+	// window has not opened yet (now < renewed+leaseSeconds/2). The site
+	// stays Primary and the controller proceeds to the shared Access/DNS
+	// reconcile, but it does NOT rewrite the lease record. This is what keeps
+	// a Primary from renewing on every reconcile: without it, each renew
+	// rewrites the lease timestamps in status, the self-watch re-enqueues,
+	// and the Primary spins (hammering the Cloudflare DNS API and defeating a
+	// peer takeover). Decision.Requeue is the time until the renewal window
+	// opens.
+	ActionHoldPrimary
 
 	// ActionSplitBrain fires when this site believes it is Primary but
 	// the live lease names a different owner. The controller emits
@@ -77,6 +88,13 @@ type Inputs struct {
 	// is set. Overrides expiry so an operator can promote during an
 	// outage they have already confirmed.
 	ForcePromote bool
+	// ManualPromotion mirrors spec.failover.promotionPolicy == Manual. When
+	// set, Decide never returns ActionAcquire off an expired or absent lease
+	// on its own — only an explicit ForcePromote may acquire. The site stays
+	// Standby (AwaitingPromotion) so failover is a deliberate act for
+	// warm-infra/cold-app stateful services. Renewal of a self-held lease and
+	// split-brain demotion are unaffected.
+	ManualPromotion bool
 	// Rand is the per-process rand source used for jitter. Required when
 	// AcquireJitter > 0; nil is a programmer error in that mode.
 	Rand *rand.Rand
@@ -103,6 +121,13 @@ type Decision struct {
 	// leaseSeconds/2 so renewal lands before expiry; Standby waits for
 	// observed expiry plus jitter so promotion does not undershoot.
 	Requeue time.Duration
+	// AwaitingPromotion is set only when ManualPromotion suppressed an
+	// acquire this site would otherwise have performed (expired peer lease,
+	// or absent day-1 lease). The controller surfaces it as a Warning event +
+	// pending-promotion metric + ReasonAwaitingPromotion so a DR pair that
+	// nobody has promoted is visible rather than silently dark. It is false
+	// for an ordinary Standby waiting on a live peer.
+	AwaitingPromotion bool
 }
 
 // Decide reads the snapshot and returns the next role + action for this
@@ -123,6 +148,18 @@ func Decide(in Inputs) Decision {
 	// No lease observed: anyone can acquire. Stay Standby until the
 	// caller's lease write + read-back verification succeeds.
 	if in.Observed == nil {
+		// Manual promotion never auto-elects a first Primary; only an
+		// explicit force-promote may create the initial lease. Without it,
+		// wait and surface AwaitingPromotion so a freshly-deployed,
+		// unpromoted DR pair is visible rather than silently dark.
+		if in.ManualPromotion && !in.ForcePromote {
+			return Decision{
+				NextRole:          RoleStandby,
+				Action:            ActionWait,
+				Requeue:           half,
+				AwaitingPromotion: true,
+			}
+		}
 		return Decision{
 			NextRole: RoleStandby,
 			Action:   ActionAcquire,
@@ -147,8 +184,21 @@ func Decide(in Inputs) Decision {
 		}
 	}
 
-	// I hold the lease.
+	// I hold the lease. Renew only once the renewal window has opened
+	// (now >= renewed+half); otherwise hold without rewriting the record so a
+	// Primary does not renew on every reconcile.
 	if isMine {
+		renewAt := obs.Renewed.Add(half)
+		if in.Now.Before(renewAt) {
+			wait := max(renewAt.Sub(in.Now), time.Second)
+			return Decision{
+				NextRole:       RolePrimary,
+				Action:         ActionHoldPrimary,
+				LeaseOwner:     in.SiteID,
+				LeaseExpiresAt: obs.Expires,
+				Requeue:        wait,
+			}
+		}
 		return Decision{
 			NextRole:       RolePrimary,
 			Action:         ActionRenew,
@@ -188,7 +238,22 @@ func Decide(in Inputs) Decision {
 		}
 	}
 
-	// A peer's lease has expired; try to acquire it.
+	// A peer's lease has expired. Manual promotion suppresses the automatic
+	// acquire: stay Standby and surface AwaitingPromotion until a
+	// force-promote token arrives (ForcePromote is handled above, before this
+	// branch, so reaching here means the token is absent).
+	if in.ManualPromotion {
+		return Decision{
+			NextRole:          RoleStandby,
+			Action:            ActionWait,
+			LeaseOwner:        obs.Site,
+			LeaseExpiresAt:    obs.Expires,
+			Requeue:           half,
+			AwaitingPromotion: true,
+		}
+	}
+
+	// Automatic policy: try to acquire the expired lease.
 	return Decision{
 		NextRole:       RoleStandby,
 		Action:         ActionAcquire,

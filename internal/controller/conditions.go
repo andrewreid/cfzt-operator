@@ -35,6 +35,7 @@ const (
 
 	// D26 failover reasons.
 	ReasonStandby                        = "Standby"
+	ReasonAwaitingPromotion              = "AwaitingPromotion"
 	ReasonLeaseConflict                  = "LeaseConflict"
 	ReasonFailoverRequiresManagedDNS     = "FailoverRequiresManagedDNS"
 	ReasonFailoverRequiresDistinctSiteID = "FailoverRequiresDistinctSiteID"
@@ -73,6 +74,10 @@ const (
 	EventLeaseConflict      = "LeaseConflict"
 	EventSplitBrainDetected = "SplitBrainDetected"
 	EventForcePromoted      = "ForcePromoted"
+	// EventAwaitingManualPromotion fires when a Manual-policy Standby declines
+	// to auto-promote (expired peer lease, or absent day-1 lease). Warning so
+	// monitoring can alert that a deliberate force-promote is required.
+	EventAwaitingManualPromotion = "AwaitingManualPromotion"
 )
 
 func setCondition(conditions *[]metav1.Condition, conditionType string, status metav1.ConditionStatus, reason, message string, observedGeneration int64) {

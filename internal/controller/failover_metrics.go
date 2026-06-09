@@ -30,10 +30,19 @@ var (
 		Name: "cfzt_failover_promotion_total",
 		Help: "Total DR failover promotions to Primary by this site.",
 	}, []string{"namespace", "name", "group", "site_id"})
+
+	// failoverPromotionPending is 1 while a Manual-policy Standby is declining
+	// to auto-promote (expired peer lease, or absent day-1 lease) and a
+	// deliberate force-promote is required; 0 otherwise. Alert off this to
+	// learn that a DR pair is dark and awaiting manual action.
+	failoverPromotionPending = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "cfzt_failover_promotion_pending",
+		Help: "1 when a Manual-policy Standby is awaiting a deliberate force-promote, 0 otherwise.",
+	}, []string{"namespace", "name", "group", "site_id"})
 )
 
 func init() {
-	ctrlmetrics.Registry.MustRegister(failoverRoleGauge, failoverLeaseRenewTotal, failoverPromotionTotal)
+	ctrlmetrics.Registry.MustRegister(failoverRoleGauge, failoverLeaseRenewTotal, failoverPromotionTotal, failoverPromotionPending)
 }
 
 func failoverRoleValue(role string) float64 {
