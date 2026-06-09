@@ -917,6 +917,26 @@ func (h *smokeHarness) waitDNSAbsent(ctx context.Context, description, hostname 
 	h.t.Log(description + " absent")
 }
 
+func (h *smokeHarness) waitDNSCNAME(ctx context.Context, description, hostname, expectedContent string, timeout time.Duration) cloudflare.DNSRecord {
+	var record cloudflare.DNSRecord
+	h.waitForContext(ctx, description+" ready", timeout, func() (bool, error) {
+		records, err := h.cf.DNSRecords().List(ctx, h.cfg.zoneID, hostname, "CNAME")
+		if err != nil {
+			return false, err
+		}
+		if len(records) > 1 {
+			return false, fmt.Errorf("expected at most one CNAME for %s, got %d", hostname, len(records))
+		}
+		if len(records) == 0 || records[0].Content != expectedContent {
+			return false, nil
+		}
+		record = records[0]
+		return true, nil
+	})
+	h.t.Log(description + " ready")
+	return record
+}
+
 func (h *smokeHarness) waitAccessApplicationsAbsent(ctx context.Context, timeout time.Duration) {
 	h.waitForContext(ctx, "Access application absent", timeout, func() (bool, error) {
 		apps, err := h.cf.AccessApplications().List(ctx, h.cfg.accessHostname)

@@ -64,6 +64,7 @@ func TestFailoverLifecycle(t *testing.T) {
 	tunnel := h.waitTunnelReady(resourceReadyTimeout)
 	h.waitDaemonSetReady("cloudflared-"+h.cfg.tunnelName, daemonSetReadyTimeout)
 	tunnelID := tunnel.Status.TunnelId
+	tunnelCNAME := tunnelID + ".cfargotunnel.com"
 
 	t.Log("creating failover exposure; operator should acquire the lease as Primary")
 	h.createFailoverExposure()
@@ -77,11 +78,7 @@ func TestFailoverLifecycle(t *testing.T) {
 	assertEqual(t, "lease site", h.cfg.siteID, lease.Site)
 	assertEqual(t, "lease tunnel", tunnelID, lease.Tunnel)
 	// Public CNAME points at this site's tunnel.
-	cnames := mustListDNS(t, ctx, h.cf, h.cfg.zoneID, h.cfg.failoverHostname)
-	if len(cnames) != 1 {
-		t.Fatalf("expected one failover CNAME, got %d", len(cnames))
-	}
-	assertEqual(t, "failover CNAME content", tunnelID+".cfargotunnel.com", cnames[0].Content)
+	h.waitDNSCNAME(ctx, "failover CNAME", h.cfg.failoverHostname, tunnelCNAME, failoverRoleTimeout)
 
 	t.Log("simulating a peer site taking the lease; operator should self-demote to Standby")
 	h.writePeerLease(peerSiteID, "peer-tunnel-id", h.now().Add(failoverLeaseSeconds*time.Second))
@@ -98,6 +95,7 @@ func TestFailoverLifecycle(t *testing.T) {
 	lease, _ = h.readFailoverLease()
 	assertEqual(t, "lease site after auto-promote", h.cfg.siteID, lease.Site)
 	assertEqual(t, "lease tunnel after auto-promote", tunnelID, lease.Tunnel)
+	h.waitDNSCNAME(ctx, "failover CNAME after auto-promote", h.cfg.failoverHostname, tunnelCNAME, failoverRoleTimeout)
 
 	t.Log("switching to promotionPolicy=Manual; operator holds the lease so stays Primary")
 	h.setFailoverPromotionPolicy(cfztv1alpha1.PromotionManual)
@@ -127,6 +125,7 @@ func TestFailoverLifecycle(t *testing.T) {
 	lease, _ = h.readFailoverLease()
 	assertEqual(t, "lease site after force-promote", h.cfg.siteID, lease.Site)
 	assertEqual(t, "lease tunnel after force-promote", tunnelID, lease.Tunnel)
+	h.waitDNSCNAME(ctx, "failover CNAME after force-promote", h.cfg.failoverHostname, tunnelCNAME, failoverRoleTimeout)
 
 	t.Log("live Cloudflare failover smoke passed")
 }
