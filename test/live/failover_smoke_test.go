@@ -4,6 +4,7 @@ package live
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -155,14 +157,22 @@ func (h *smokeHarness) setFailoverPromotionPolicy(policy cfztv1alpha1.PromotionP
 
 // setForcePromoteToken stamps the emergency force-promote annotation. Metadata
 // is untouched by the noop spec updates, so the token persists until changed.
+// Wrapped in RetryOnConflict because the controller is concurrently writing
+// status/failover, so a plain read-modify-Update races (object-has-been-modified).
 func (h *smokeHarness) setForcePromoteToken(token string) {
-	var exposure cfztv1alpha1.CloudflareExposure
-	h.get(types.NamespacedName{Namespace: h.cfg.smokeNamespace, Name: failoverExposure}, &exposure)
-	if exposure.Annotations == nil {
-		exposure.Annotations = map[string]string{}
-	}
-	exposure.Annotations[annotationForcePromote] = token
-	must(h.t, h.k8s.Update(h.ctx, &exposure), "set force-promote annotation")
+	key := types.NamespacedName{Namespace: h.cfg.smokeNamespace, Name: failoverExposure}
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var exposure cfztv1alpha1.CloudflareExposure
+		if err := h.k8s.Get(h.ctx, key, &exposure); err != nil {
+			return err
+		}
+		if exposure.Annotations == nil {
+			exposure.Annotations = map[string]string{}
+		}
+		exposure.Annotations[annotationForcePromote] = token
+		return h.k8s.Update(h.ctx, &exposure)
+	})
+	must(h.t, err, "set force-promote annotation")
 }
 
 // waitExposureFailoverReason blocks until the failover Exposure's Ready
@@ -192,10 +202,19 @@ func (h *smokeHarness) createFailoverExposure() {
 }
 
 func (h *smokeHarness) updateFailoverExposureNoop() {
-	var exposure cfztv1alpha1.CloudflareExposure
-	h.get(types.NamespacedName{Namespace: h.cfg.smokeNamespace, Name: failoverExposure}, &exposure)
-	exposure.Spec = h.failoverExposureObject().Spec
-	must(h.t, h.k8s.Update(h.ctx, &exposure), "update failover CloudflareExposure")
+	key := types.NamespacedName{Namespace: h.cfg.smokeNamespace, Name: failoverExposure}
+	// RetryOnConflict: the controller writes status/failover concurrently, so a
+	// plain read-modify-Update races (object-has-been-modified) — re-Get and
+	// retry on conflict so these reconcile nudges are reliable.
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var exposure cfztv1alpha1.CloudflareExposure
+		if err := h.k8s.Get(h.ctx, key, &exposure); err != nil {
+			return err
+		}
+		exposure.Spec = h.failoverExposureObject().Spec
+		return h.k8s.Update(h.ctx, &exposure)
+	})
+	must(h.t, err, "update failover CloudflareExposure")
 }
 
 func (h *smokeHarness) waitExposureFailoverRole(role string, timeout time.Duration) {
@@ -276,6 +295,20 @@ func (h *smokeHarness) cleanupFailover() {
 	if _, record := h.readFailoverLeaseWithContext(cleanupCtx); record != nil {
 		if err := h.cf.DNSRecords().Delete(cleanupCtx, h.cfg.zoneID, record.ID); err != nil {
 			h.t.Errorf("cleanup: delete failover lease TXT: %v", err)
+		}
+	}
+	// The Exposure finalizer only deletes the shared CNAME when THIS site holds
+	// the live lease. If the run failed during the deliberately peer-owned
+	// window, the finalizer correctly left the CNAME alone — so remove any
+	// remaining CNAME at the per-run failover hostname directly (it is unique to
+	// this run, so anything there is ours), otherwise shared DNS leaks.
+	if records, err := h.cf.DNSRecords().List(cleanupCtx, h.cfg.zoneID, h.cfg.failoverHostname, "CNAME"); err != nil {
+		h.t.Errorf("cleanup: list failover CNAME: %v", err)
+	} else {
+		for _, record := range records {
+			if err := h.cf.DNSRecords().Delete(cleanupCtx, h.cfg.zoneID, record.ID); err != nil && !errors.Is(err, cloudflare.ErrNotFound) {
+				h.t.Errorf("cleanup: delete failover CNAME %s: %v", record.ID, err)
+			}
 		}
 	}
 	h.waitDNSAbsent(cleanupCtx, "failover CNAME", h.cfg.failoverHostname, failoverCleanupWaitLimit)

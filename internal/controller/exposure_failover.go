@@ -8,6 +8,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -483,8 +484,16 @@ func (r *CloudflareExposureReconciler) setFailoverStatus(ctx context.Context, ex
 	if err := r.Get(ctx, key, latest); err != nil {
 		return err
 	}
-	latest.Status.Failover = fstatus
 	exposure.Status.Failover = fstatus
+	// Skip the write when nothing changed (mirrors the setReady / Tunnel-writer
+	// convention in base.go). Without this guard a steady-state ActionHoldPrimary
+	// pass would Status().Update with identical content, advance resourceVersion,
+	// and self-enqueue via the status watch — re-creating the renewal hot-loop in
+	// a subtler form.
+	if equality.Semantic.DeepEqual(latest.Status.Failover, fstatus) {
+		return nil
+	}
+	latest.Status.Failover = fstatus
 	return r.Status().Update(ctx, latest)
 }
 
