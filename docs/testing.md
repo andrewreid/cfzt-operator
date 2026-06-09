@@ -317,5 +317,5 @@ Common failure causes:
 - private-route CIDR collision with existing Cloudflare routes;
 - candidate image or chart not available to the test cluster;
 - DNS or Access propagation taking longer than the harness timeout; and
-- Cloudflare API throttling from repeated local or CI smoke attempts; and
+- Cloudflare API throttling from repeated local or CI smoke attempts;
 - operator finalizer failures that leave Kubernetes resources deleting.
