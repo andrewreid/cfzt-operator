@@ -93,7 +93,7 @@ Deletion only touches resources the local CR demonstrably owns. Partial cleanup 
 
 ## DR failover (D26)
 
-Active-passive multi-cluster DR is opt-in per Exposure via `spec.failover`. Two clusters apply the same Exposure (matching `spec.failover.group`, each with its own `CloudflareTunnel` and its own `--site-id`) and cooperate over one hostname. Exactly one cluster is Primary and writes the shared public CNAME + Access application set; the others are warm Standbys. Nothing in this section runs for Exposures without `spec.failover`.
+Active-passive multi-cluster DR is opt-in per Exposure via `spec.failover`. Two clusters apply the same Exposure (matching `spec.failover.group`, each with its own `CloudflareTunnel` and its own `--site-id`) and cooperate over one hostname. Exactly one cluster is Primary and writes the shared public CNAME + Access application set; the others are warm Standbys. `spec.failover.promotionPolicy` controls promotion after an absent or expired lease: `Automatic` is the default, while `Manual` waits for an explicit force-promote token. Nothing in this section runs for Exposures without `spec.failover`.
 
 ### Best-effort lease, not a lock
 
@@ -115,10 +115,10 @@ For a failover Exposure the controller resolves role **before** any shared Acces
 1. Reject if `--site-id` is the chart default (`FailoverRequiresDistinctSiteID`) or the referenced tunnel has `dns.manage: false` (`FailoverRequiresManagedDNS`).
 2. Reject if another Exposure in the cluster shares the group (`FailoverGroupConflict`, cluster-wide — see below).
 3. List group-owned lease records. `>1` → deterministic resolution (below). Foreign/unparseable → fail closed (`LeaseConflict`).
-4. `internal/dr.Decide` (pure state machine over now / site / previous role / observed lease / leaseSeconds / force token) returns one of: **Wait** (peer holds live lease → Standby, early return, no shared writes), **Acquire** (absent or expired or force), **Renew** (self-owned), **SplitBrain** (was Primary, peer now holds a live lease → demote).
+4. `internal/dr.Decide` (pure state machine over now / site / previous role / observed lease / leaseSeconds / force token / promotion policy) returns one of: **Wait** (peer holds live lease → Standby, early return, no shared writes), **Acquire** (absent or expired or force), **Renew** (self-owned and renewal is due), **HoldPrimary** (self-owned but renewal is not due), **AwaitPromotion** (Manual policy with no live peer and no new force token), or **SplitBrain** (was Primary, peer now holds a live lease → demote).
 5. Acquire/Renew write the lease then **read back and verify** the surviving single record names this site; otherwise demote. This bounds the dual-writer window to ~one reconcile.
 
-Only a verified Primary proceeds to the shared Access/DNS writes (with the group-ID `source-uid`) and requeues at `leaseSeconds/2` to renew. A promoted standby re-lists the group-owned Access applications remotely, so the shared set is discovered from Cloudflare rather than stale local status.
+Only a verified Primary proceeds to the shared Access/DNS writes (with the group-ID `source-uid`) and requeues at `leaseSeconds/2` to renew. `HoldPrimary` keeps the local Primary serving without rewriting the TXT lease on every reconcile, which avoids unnecessary Cloudflare writes and rate-limit pressure. A promoted standby re-lists the group-owned Access applications remotely, so the shared set is discovered from Cloudflare rather than stale local status.
 
 ### Deterministic duplicate resolution
 
@@ -132,13 +132,19 @@ A failover `group` identifies **one** logical exposure. Within a cluster there m
 
 `cfzt.reid.ee/force-promote` carries a caller-chosen **token**. A Standby acquires regardless of expiry only when the token differs from `status.failover.lastForcePromoteToken`; the controller records the honored token and **never mutates the annotation**, so a re-applied (Flux) token does not replay. Change the token to force again.
 
+### Manual promotion policy
+
+`promotionPolicy: Automatic` promotes on an absent or expired peer lease after the normal expiry checks. `promotionPolicy: Manual` suppresses that automatic acquire path: a site with no live peer reports `Ready=False, Reason=AwaitingPromotion`, emits `AwaitingManualPromotion`, sets `cfzt_failover_promotion_pending=1`, and returns before writing the shared Access application set or public CNAME. A new force-promote token is the only way to elect the first Primary or promote after expiry under Manual.
+
+Manual promotion is for stateful services where moving the public hostname before application-level recovery would be unsafe. `Ready=True, Reason=Standby` still means "locally warm and peer is serving"; `AwaitingPromotion` means no site is currently serving through this failover Exposure until a human or runbook promotes one.
+
 ### Deletion proves live ownership
 
 The Exposure finalizer reads the **live** lease before tearing down the shared CNAME/Access and removes them only when exactly one group-owned record exists and names this site (`holdsLiveLease`). A stale `status.failover.role`, a duplicate set, or a peer-held lease all fail safe — the finalizer removes only this site's own lease record(s) and leaves shared resources for the live owner.
 
 ### Observability
 
-Events: `PromotedToPrimary`, `DemotedToStandby`, `LeaseAcquired`, `LeaseRenewed`, `LeaseLost`, `LeaseConflict`, `SplitBrainDetected`, `ForcePromoted`. Metrics (labelled `namespace`/`name`/`group`/`site_id`): `cfzt_failover_role` (0/1/2), `cfzt_failover_lease_renew_total`, `cfzt_failover_promotion_total`.
+Events: `PromotedToPrimary`, `DemotedToStandby`, `LeaseAcquired`, `LeaseRenewed`, `LeaseLost`, `LeaseConflict`, `SplitBrainDetected`, `ForcePromoted`, `AwaitingManualPromotion`. Metrics (labelled `namespace`/`name`/`group`/`site_id`): `cfzt_failover_role` (0/1/2), `cfzt_failover_lease_renew_total`, `cfzt_failover_promotion_total`, and `cfzt_failover_promotion_pending`.
 
 ## Status conditions
 
@@ -169,6 +175,7 @@ All owning CRDs expose exactly `Ready` and `Progressing`. Detail is in `Reason` 
 | `BlockedByRoutes` | Tunnel deletion blocked by referencing TunnelRoutes |
 | `UnsupportedDrift` | Tracked Access policy uses a Cloudflare rule variant outside the supported structured subset |
 | `Standby` | Failover Exposure is healthy but not the lease holder (warm standby) |
+| `AwaitingPromotion` | Manual failover policy has no live peer and is waiting for a new force-promote token |
 | `LeaseConflict` | Failover lease is ambiguous (duplicate/foreign/unparseable); failing closed, no shared write |
 | `FailoverRequiresManagedDNS` | `spec.failover` set but the referenced tunnel has `dns.manage: false` |
 | `FailoverRequiresDistinctSiteID` | `spec.failover` set but `--site-id` is the chart default |
@@ -313,7 +320,8 @@ The cloudflared image is pinned to a specific version as a Go constant in `inter
 | D23 | Helm CRDs are install-only. ArgoCD/Flux users: document in NOTES.txt. |
 | D24 | `CloudflareAccessPolicy` CRD is in scope. Exposures bind Access applications through nested `access.applications[].policies[].policyRef` entries when Access is enabled. |
 | D25 | `CloudflareTunnelRoute` CRD is in scope. Tunnel private-network routes are reconciled independently and block Tunnel deletion while present. |
-| D26 | Active-passive multi-cluster DR is in scope as a per-Exposure opt-in (`spec.failover`), supersedes D9 for failover Exposures. Mandatory `--site-id` per process. Coordination via a best-effort Cloudflare DNS TXT lease (not linearizable). DNS-only — no external coordination (Workers KV / LB / etcd). Active-active and cross-cluster federation remain out of scope. See [DR failover](#dr-failover-d26). |
+| D26 | Active-passive multi-cluster DR is in scope as a per-Exposure opt-in (`spec.failover`), supersedes D9 for failover Exposures. Mandatory `--site-id` per process. Coordination via a best-effort Cloudflare DNS TXT lease (not linearizable). `promotionPolicy` may be `Automatic` or `Manual`; Manual requires force-promotion for first election and expired-peer takeover. DNS-only — no external coordination (Workers KV / LB / etcd). Active-active and cross-cluster federation remain out of scope. See [DR failover](#dr-failover-d26). |
+| D27 | Path-scoped Access applications are in scope via `spec.access.applications[]`; status records the realized app set in `status.cloudflare.accessApplications[]`. Root and path applications are reconciled as an ordered set and conflicting canonical domains are rejected. |
 
 ## Testing requirements
 
@@ -321,7 +329,7 @@ The cloudflared image is pinned to a specific version as a Go constant in `inter
 - Unit tests use `internal/cloudflare/fake.go`. Real SDK is not reached in unit tests.
 - Finalizer and deletion paths must have explicit tests.
 - Hostname conflict, ForeignResource, and BlockedByExposures must each have a dedicated test.
-- DR failover (D26) paths require dedicated tests: `internal/dr` lease serde / `Resolve` / jitter unit tests, and Exposure envtests for promotion, auto-promote on expiry, returning-primary self-demote, duplicate-lease resolution, group conflict (incl. cross-namespace), distinct-site-id, force-promote token replay, and fail-safe deletion under duplicates.
+- DR failover (D26) paths require dedicated tests: `internal/dr` lease serde / `Resolve` / jitter / role-decision unit tests, and Exposure envtests for promotion, auto-promote on expiry, Manual `AwaitingPromotion` on absent/expired lease, returning-primary self-demote, duplicate-lease resolution, group conflict (incl. cross-namespace), distinct-site-id, force-promote token replay, `HoldPrimary` no-op renewal behavior, and fail-safe deletion under duplicates.
 - No skipping tests to fix later.
 
 After any `api/v1alpha1` change, run `make manifests generate` and commit generated output with the API change.
@@ -332,9 +340,10 @@ make helm-sync-crds
 make lint
 make test
 go test ./...
+go test -tags=live ./test/live -run '^$' -count=1
 go test -tags=live ./test/live -run TestCloudflarePreflight -count=1
 ```
 
 Live Cloudflare tests are excluded from normal test runs. The release workflow invokes the Go live test package directly; Cloudflare verification and cleanup use typed clients instead of shell JSON parsing.
 
-For local macOS smoke runs, copy `.env.live.example` to `.env.live`, fill in real Cloudflare values, then run `hack/live-cloudflare-local.sh preflight` or `hack/live-cloudflare-local.sh lifecycle`. The lifecycle command can start Colima, creates or reuses a local `kind` cluster, builds the operator image with Docker, loads it into kind, and runs the same Go live test package. `hack/live-cloudflare-local.sh down` deletes the kind cluster and stops Colima when the local runtime is Colima-backed.
+For local macOS smoke runs, copy `.env.live.example` to `.env.live`, fill in real Cloudflare values, then run `hack/live-cloudflare-local.sh preflight`, `hack/live-cloudflare-local.sh lifecycle`, or `hack/live-cloudflare-local.sh failover`. The lifecycle and failover commands can start Colima, create or reuse a local `kind` cluster, build the operator image with Docker, load it into kind, and run the same Go live test package. `hack/live-cloudflare-local.sh down` deletes the kind cluster and stops Colima when the local runtime is Colima-backed.

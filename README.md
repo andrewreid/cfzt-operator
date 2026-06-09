@@ -217,6 +217,7 @@ Field notes:
 | `spec.access.applications[].policies[].policyRef.uuid` or `name` | Exactly one is required for each policy binding. |
 | `spec.failover.group` | Opts into DR failover; cross-cluster logical-exposure identity (see [Disaster Recovery](#disaster-recovery-dr-failover)). |
 | `spec.failover.leaseSeconds` | Lease TTL; default 60, min 30, max 600. The primary renews at half this interval. |
+| `spec.failover.promotionPolicy` | `Automatic` (default) promotes after lease expiry; `Manual` requires a new `cfzt.reid.ee/force-promote` token for expiry and first election. |
 
 Status records `status.cloudflare.accessApplications[]`, `status.cloudflare.dnsRecordId`, `status.cloudflare.publicHostnameRouteHash`, `status.conditions`, and — when `spec.failover` is set — `status.failover` (role, lease owner, expiry; see below).
 
@@ -304,11 +305,11 @@ Deletion is finalizer-driven:
 
 ## Disaster Recovery (DR failover)
 
-Active-passive DR lets the **same** `CloudflareExposure`, applied to two (or more) clusters, cooperate over one public hostname. Exactly one cluster is **Primary** and serves traffic; the others stay **Standby** (warm — their tunnel and `cloudflared` keep running). If the primary fails, a standby auto-promotes; when the former primary returns, it stands down. It is opt-in per Exposure via `spec.failover`, and changes nothing for Exposures without it.
+Active-passive DR lets the **same** `CloudflareExposure`, applied to two (or more) clusters, cooperate over one public hostname. Exactly one cluster is **Primary** and serves traffic; the others stay **Standby** (warm — their tunnel and `cloudflared` keep running). With the default `promotionPolicy: Automatic`, a standby promotes after the primary lease expires. With `promotionPolicy: Manual`, expiry only raises `AwaitingPromotion`; a human or runbook must force-promote with a new token. When the former primary returns, it stands down. DR is opt-in per Exposure via `spec.failover`, and changes nothing for Exposures without it.
 
 ### How it works
 
-Each cluster runs its own `CloudflareTunnel` (own tunnel ID, own `cloudflared`) and its own copy of the Exposure with a matching `spec.failover.group`. Coordination uses a single Cloudflare **DNS TXT lease record** at `_cfzt-lease.<hash8(group)>.<zone>`. The lease holder is Primary and alone writes the shared public CNAME and Access application set; the CNAME points at the holder's tunnel. Promotion is automatic when the lease TTL expires. When a standby promotes, it re-discovers the group-owned Access applications remotely and continues from the live Cloudflare state instead of stale status.
+Each cluster runs its own `CloudflareTunnel` (own tunnel ID, own `cloudflared`) and its own copy of the Exposure with a matching `spec.failover.group`. Coordination uses a single Cloudflare **DNS TXT lease record** at `_cfzt-lease.<hash8(group)>.<zone>`. The lease holder is Primary and alone writes the shared public CNAME and Access application set; the CNAME points at the holder's tunnel. Automatic promotion happens when the lease TTL expires; Manual promotion suppresses that automatic acquire until a force-promote token arrives. When a standby promotes, it re-discovers the group-owned Access applications remotely and continues from the live Cloudflare state instead of stale status.
 
 The lease is **best-effort, not a distributed lock.** Cloudflare DNS offers no conditional write, so correctness does not rely on the lease being atomic — it rests on the data plane: there is one CNAME (so two sites can never serve different origins at once), and a failed primary's `cloudflared` drops its edge connection within seconds, so Cloudflare stops routing to it regardless of the lease. The lease's job is to elect a single writer and stop the CNAME flapping between healthy sites.
 
@@ -340,9 +341,10 @@ spec:
   failover:
     group: jellyfin-dr       # same in both clusters
     leaseSeconds: 60         # optional; default 60
+    promotionPolicy: Automatic # optional; Automatic (default) or Manual
 ```
 
-Exactly one cluster reports `status.failover.role: Primary`; the other reports `Standby` with `leaseOwner` set to the primary's site id.
+Exactly one cluster reports `status.failover.role: Primary`; the other reports `Standby` with `leaseOwner` set to the primary's site id. A Manual standby with no live primary reports `Ready=False, Reason=AwaitingPromotion` until force-promoted.
 
 ```sh
 kubectl get cfe -A          # the ROLE column shows Primary / Standby
@@ -359,14 +361,15 @@ The lease record name is `_cfzt-lease.<hash8(group)>.<zone>` (the group is hashe
   kubectl annotate cfe jellyfin -n media cfzt.reid.ee/force-promote="$(date +%s)" --overwrite
   ```
 
-  Force-promote bypasses the expiry guard; the split-brain risk during the bypass is the operator's responsibility.
+  Force-promote bypasses the expiry guard under both policies. Under `promotionPolicy: Manual`, it is also the only way to elect the first Primary from an absent lease or to promote after an expired peer lease. The split-brain risk during the bypass is the operator's responsibility.
+- **Manual policy:** use this for stateful services where app recovery must happen before traffic moves (for example, promote a database replica and scale the app up first). While Manual is awaiting promotion, no site is serving the hostname through this Exposure; alert on `Ready=False, Reason=AwaitingPromotion`, the `AwaitingManualPromotion` Event, or `cfzt_failover_promotion_pending=1`.
 - **Returning primary:** a recovered former primary that finds the lease held by a peer self-demotes (`DemotedToStandby`) and performs no writes for the shared hostname. It never auto-steals the lease back.
 
 ### Conditions, events, metrics
 
-- Reasons: `Standby`, `LeaseConflict`, `FailoverRequiresManagedDNS`, `FailoverRequiresDistinctSiteID`, `FailoverGroupConflict`.
-- Events: `PromotedToPrimary`, `DemotedToStandby`, `LeaseAcquired`, `LeaseRenewed`, `LeaseLost`, `LeaseConflict`, `SplitBrainDetected`, `ForcePromoted`.
-- Metrics (when enabled): `cfzt_failover_role` (0=Unknown, 1=Standby, 2=Primary), `cfzt_failover_lease_renew_total`, `cfzt_failover_promotion_total` — all labelled with `site_id`.
+- Reasons: `Standby`, `AwaitingPromotion`, `LeaseConflict`, `FailoverRequiresManagedDNS`, `FailoverRequiresDistinctSiteID`, `FailoverGroupConflict`.
+- Events: `PromotedToPrimary`, `DemotedToStandby`, `LeaseAcquired`, `LeaseRenewed`, `LeaseLost`, `LeaseConflict`, `SplitBrainDetected`, `ForcePromoted`, `AwaitingManualPromotion`.
+- Metrics (when enabled): `cfzt_failover_role` (0=Unknown, 1=Standby, 2=Primary), `cfzt_failover_lease_renew_total`, `cfzt_failover_promotion_total`, and `cfzt_failover_promotion_pending` — all labelled with `namespace`, `name`, `group`, and `site_id`.
 
 ### Limits
 
@@ -386,7 +389,7 @@ metrics:
   enabled: true
 ```
 
-Common Events include `CreatedTunnel`, `CreatedAccessApp`, `CreatedAccessPolicy`, `UpdatedAccessPolicy`, `CreatedRoute`, `DeletedRoute`, `TokenRotated`, `HostnameConflict`, `ForeignTunnel`, `ForeignRoute`, `BlockedByExposures`, and `BlockedByRoutes`. DR failover adds `PromotedToPrimary`, `DemotedToStandby`, `LeaseAcquired`, `LeaseRenewed`, `LeaseLost`, `LeaseConflict`, `SplitBrainDetected`, and `ForcePromoted` (see [Disaster Recovery](#disaster-recovery-dr-failover)).
+Common Events include `CreatedTunnel`, `CreatedAccessApp`, `CreatedAccessPolicy`, `UpdatedAccessPolicy`, `CreatedRoute`, `DeletedRoute`, `TokenRotated`, `HostnameConflict`, `ForeignTunnel`, `ForeignRoute`, `BlockedByExposures`, and `BlockedByRoutes`. DR failover adds `PromotedToPrimary`, `DemotedToStandby`, `LeaseAcquired`, `LeaseRenewed`, `LeaseLost`, `LeaseConflict`, `SplitBrainDetected`, `ForcePromoted`, and `AwaitingManualPromotion` (see [Disaster Recovery](#disaster-recovery-dr-failover)).
 
 ## Not Supported
 
@@ -402,6 +405,7 @@ Common Events include `CreatedTunnel`, `CreatedAccessApp`, `CreatedAccessPolicy`
 ```sh
 make manifests generate
 make helm-sync-crds
+make pre-push
 make lint
 make test
 go test ./...
@@ -412,7 +416,7 @@ helm template cfzt-operator charts/cfzt-operator --namespace cfzt-system
 
 Regenerate manifests, deepcopy, and Helm CRDs after any `api/v1alpha1` change, and commit generated output with the API change. CI fails on generated drift.
 
-Live Cloudflare smoke tests are documented in [docs/testing.md](docs/testing.md). Reconciliation design details are in [docs/architecture.md](docs/architecture.md).
+`make pre-push` runs the local PR gate (`lint`, generation, Helm CRD sync, generated drift check, tests, and Helm lint). Live Cloudflare smoke tests, including the DR failover lifecycle, are documented in [docs/testing.md](docs/testing.md). Reconciliation design details are in [docs/architecture.md](docs/architecture.md).
 
 ## License
 
