@@ -132,6 +132,25 @@ type AccessSpec struct {
 	Applications []AccessApplicationTarget `json:"applications,omitempty"`
 }
 
+// PromotionPolicy controls how a Standby is allowed to become Primary (D26).
+type PromotionPolicy string
+
+const (
+	// PromotionAutomatic is the default liveness-driven behaviour: a Standby
+	// auto-acquires the lease on TTL expiry. Correct for stateless /
+	// warm-replica services where the standby can serve the moment the
+	// primary stops renewing.
+	PromotionAutomatic PromotionPolicy = "Automatic"
+	// PromotionManual suppresses every automatic acquire — on lease expiry
+	// and on an absent day-1 lease alike. The only promotion trigger,
+	// including the first election, is the cfzt.reid.ee/force-promote token.
+	// For warm-infra/cold-app stateful services (e.g. an app scaled to 0 over
+	// a CNPG replica) where failover must follow out-of-band recovery (DB
+	// promotion, scale-up) and be a deliberate act, not a reaction to a
+	// missed lease renewal.
+	PromotionManual PromotionPolicy = "Manual"
+)
+
 // FailoverSpec opts a CloudflareExposure into D26 active-passive multi-cluster
 // DR. Two Exposures applied to two clusters with matching spec.failover.group
 // and distinct --site-id cooperate over one hostname via a Cloudflare DNS TXT
@@ -156,6 +175,18 @@ type FailoverSpec struct {
 	// +kubebuilder:validation:Minimum=30
 	// +kubebuilder:validation:Maximum=600
 	LeaseSeconds int32 `json:"leaseSeconds,omitempty"`
+
+	// PromotionPolicy controls how this site becomes Primary. Automatic
+	// (default) auto-acquires the lease on TTL expiry — the liveness-driven
+	// D26 behaviour. Manual never auto-acquires (on expiry or on an absent
+	// day-1 lease); the only promotion trigger, including the first election,
+	// is the cfzt.reid.ee/force-promote token. Use Manual for stateful
+	// services whose failover must follow out-of-band recovery and be
+	// deliberate.
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:Enum=Automatic;Manual
+	// +kubebuilder:default=Automatic
+	PromotionPolicy PromotionPolicy `json:"promotionPolicy,omitempty"`
 }
 
 // CloudflareExposureSpec defines the desired state of CloudflareExposure.

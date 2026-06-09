@@ -105,6 +105,101 @@ func TestFailoverDecideAcquiresExpiredPeer(t *testing.T) {
 	}
 }
 
+func TestFailoverDecideManualWaitsOnExpiredPeer(t *testing.T) {
+	now := time.Unix(1700000000, 0).UTC()
+	lease := mkLease(sitePeer, now.Add(-1*time.Second), now.Add(-61*time.Second))
+	d := dr.Decide(dr.Inputs{
+		Now:             now,
+		SiteID:          siteSelf,
+		PreviousRole:    dr.RoleStandby,
+		Observed:        lease,
+		LeaseSeconds:    60,
+		ManualPromotion: true,
+	})
+	if d.Action != dr.ActionWait {
+		t.Fatalf("Action = %v, want ActionWait (manual policy suppresses auto-acquire)", d.Action)
+	}
+	if d.NextRole != dr.RoleStandby {
+		t.Fatalf("NextRole = %v, want RoleStandby", d.NextRole)
+	}
+	if !d.AwaitingPromotion {
+		t.Fatalf("AwaitingPromotion = false, want true (expired peer, manual policy)")
+	}
+	if d.LeaseOwner != sitePeer {
+		t.Fatalf("LeaseOwner = %q, want %q", d.LeaseOwner, sitePeer)
+	}
+}
+
+func TestFailoverDecideManualWaitsOnAbsentLease(t *testing.T) {
+	now := time.Unix(1700000000, 0).UTC()
+	d := dr.Decide(dr.Inputs{
+		Now:             now,
+		SiteID:          siteSelf,
+		PreviousRole:    dr.RoleUnknown,
+		Observed:        nil,
+		LeaseSeconds:    60,
+		ManualPromotion: true,
+	})
+	if d.Action != dr.ActionWait {
+		t.Fatalf("Action = %v, want ActionWait (manual policy does not auto-elect day-1 Primary)", d.Action)
+	}
+	if !d.AwaitingPromotion {
+		t.Fatalf("AwaitingPromotion = false, want true (absent lease, manual policy)")
+	}
+}
+
+func TestFailoverDecideManualForcePromoteAcquiresExpiredPeer(t *testing.T) {
+	now := time.Unix(1700000000, 0).UTC()
+	lease := mkLease(sitePeer, now.Add(-1*time.Second), now.Add(-61*time.Second))
+	d := dr.Decide(dr.Inputs{
+		Now:             now,
+		SiteID:          siteSelf,
+		PreviousRole:    dr.RoleStandby,
+		Observed:        lease,
+		LeaseSeconds:    60,
+		ManualPromotion: true,
+		ForcePromote:    true,
+	})
+	if d.Action != dr.ActionAcquire {
+		t.Fatalf("Action = %v, want ActionAcquire (force-promote overrides manual policy)", d.Action)
+	}
+	if d.AwaitingPromotion {
+		t.Fatalf("AwaitingPromotion = true, want false (force-promote acquires, not waits)")
+	}
+}
+
+func TestFailoverDecideManualForcePromoteAcquiresAbsentLease(t *testing.T) {
+	now := time.Unix(1700000000, 0).UTC()
+	d := dr.Decide(dr.Inputs{
+		Now:             now,
+		SiteID:          siteSelf,
+		PreviousRole:    dr.RoleUnknown,
+		Observed:        nil,
+		LeaseSeconds:    60,
+		ManualPromotion: true,
+		ForcePromote:    true,
+	})
+	if d.Action != dr.ActionAcquire {
+		t.Fatalf("Action = %v, want ActionAcquire (force-promote elects first Primary under manual policy)", d.Action)
+	}
+}
+
+func TestFailoverDecideManualKeepsRenewingSelfHeldLease(t *testing.T) {
+	now := time.Unix(1700000000, 0).UTC()
+	lease := mkLease(siteSelf, now.Add(40*time.Second), now.Add(-20*time.Second))
+	d := dr.Decide(dr.Inputs{
+		Now:             now,
+		SiteID:          siteSelf,
+		PreviousRole:    dr.RolePrimary,
+		Observed:        lease,
+		LeaseSeconds:    60,
+		ManualPromotion: true,
+	})
+	if d.Action != dr.ActionRenew {
+		t.Fatalf("Action = %v, want ActionRenew (manual policy still renews a self-held lease)", d.Action)
+	}
+}
+
 func TestFailoverDecideForcePromoteOverridesLivePeer(t *testing.T) {
 	now := time.Unix(1700000000, 0).UTC()
 	lease := mkLease(sitePeer, now.Add(40*time.Second), now.Add(-20*time.Second))

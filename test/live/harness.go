@@ -37,10 +37,13 @@ import (
 )
 
 const (
-	conditionReady         = "Ready"
-	reasonHostnameConflict = "HostnameConflict"
-	reasonForeignResource  = "ForeignResource"
-	reasonForeignRoute     = "ForeignRoute"
+	conditionReady          = "Ready"
+	reasonHostnameConflict  = "HostnameConflict"
+	reasonForeignResource   = "ForeignResource"
+	reasonForeignRoute      = "ForeignRoute"
+	reasonStandby           = "Standby"
+	reasonAwaitingPromotion = "AwaitingPromotion"
+	annotationForcePromote  = "cfzt.reid.ee/force-promote"
 
 	operatorReleaseName = "cfzt-operator"
 	credentialsSecret   = "cloudflare-credentials"
@@ -93,6 +96,10 @@ type smokeHarness struct {
 	k8s             client.Client
 	foreignRecordID string
 	foreignRouteID  string
+	// failoverPolicy is stamped onto the failover Exposure spec by
+	// failoverExposureObject so it survives the repeated noop spec updates the
+	// failover phases use to trigger reconciles. Empty => Automatic (default).
+	failoverPolicy cfztv1alpha1.PromotionPolicy
 }
 
 func loadSmokeConfig(t *testing.T) smokeConfig {

@@ -179,6 +179,20 @@ spec:
                     maximum: 600
                     minimum: 30
                     type: integer
+                  promotionPolicy:
+                    default: Automatic
+                    description: |-
+                      PromotionPolicy controls how this site becomes Primary. Automatic
+                      (default) auto-acquires the lease on TTL expiry — the liveness-driven
+                      D26 behaviour. Manual never auto-acquires (on expiry or on an absent
+                      day-1 lease); the only promotion trigger, including the first election,
+                      is the cfzt.reid.ee/force-promote token. Use Manual for stateful
+                      services whose failover must follow out-of-band recovery and be
+                      deliberate.
+                    enum:
+                    - Automatic
+                    - Manual
+                    type: string
                 required:
                 - group
                 type: object

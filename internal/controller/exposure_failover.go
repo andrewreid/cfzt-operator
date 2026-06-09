@@ -171,14 +171,15 @@ func (r *CloudflareExposureReconciler) reconcileFailoverRole(ctx context.Context
 	force := forceToken != "" && forceToken != exposure.Status.Failover.LastForcePromoteToken
 
 	decision := dr.Decide(dr.Inputs{
-		Now:           now,
-		SiteID:        r.SiteID,
-		PreviousRole:  prevRole,
-		Observed:      observed,
-		LeaseSeconds:  leaseSeconds,
-		AcquireJitter: failoverAcquireJitter,
-		ForcePromote:  force,
-		Rand:          r.rng(),
+		Now:             now,
+		SiteID:          r.SiteID,
+		PreviousRole:    prevRole,
+		Observed:        observed,
+		LeaseSeconds:    leaseSeconds,
+		AcquireJitter:   failoverAcquireJitter,
+		ForcePromote:    force,
+		ManualPromotion: exposure.Spec.Failover.PromotionPolicy == cfztv1alpha1.PromotionManual,
+		Rand:            r.rng(),
 	})
 
 	var observedTunnel string
@@ -262,11 +263,26 @@ func (r *CloudflareExposureReconciler) standby(ctx context.Context, exposure *cf
 	}
 	fstatus := r.baseFailoverStatus(exposure, dr.RoleStandby, decision.LeaseOwner, leaseExpiryPtr(decision.LeaseExpiresAt), observedTunnel)
 	r.recordRole(exposure, dr.RoleStandby)
+	reason := ReasonStandby
 	msg := fmt.Sprintf("standby; lease held by %s", decision.LeaseOwner)
 	if decision.LeaseOwner == "" {
 		msg = "standby"
 	}
-	statusErr := r.setFailoverStatusAndReady(ctx, exposure, fstatus, true, ReasonStandby, msg)
+	// Manual-policy Standby that declined to auto-promote: surface it loudly so
+	// monitoring can alert that a deliberate force-promote is required. Ready
+	// stays True — the Standby itself is healthy and warm, just not serving.
+	if decision.AwaitingPromotion {
+		reason = ReasonAwaitingPromotion
+		failoverPromotionPending.WithLabelValues(exposure.Namespace, exposure.Name, exposure.Spec.Failover.Group, r.SiteID).Set(1)
+		if decision.LeaseOwner != "" {
+			msg = fmt.Sprintf("primary %s unreachable; lease expired, awaiting force-promote (%s)", decision.LeaseOwner, annotationForcePromote)
+			r.Recorder.Eventf(exposure, corev1.EventTypeWarning, EventAwaitingManualPromotion, "Primary %s unreachable for %s; lease expired and promotionPolicy=Manual — set annotation %s to fail over", decision.LeaseOwner, exposure.Spec.Hostname, annotationForcePromote)
+		} else {
+			msg = fmt.Sprintf("no primary elected; awaiting force-promote (%s)", annotationForcePromote)
+			r.Recorder.Eventf(exposure, corev1.EventTypeWarning, EventAwaitingManualPromotion, "No primary elected for %s; promotionPolicy=Manual — set annotation %s to elect this site", exposure.Spec.Hostname, annotationForcePromote)
+		}
+	}
+	statusErr := r.setFailoverStatusAndReady(ctx, exposure, fstatus, true, reason, msg)
 	return false, 0, requeueResult(decision.Requeue), true, statusErr
 }
 
@@ -436,6 +452,9 @@ func (r *CloudflareExposureReconciler) primaryFailoverStatus(exposure *cfztv1alp
 // with this site's identity so central scraping can attribute the reading.
 func (r *CloudflareExposureReconciler) recordRole(exposure *cfztv1alpha1.CloudflareExposure, role dr.Role) {
 	failoverRoleGauge.WithLabelValues(exposure.Namespace, exposure.Name, exposure.Spec.Failover.Group, r.SiteID).Set(failoverRoleValue(string(role)))
+	// Clear the pending-promotion signal by default; the awaiting-promotion
+	// Standby path re-sets it to 1 after this call.
+	failoverPromotionPending.WithLabelValues(exposure.Namespace, exposure.Name, exposure.Spec.Failover.Group, r.SiteID).Set(0)
 }
 
 func (r *CloudflareExposureReconciler) setFailoverStatus(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure, fstatus cfztv1alpha1.ExposureFailoverStatus) error {
