@@ -517,7 +517,8 @@ var _ = Describe("CloudflareExposure failover role gate", func() {
 		refreshed := fetchExposure(ctx, exposure.Name)
 		Expect(refreshed.Status.Failover.Role).To(Equal(string(dr.RoleStandby)))
 		ready := meta.FindStatusCondition(refreshed.Status.Conditions, ConditionReady)
-		Expect(ready.Status).To(Equal(metav1.ConditionTrue))
+		// Ready=False: no peer is serving and this site will not auto-promote.
+		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
 		Expect(ready.Reason).To(Equal(ReasonAwaitingPromotion))
 		// No public CNAME written — the cold app is not served.
 		records, err := fakeCF.DNSRecords().List(ctx, zoneID, "fo-manual.example.com", "CNAME")
@@ -528,6 +529,51 @@ var _ = Describe("CloudflareExposure failover role gate", func() {
 		Expect(found).To(BeTrue())
 		Expect(lease.Site).To(Equal(sitePeer))
 		expectRecordedEvent(exposureRecorder, EventAwaitingManualPromotion)
+	})
+
+	It("TestFailoverManualPolicyWaitsOnAbsentLease", func() {
+		// Day-1 cold start: no lease exists yet. Manual policy must NOT
+		// auto-elect a first Primary; it stays Standby/AwaitingPromotion and
+		// writes nothing until a force-promote token arrives.
+		tunnel := readyTunnel(ctx, tunnelReconciler, "fo-manual-absent", "fo-manual-absent")
+		cfTunnel := fetchTunnel(ctx, tunnel.Name)
+		exposure := createFailoverExposure(ctx, "fo-manual-absent-app", tunnel.Name, "fo-manual-absent.example.com", "fo-manual-absent-grp")
+		current := fetchExposure(ctx, exposure.Name)
+		current.Spec.Failover.PromotionPolicy = cfztv1alpha1.PromotionManual
+		Expect(k8sClient.Update(ctx, current)).To(Succeed())
+		// No seedLease: the lease TXT is absent.
+
+		reconcileExposure(ctx, exposureRec, fetchExposure(ctx, exposure.Name))
+
+		refreshed := fetchExposure(ctx, exposure.Name)
+		Expect(refreshed.Status.Failover.Role).To(Equal(string(dr.RoleStandby)))
+		ready := meta.FindStatusCondition(refreshed.Status.Conditions, ConditionReady)
+		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+		Expect(ready.Reason).To(Equal(ReasonAwaitingPromotion))
+		// No lease created, no CNAME written.
+		_, found := readLease("fo-manual-absent-grp")
+		Expect(found).To(BeFalse())
+		records, err := fakeCF.DNSRecords().List(ctx, zoneID, "fo-manual-absent.example.com", "CNAME")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(records).To(BeEmpty())
+		expectRecordedEvent(exposureRecorder, EventAwaitingManualPromotion)
+
+		// Force-promote token elects the first Primary: lease created + CNAME.
+		current = fetchExposure(ctx, exposure.Name)
+		current.Annotations = map[string]string{annotationForcePromote: "elect-1"}
+		Expect(k8sClient.Update(ctx, current)).To(Succeed())
+
+		reconcileExposure(ctx, exposureRec, fetchExposure(ctx, exposure.Name))
+
+		promoted := fetchExposure(ctx, exposure.Name)
+		Expect(promoted.Status.Failover.Role).To(Equal(string(dr.RolePrimary)))
+		lease, found := readLease("fo-manual-absent-grp")
+		Expect(found).To(BeTrue())
+		Expect(lease.Site).To(Equal(siteSelf))
+		cnames, err := fakeCF.DNSRecords().List(ctx, zoneID, "fo-manual-absent.example.com", "CNAME")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cnames).To(HaveLen(1))
+		Expect(cnames[0].Content).To(Equal(cfTunnel.Status.TunnelId + ".cfargotunnel.com"))
 	})
 
 	It("TestFailoverManualPolicyForcePromoteAcquires", func() {

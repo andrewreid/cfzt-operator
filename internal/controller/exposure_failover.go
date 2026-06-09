@@ -191,6 +191,21 @@ func (r *CloudflareExposureReconciler) reconcileFailoverRole(ctx context.Context
 	case dr.ActionWait:
 		return r.standby(ctx, exposure, decision, observedTunnel, false)
 
+	case dr.ActionHoldPrimary:
+		// Still Primary, but the renewal window has not opened — do not rewrite
+		// the lease record (that would spin the reconciler). Persist Primary
+		// status from the OBSERVED lease so a site that just converged to
+		// Primary reports its role, then proceed to the shared Access/DNS
+		// reconcile and requeue when renewal becomes due. The status is built
+		// from the unchanged observed timestamps, so repeated holds write
+		// identical content (no ResourceVersion churn, no self-re-enqueue).
+		r.recordRole(exposure, dr.RolePrimary)
+		fstatus := r.primaryFailoverStatus(exposure, *observed)
+		if statusErr := r.setFailoverStatus(ctx, exposure, fstatus); statusErr != nil {
+			return false, 0, ctrl.Result{}, true, statusErr
+		}
+		return true, decision.Requeue, ctrl.Result{}, false, nil
+
 	case dr.ActionSplitBrain:
 		r.Recorder.Eventf(exposure, corev1.EventTypeWarning, EventSplitBrainDetected, "Split brain: lease for %s now held by %s, demoting", exposure.Spec.Hostname, decision.LeaseOwner)
 		return r.standby(ctx, exposure, decision, observedTunnel, true)
@@ -264,15 +279,20 @@ func (r *CloudflareExposureReconciler) standby(ctx context.Context, exposure *cf
 	fstatus := r.baseFailoverStatus(exposure, dr.RoleStandby, decision.LeaseOwner, leaseExpiryPtr(decision.LeaseExpiresAt), observedTunnel)
 	r.recordRole(exposure, dr.RoleStandby)
 	reason := ReasonStandby
+	// A normal Standby is Ready=True: the peer is serving, this site is warm.
+	ready := true
 	msg := fmt.Sprintf("standby; lease held by %s", decision.LeaseOwner)
 	if decision.LeaseOwner == "" {
 		msg = "standby"
 	}
-	// Manual-policy Standby that declined to auto-promote: surface it loudly so
-	// monitoring can alert that a deliberate force-promote is required. Ready
-	// stays True — the Standby itself is healthy and warm, just not serving.
+	// Manual-policy Standby that declined to auto-promote: no peer is serving
+	// (the primary is gone or never elected) and this site will not act without
+	// an operator. Report Ready=False so the hostname-is-down state trips
+	// standard not-Ready alerting, and surface a Warning event + pending metric
+	// naming the required action.
 	if decision.AwaitingPromotion {
 		reason = ReasonAwaitingPromotion
+		ready = false
 		failoverPromotionPending.WithLabelValues(exposure.Namespace, exposure.Name, exposure.Spec.Failover.Group, r.SiteID).Set(1)
 		if decision.LeaseOwner != "" {
 			msg = fmt.Sprintf("primary %s unreachable; lease expired, awaiting force-promote (%s)", decision.LeaseOwner, annotationForcePromote)
@@ -282,7 +302,7 @@ func (r *CloudflareExposureReconciler) standby(ctx context.Context, exposure *cf
 			r.Recorder.Eventf(exposure, corev1.EventTypeWarning, EventAwaitingManualPromotion, "No primary elected for %s; promotionPolicy=Manual — set annotation %s to elect this site", exposure.Spec.Hostname, annotationForcePromote)
 		}
 	}
-	statusErr := r.setFailoverStatusAndReady(ctx, exposure, fstatus, true, reason, msg)
+	statusErr := r.setFailoverStatusAndReady(ctx, exposure, fstatus, ready, reason, msg)
 	return false, 0, requeueResult(decision.Requeue), true, statusErr
 }
 

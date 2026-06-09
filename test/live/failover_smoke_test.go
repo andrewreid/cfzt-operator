@@ -36,7 +36,7 @@ const (
 // reacts. This validates the CF-side lease + DNS lifecycle (one Primary,
 // returning-primary self-demote, auto-promote on peer expiry, then under
 // promotionPolicy=Manual a refusal to auto-promote on an expired peer lease
-// — Ready=True/Reason=AwaitingPromotion with the peer lease left untouched —
+// — Ready=False/Reason=AwaitingPromotion with the peer lease left untouched —
 // and a force-promote token driving promotion, then clean teardown); packet
 // routing is out of scope per the slice plan.
 func TestFailoverLifecycle(t *testing.T) {
@@ -110,11 +110,11 @@ func TestFailoverLifecycle(t *testing.T) {
 	h.writePeerLease(peerSiteID, "peer-tunnel-id", h.now().Add(-1*time.Minute))
 	h.updateFailoverExposureNoop()
 	awaiting := h.waitExposureFailoverReason(reasonAwaitingPromotion, failoverRoleTimeout)
-	ready := metav1.ConditionFalse
+	ready := metav1.ConditionTrue
 	if c := meta.FindStatusCondition(awaiting.Status.Conditions, conditionReady); c != nil {
 		ready = c.Status
 	}
-	assertEqual(t, "Ready stays True while awaiting manual promotion", string(metav1.ConditionTrue), string(ready))
+	assertEqual(t, "Ready=False while awaiting manual promotion (hostname down)", string(metav1.ConditionFalse), string(ready))
 	// Operator left the expired peer lease alone — it did not steal it.
 	lease, _ = h.readFailoverLease()
 	assertEqual(t, "lease site while awaiting promotion", peerSiteID, lease.Site)

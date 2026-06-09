@@ -38,10 +38,21 @@ const (
 	ActionAcquire
 
 	// ActionRenew updates the existing lease record this site already
-	// owns. Used by Primary on every reconcile inside the renewal
-	// window. Success keeps the previous role Primary and pushes
-	// LeaseExpiresAt forward by LeaseSeconds.
+	// owns. Used by Primary once the renewal window has opened (now is at
+	// or past renewed+leaseSeconds/2). Success keeps the previous role
+	// Primary and pushes LeaseExpiresAt forward by LeaseSeconds.
 	ActionRenew
+
+	// ActionHoldPrimary fires when this site owns the lease but the renewal
+	// window has not opened yet (now < renewed+leaseSeconds/2). The site
+	// stays Primary and the controller proceeds to the shared Access/DNS
+	// reconcile, but it does NOT rewrite the lease record. This is what keeps
+	// a Primary from renewing on every reconcile: without it, each renew
+	// rewrites the lease timestamps in status, the self-watch re-enqueues,
+	// and the Primary spins (hammering the Cloudflare DNS API and defeating a
+	// peer takeover). Decision.Requeue is the time until the renewal window
+	// opens.
+	ActionHoldPrimary
 
 	// ActionSplitBrain fires when this site believes it is Primary but
 	// the live lease names a different owner. The controller emits
@@ -173,8 +184,21 @@ func Decide(in Inputs) Decision {
 		}
 	}
 
-	// I hold the lease.
+	// I hold the lease. Renew only once the renewal window has opened
+	// (now >= renewed+half); otherwise hold without rewriting the record so a
+	// Primary does not renew on every reconcile.
 	if isMine {
+		renewAt := obs.Renewed.Add(half)
+		if in.Now.Before(renewAt) {
+			wait := max(renewAt.Sub(in.Now), time.Second)
+			return Decision{
+				NextRole:       RolePrimary,
+				Action:         ActionHoldPrimary,
+				LeaseOwner:     in.SiteID,
+				LeaseExpiresAt: obs.Expires,
+				Requeue:        wait,
+			}
+		}
 		return Decision{
 			NextRole:       RolePrimary,
 			Action:         ActionRenew,

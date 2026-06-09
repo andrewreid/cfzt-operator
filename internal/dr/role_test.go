@@ -41,7 +41,8 @@ func TestFailoverLeaseAcquire(t *testing.T) {
 
 func TestFailoverLeaseRenew(t *testing.T) {
 	now := time.Unix(1700000000, 0).UTC()
-	lease := mkLease(siteSelf, now.Add(40*time.Second), now.Add(-20*time.Second))
+	// Renewed 40s ago with half=30s => renewal window is open => ActionRenew.
+	lease := mkLease(siteSelf, now.Add(20*time.Second), now.Add(-40*time.Second))
 	d := dr.Decide(dr.Inputs{
 		Now:          now,
 		SiteID:       siteSelf,
@@ -50,7 +51,7 @@ func TestFailoverLeaseRenew(t *testing.T) {
 		LeaseSeconds: 60,
 	})
 	if d.Action != dr.ActionRenew {
-		t.Fatalf("Action = %v, want ActionRenew (self-owned live lease)", d.Action)
+		t.Fatalf("Action = %v, want ActionRenew (self-owned lease, renewal due)", d.Action)
 	}
 	if d.NextRole != dr.RolePrimary {
 		t.Fatalf("NextRole = %v, want RolePrimary", d.NextRole)
@@ -60,6 +61,34 @@ func TestFailoverLeaseRenew(t *testing.T) {
 	}
 	if d.Requeue != 30*time.Second {
 		t.Fatalf("Requeue = %v, want 30s (leaseSeconds/2)", d.Requeue)
+	}
+}
+
+func TestFailoverDecideHoldsPrimaryBeforeRenewWindow(t *testing.T) {
+	now := time.Unix(1700000000, 0).UTC()
+	// Just-renewed self lease: renewed=now, half=30s => window opens at now+30s,
+	// so Decide must hold (stay Primary) without rewriting the lease. This is
+	// what stops a Primary from renewing on every reconcile.
+	lease := mkLease(siteSelf, now.Add(60*time.Second), now)
+	d := dr.Decide(dr.Inputs{
+		Now:          now,
+		SiteID:       siteSelf,
+		PreviousRole: dr.RolePrimary,
+		Observed:     lease,
+		LeaseSeconds: 60,
+	})
+	if d.Action != dr.ActionHoldPrimary {
+		t.Fatalf("Action = %v, want ActionHoldPrimary (renewal window not open)", d.Action)
+	}
+	if d.NextRole != dr.RolePrimary {
+		t.Fatalf("NextRole = %v, want RolePrimary (hold keeps Primary)", d.NextRole)
+	}
+	if d.LeaseOwner != siteSelf {
+		t.Fatalf("LeaseOwner = %q, want %q", d.LeaseOwner, siteSelf)
+	}
+	// Requeue ~ time until the renewal window opens (renewed+half - now = 30s).
+	if d.Requeue != 30*time.Second {
+		t.Fatalf("Requeue = %v, want 30s (until renewal due)", d.Requeue)
 	}
 }
 
@@ -186,7 +215,9 @@ func TestFailoverDecideManualForcePromoteAcquiresAbsentLease(t *testing.T) {
 
 func TestFailoverDecideManualKeepsRenewingSelfHeldLease(t *testing.T) {
 	now := time.Unix(1700000000, 0).UTC()
-	lease := mkLease(siteSelf, now.Add(40*time.Second), now.Add(-20*time.Second))
+	// Renewal window open (renewed 40s ago, half=30s): manual policy must still
+	// renew a lease this site already holds — it only gates *acquiring*.
+	lease := mkLease(siteSelf, now.Add(20*time.Second), now.Add(-40*time.Second))
 	d := dr.Decide(dr.Inputs{
 		Now:             now,
 		SiteID:          siteSelf,
@@ -218,7 +249,9 @@ func TestFailoverDecideForcePromoteOverridesLivePeer(t *testing.T) {
 
 func TestFailoverDecideForcePromoteNoopOnSelf(t *testing.T) {
 	now := time.Unix(1700000000, 0).UTC()
-	lease := mkLease(siteSelf, now.Add(40*time.Second), now.Add(-20*time.Second))
+	// Renewal window open so the no-op falls through to ActionRenew (not a
+	// fresh hold): force-promote against an own lease must not acquire/steal.
+	lease := mkLease(siteSelf, now.Add(20*time.Second), now.Add(-40*time.Second))
 	d := dr.Decide(dr.Inputs{
 		Now:          now,
 		SiteID:       siteSelf,
