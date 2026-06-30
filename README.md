@@ -208,7 +208,7 @@ Field notes:
 
 | Field | Purpose |
 |---|---|
-| `spec.hostname` | Public hostname; required unless derived from `sourceRef.kind: HTTPRoute`. Accepts a single-leading-label wildcard such as `*.example.com` (see [Wildcard hostnames](#wildcard-hostnames)). |
+| `spec.hostname` | Public hostname. Required unless derived from `sourceRef.kind: HTTPRoute` **with Access disabled** — an Access-enabled HTTPRoute exposure still requires an explicit `spec.hostname` (admission fails otherwise). Accepts a single-leading-label wildcard such as `*.example.com` (see [Wildcard hostnames](#wildcard-hostnames)). |
 | `spec.tunnelRef.name` | Referenced `CloudflareTunnel`. Immutable. |
 | `spec.origin.protocol`, `host`, `port` | Origin target; host and port can be derived only from `sourceRef.kind: Service`. |
 | `spec.access.enabled` | Enables Cloudflare Access applications. |

@@ -241,6 +241,10 @@ func TestCloudflareLifecycle(t *testing.T) {
 		if reason != reasonHostnameConflict {
 			t.Fatalf("expected wildcard overlap to report %s, got %s", reasonHostnameConflict, reason)
 		}
+		// Fail-closed: the rejected wildcard must own no Cloudflare DNS record and
+		// no Access applications for its hostname.
+		h.waitDNSAbsent(ctx, "overlap wildcard DNS record", h.cfg.overlapWildcardHostname, conflictReadyTimeout)
+		h.waitAccessApplicationsAbsentFor(ctx, h.cfg.overlapWildcardHostname, conflictReadyTimeout)
 	})
 
 	t.Log("live Cloudflare smoke passed")

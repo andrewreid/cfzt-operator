@@ -1208,13 +1208,19 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		current := fetchExposure(ctx, exposure.Name)
 		Expect(meta.FindStatusCondition(current.Status.Conditions, ConditionReady).Status).To(Equal(metav1.ConditionTrue))
 
-		// Idempotent re-reconcile: no further DNS writes, status stays Ready.
-		dnsBefore := fakeCF.ConfigurationUpdateCalls(cfTunnel.Status.TunnelId)
+		// Idempotent re-reconcile: the DNS record is untouched (same ID, no extra
+		// create/update write — an in-place rewrite every reconcile would bump the
+		// write counter), the tunnel config is not rewritten, status stays Ready.
+		recordIDBefore := records[0].ID
+		dnsWritesBefore := fakeCF.DNSWriteCalls()
+		configCallsBefore := fakeCF.ConfigurationUpdateCalls(cfTunnel.Status.TunnelId)
 		reconcileExposure(ctx, exposureReconciler, current)
 		recheck, err := fakeCF.DNSRecords().List(ctx, "zone-example", "*.example.com", "CNAME")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(recheck).To(HaveLen(1))
-		Expect(fakeCF.ConfigurationUpdateCalls(cfTunnel.Status.TunnelId)).To(Equal(dnsBefore))
+		Expect(recheck[0].ID).To(Equal(recordIDBefore))
+		Expect(fakeCF.DNSWriteCalls()).To(Equal(dnsWritesBefore))
+		Expect(fakeCF.ConfigurationUpdateCalls(cfTunnel.Status.TunnelId)).To(Equal(configCallsBefore))
 		Expect(meta.FindStatusCondition(fetchExposure(ctx, exposure.Name).Status.Conditions, ConditionReady).Status).To(Equal(metav1.ConditionTrue))
 	})
 
@@ -1226,6 +1232,9 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		reconcileExposure(ctx, exposureReconciler, wildcard)
 		reconcileExposure(ctx, exposureReconciler, concrete)
 		reconcileTunnel(ctx, tunnelReconciler, tunnel.Name)
+		// Re-reconcile so each Exposure reads back its route hash and goes Ready.
+		reconcileExposure(ctx, exposureReconciler, wildcard)
+		reconcileExposure(ctx, exposureReconciler, concrete)
 
 		cfTunnel := fetchTunnel(ctx, tunnel.Name)
 		config, err := fakeCF.Configuration(cfTunnel.Status.TunnelId)
@@ -1235,6 +1244,11 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		Expect(config.Ingress[0].Hostname).To(Equal("foo.example.com"))
 		Expect(config.Ingress[1].Hostname).To(Equal("*.example.com"))
 		Expect(config.Ingress[2].Service).To(Equal(tunnelconfig.CatchAllService))
+
+		// Both Exposures must reconcile to Ready (DNS-only wildcard + concrete on
+		// one tunnel is a supported override, not a conflict).
+		Expect(meta.FindStatusCondition(fetchExposure(ctx, wildcard.Name).Status.Conditions, ConditionReady).Status).To(Equal(metav1.ConditionTrue))
+		Expect(meta.FindStatusCondition(fetchExposure(ctx, concrete.Name).Status.Conditions, ConditionReady).Status).To(Equal(metav1.ConditionTrue))
 	})
 
 	It("TestExposureWildcardAccessOverlapHostnameConflict", func() {
@@ -1244,6 +1258,15 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		reconcileTunnel(ctx, tunnelReconciler, tunnel.Name)
 		reconcileExposure(ctx, exposureReconciler, concrete)
 		Expect(meta.FindStatusCondition(fetchExposure(ctx, concrete.Name).Status.Conditions, ConditionReady).Status).To(Equal(metav1.ConditionTrue))
+
+		// Snapshot the pre-existing concrete CF resources to prove they survive the
+		// wildcard's fail-closed reconcile untouched.
+		concreteDNSBefore, err := fakeCF.DNSRecords().List(ctx, "zone-example", "foo.example.com", "CNAME")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(concreteDNSBefore).To(HaveLen(1))
+		concreteAppsBefore, err := fakeCF.AccessApplications().List(ctx, "foo.example.com")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(concreteAppsBefore).To(HaveLen(1))
 
 		wildcard := createExposure(ctx, "wildcard-access", tunnel.Name, "*.example.com", true)
 		cfTunnel := fetchTunnel(ctx, tunnel.Name)
@@ -1264,6 +1287,15 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(apps).To(BeEmpty())
 		Expect(fakeCF.ConfigurationUpdateCalls(cfTunnel.Status.TunnelId)).To(Equal(configCallsBefore))
+
+		// The pre-existing concrete Exposure and its CF resources stay intact.
+		Expect(meta.FindStatusCondition(fetchExposure(ctx, concrete.Name).Status.Conditions, ConditionReady).Status).To(Equal(metav1.ConditionTrue))
+		concreteDNSAfter, err := fakeCF.DNSRecords().List(ctx, "zone-example", "foo.example.com", "CNAME")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(concreteDNSAfter).To(Equal(concreteDNSBefore))
+		concreteAppsAfter, err := fakeCF.AccessApplications().List(ctx, "foo.example.com")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(concreteAppsAfter).To(Equal(concreteAppsBefore))
 	})
 })
 

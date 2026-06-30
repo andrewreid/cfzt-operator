@@ -28,6 +28,7 @@ type FakeClient struct {
 	zoneCache                 []Zone
 	zoneCacheReady            bool
 	zoneListCalls             int
+	dnsWriteCalls             int
 }
 
 // NewFake returns a ready-to-use FakeClient.
@@ -68,6 +69,15 @@ func (f *FakeClient) ConfigurationUpdateCalls(tunnelID string) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.configurationUpdateCalls[tunnelID]
+}
+
+// DNSWriteCalls returns the total number of DNS record Create + Update calls.
+// A no-op reconcile must not increment it, so tests use it to prove DNS writes
+// are not re-issued on every pass.
+func (f *FakeClient) DNSWriteCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.dnsWriteCalls
 }
 
 func (f *FakeClient) SetAccessApplicationPolicyUUIDs(id string, policyUUIDs []string) error {
@@ -403,6 +413,7 @@ func (d *fakeDNSRecords) Create(_ context.Context, in DNSRecordInput) (*DNSRecor
 	record := &DNSRecord{ID: id}
 	applyDNSRecord(record, in)
 	d.fc.dnsRecords[id] = record
+	d.fc.dnsWriteCalls++
 	copy := *record
 	return &copy, nil
 }
@@ -415,6 +426,7 @@ func (d *fakeDNSRecords) Update(_ context.Context, id string, in DNSRecordInput)
 		return nil, ErrNotFound
 	}
 	applyDNSRecord(record, in)
+	d.fc.dnsWriteCalls++
 	copy := *record
 	return &copy, nil
 }
