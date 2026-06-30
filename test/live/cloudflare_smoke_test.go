@@ -243,6 +243,9 @@ func TestCloudflareLifecycle(t *testing.T) {
 	if !wildcardAccessRecord.Proxied {
 		t.Fatalf("wildcard access CNAME for %s is not proxied", h.cfg.wildcardAccessHostname)
 	}
+	// Symmetric with (a): prove the operator wrote the wildcard Access hostname
+	// into the tunnel ingress (CloudflareTunnel.Status.Routes), not just DNS/Access.
+	h.waitTunnelIngressHostname(h.cfg.wildcardAccessHostname, tunnelHashTimeout)
 
 	// Wildcard+concrete Access OVERLAP is env-gated: it asserts only the
 	// operator's fail-closed HostnameConflict guard, not Cloudflare precedence.
