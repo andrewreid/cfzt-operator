@@ -665,6 +665,33 @@ func (h *smokeHarness) waitHostRoute(hostname string) {
 	})
 }
 
+// waitTunnelIngressHostname proves the operator configured cloudflared to route
+// hostname by asserting a matching tunnel ingress rule appears in the
+// CloudflareTunnel status (Status.Routes) — the same live tunnel config the
+// harness dumps in diagnostics. It is the routing proof for a deep-wildcard host
+// that cannot be reached over HTTPS: Cloudflare Universal SSL covers only the
+// apex and a single wildcard level, so a multi-label-deep host (foo.*.zone) has
+// no edge certificate and fails the TLS handshake; a reachability probe could
+// never pass even though routing is correct.
+func (h *smokeHarness) waitTunnelIngressHostname(hostname string, timeout time.Duration) {
+	var found []string
+	h.waitFor("tunnel ingress rule for "+hostname, timeout, func() (bool, error) {
+		var tunnel cfztv1alpha1.CloudflareTunnel
+		if err := h.k8s.Get(h.ctx, types.NamespacedName{Name: h.cfg.tunnelName}, &tunnel); err != nil {
+			return false, client.IgnoreNotFound(err)
+		}
+		found = found[:0]
+		for _, route := range tunnel.Status.Routes {
+			found = append(found, route.Hostname)
+			if route.Hostname == hostname {
+				return true, nil
+			}
+		}
+		return false, nil
+	})
+	h.t.Logf("tunnel ingress rule present for %s", hostname)
+}
+
 func (h *smokeHarness) assertAccessChallenged(path string) {
 	h.assertHostChallenged(h.cfg.accessHostname, path)
 }

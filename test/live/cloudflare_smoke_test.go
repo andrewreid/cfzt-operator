@@ -206,8 +206,7 @@ func TestCloudflareLifecycle(t *testing.T) {
 	t.Log("checking wildcard exposures (issue #13)")
 	h.createWildcardExposures()
 
-	// (a) DNS-only wildcard: proxied wildcard CNAME + tunnel ingress lifecycle,
-	// with a concrete subdomain routed through the wildcard rule.
+	// (a) DNS-only wildcard: proxied wildcard CNAME + tunnel ingress rule.
 	wildcardDNS := h.waitExposureReady(wildcardDNSExposure, resourceReadyTimeout)
 	if wildcardDNS.Status.Cloudflare.DnsRecordId == "" {
 		t.Fatalf("wildcard DNS exposure missing DNS record ID")
@@ -220,12 +219,33 @@ func TestCloudflareLifecycle(t *testing.T) {
 	if !wildcardRecord.Proxied {
 		t.Fatalf("wildcard CNAME for %s is not proxied", h.cfg.wildcardDNSHostname)
 	}
-	h.waitHostRoute(h.cfg.wildcardDNSConcrete)
+	// Cloudflare Universal SSL covers the apex and a SINGLE wildcard level
+	// (*.zone) only, so a 2-label-deep concrete host (foo.wildcard-<run>.zone)
+	// has no edge certificate and its HTTPS handshake is rejected at the edge
+	// (TLS alert handshake failure). We therefore do NOT probe the concrete host
+	// over HTTPS; instead we prove the wildcard is routable by asserting the
+	// operator wrote a tunnel ingress rule for the wildcard hostname into the
+	// CloudflareTunnel status (Status.Routes — the same source dumped in
+	// diagnostics). Reaching a deep-wildcard host over HTTPS needs an edge cert
+	// from Advanced Certificate Manager / Total TLS.
+	h.waitTunnelIngressHostname(h.cfg.wildcardDNSHostname, tunnelHashTimeout)
 
 	// (b) standalone wildcard self-hosted Access app (no overlapping concrete).
+	// Prove the wildcard Access app exists and the proxied wildcard CNAME is
+	// present. As in (a), the concrete host foo.access-wc-<run>.zone is two labels
+	// deep and outside Universal SSL, so we do NOT issue the HTTPS Access
+	// challenge probe against it — the edge has no cert and the TLS handshake
+	// fails. Deep-wildcard edge certs require ACM / Total TLS.
 	wildcardAccess := h.waitExposureReady(wildcardAccExposure, resourceReadyTimeout)
 	h.assertAccessApplicationsFor(wildcardAccExposure, h.cfg.wildcardAccessHostname, wildcardAccess.Status.Cloudflare.AccessApplications, policyIDBefore)
-	h.assertHostChallenged(h.cfg.wildcardAccessConcrete, "/hostname")
+	wildcardAccessRecord := h.waitDNSCNAME(ctx, "wildcard access CNAME", h.cfg.wildcardAccessHostname, tunnelIDBefore+".cfargotunnel.com", resourceReadyTimeout)
+	assertEqual(t, "wildcard access CNAME name", h.cfg.wildcardAccessHostname, wildcardAccessRecord.Name)
+	if !wildcardAccessRecord.Proxied {
+		t.Fatalf("wildcard access CNAME for %s is not proxied", h.cfg.wildcardAccessHostname)
+	}
+	// Symmetric with (a): prove the operator wrote the wildcard Access hostname
+	// into the tunnel ingress (CloudflareTunnel.Status.Routes), not just DNS/Access.
+	h.waitTunnelIngressHostname(h.cfg.wildcardAccessHostname, tunnelHashTimeout)
 
 	// Wildcard+concrete Access OVERLAP is env-gated: it asserts only the
 	// operator's fail-closed HostnameConflict guard, not Cloudflare precedence.

@@ -247,6 +247,8 @@ Rules:
 
 Cloudflare wildcard limitations to be aware of: wildcards cover a **single** subdomain level only (not the apex and not parent domains), and wildcarded subdomains cannot receive preemptive Access cookies.
 
+**Edge TLS for proxied wildcards.** A proxied wildcard exposure is only served over HTTPS at the Cloudflare edge where an edge certificate covers the requested hostname. Cloudflare Universal SSL covers the apex and a **single** wildcard level (`*.example.com`, serving `foo.example.com`). A **multi-label-deep** wildcard (`*.sub.example.com`, serving `foo.sub.example.com`) has no matching Universal SSL certificate, so HTTPS to those hosts fails the TLS handshake (`handshake failure`) at the edge — issuing a covering edge certificate requires Advanced Certificate Manager / Total TLS. The operator's DNS and tunnel ingress are unaffected; this is purely an edge-certificate coverage limit. The live smoke therefore validates deep-wildcard exposures via DNS (proxied wildcard CNAME) plus the operator's tunnel-ingress config rather than an HTTPS reachability probe.
+
 #### sourceRef
 
 `sourceRef` can derive fields from same-namespace Kubernetes resources and adds an owner reference so deleting the source garbage-collects the Exposure.
