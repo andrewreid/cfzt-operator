@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/types"
 
@@ -54,15 +55,28 @@ func Build(exposures []cfztv1alpha1.CloudflareExposure) (*Result, error) {
 		return nil, &HostnameConflictError{Hostnames: conflicts}
 	}
 
+	// cloudflared ingress is first-match top-down, so rules must be emitted
+	// most-specific-first. A lexicographic sort is wrong: '*' (0x2A) sorts before
+	// letters, so '*.example.com' would shadow 'foo.example.com'. Order by, in
+	// turn: (a) more labels first; (b) for equal label count, concrete before
+	// wildcard; (c) the existing deterministic tie-breakers hostname, namespace,
+	// name. The catch-all http_status:404 is appended last, unconditionally.
 	ordered := append([]cfztv1alpha1.CloudflareExposure(nil), exposures...)
 	sort.Slice(ordered, func(i, j int) bool {
-		if ordered[i].Spec.Hostname == ordered[j].Spec.Hostname {
-			if ordered[i].Namespace == ordered[j].Namespace {
-				return ordered[i].Name < ordered[j].Name
-			}
+		hi, hj := ordered[i].Spec.Hostname, ordered[j].Spec.Hostname
+		if li, lj := labelCount(hi), labelCount(hj); li != lj {
+			return li > lj
+		}
+		if wi, wj := isWildcardHostname(hi), isWildcardHostname(hj); wi != wj {
+			return !wi
+		}
+		if hi != hj {
+			return hi < hj
+		}
+		if ordered[i].Namespace != ordered[j].Namespace {
 			return ordered[i].Namespace < ordered[j].Namespace
 		}
-		return ordered[i].Spec.Hostname < ordered[j].Spec.Hostname
+		return ordered[i].Name < ordered[j].Name
 	})
 
 	result := &Result{}
@@ -84,6 +98,21 @@ func Build(exposures []cfztv1alpha1.CloudflareExposure) (*Result, error) {
 	}
 	result.Config.Ingress = append(result.Config.Ingress, cloudflare.IngressRule{Service: CatchAllService})
 	return result, nil
+}
+
+// isWildcardHostname reports whether hostname carries a single leading wildcard
+// label ('*.'), matching the CRD validation grammar.
+func isWildcardHostname(hostname string) bool {
+	return strings.HasPrefix(hostname, "*.")
+}
+
+// labelCount returns the number of dot-separated labels in hostname, counting a
+// leading wildcard label. An empty hostname has zero labels.
+func labelCount(hostname string) int {
+	if hostname == "" {
+		return 0
+	}
+	return strings.Count(hostname, ".") + 1
 }
 
 func HashRule(rule cloudflare.IngressRule) string {

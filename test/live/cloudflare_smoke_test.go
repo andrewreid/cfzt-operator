@@ -5,6 +5,7 @@ package live
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -201,6 +202,50 @@ func TestCloudflareLifecycle(t *testing.T) {
 	}
 	assertEqual(t, "foreign tunnel route ID", foreignRoute.ID, foreignRoutes[0].ID)
 	assertEqual(t, "foreign tunnel route comment", "cfzt-live-smoke-foreign-route", foreignRoutes[0].Comment)
+
+	t.Log("checking wildcard exposures (issue #13)")
+	h.createWildcardExposures()
+
+	// (a) DNS-only wildcard: proxied wildcard CNAME + tunnel ingress lifecycle,
+	// with a concrete subdomain routed through the wildcard rule.
+	wildcardDNS := h.waitExposureReady(wildcardDNSExposure, resourceReadyTimeout)
+	if wildcardDNS.Status.Cloudflare.DnsRecordId == "" {
+		t.Fatalf("wildcard DNS exposure missing DNS record ID")
+	}
+	if wildcardDNS.Status.Cloudflare.PublicHostnameRouteHash == "" {
+		t.Fatalf("wildcard DNS exposure missing route hash")
+	}
+	wildcardRecord := h.waitDNSCNAME(ctx, "wildcard CNAME", h.cfg.wildcardDNSHostname, tunnelIDBefore+".cfargotunnel.com", resourceReadyTimeout)
+	assertEqual(t, "wildcard CNAME name", h.cfg.wildcardDNSHostname, wildcardRecord.Name)
+	if !wildcardRecord.Proxied {
+		t.Fatalf("wildcard CNAME for %s is not proxied", h.cfg.wildcardDNSHostname)
+	}
+	h.waitHostRoute(h.cfg.wildcardDNSConcrete)
+
+	// (b) standalone wildcard self-hosted Access app (no overlapping concrete).
+	wildcardAccess := h.waitExposureReady(wildcardAccExposure, resourceReadyTimeout)
+	h.assertAccessApplicationsFor(wildcardAccExposure, h.cfg.wildcardAccessHostname, wildcardAccess.Status.Cloudflare.AccessApplications, policyIDBefore)
+	h.assertHostChallenged(h.cfg.wildcardAccessConcrete, "/hostname")
+
+	// Wildcard+concrete Access OVERLAP is env-gated: it asserts only the
+	// operator's fail-closed HostnameConflict guard, not Cloudflare precedence.
+	t.Run("WildcardAccessOverlap", func(t *testing.T) {
+		if os.Getenv(envWildcardAccessOverlap) != "1" {
+			t.Skipf("set %s=1 to exercise the wildcard+concrete Access overlap guard", envWildcardAccessOverlap)
+		}
+		h.createOverlapConcrete()
+		h.waitExposureReady(overlapConcreteExp, resourceReadyTimeout)
+		h.createOverlapWildcard()
+		reason := h.waitExposureConflictReason(overlapWildcardExp, conflictReadyTimeout)
+		t.Logf("overlap wildcard exposure reported %s", reason)
+		if reason != reasonHostnameConflict {
+			t.Fatalf("expected wildcard overlap to report %s, got %s", reasonHostnameConflict, reason)
+		}
+		// Fail-closed: the rejected wildcard must own no Cloudflare DNS record and
+		// no Access applications for its hostname.
+		h.waitDNSAbsent(ctx, "overlap wildcard DNS record", h.cfg.overlapWildcardHostname, conflictReadyTimeout)
+		h.waitAccessApplicationsAbsentFor(ctx, h.cfg.overlapWildcardHostname, conflictReadyTimeout)
+	})
 
 	t.Log("live Cloudflare smoke passed")
 }

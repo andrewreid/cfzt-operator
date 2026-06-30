@@ -86,6 +86,112 @@ func TestTunnelConfigBuilderSkipsUnresolvedSourceRef(t *testing.T) {
 	}
 }
 
+func TestTunnelConfigBuilderConcreteBeforeOverlappingWildcard(t *testing.T) {
+	result, err := Build([]cfztv1alpha1.CloudflareExposure{
+		exposure("wild", "*.example.com", "wild.media.svc.cluster.local", "uid-wild"),
+		exposure("foo", "foo.example.com", "foo.media.svc.cluster.local", "uid-foo"),
+	})
+	if err != nil {
+		t.Fatalf("Build returned error: %v", err)
+	}
+	hosts := ingressHostnames(result)
+	wantOrder := []string{"foo.example.com", "*.example.com", ""}
+	assertHostOrder(t, hosts, wantOrder)
+	assertRoutesAligned(t, result)
+}
+
+func TestTunnelConfigBuilderMoreSpecificWildcardFirst(t *testing.T) {
+	result, err := Build([]cfztv1alpha1.CloudflareExposure{
+		exposure("broad", "*.example.com", "broad.media.svc.cluster.local", "uid-broad"),
+		exposure("deep", "*.foo.example.com", "deep.media.svc.cluster.local", "uid-deep"),
+		exposure("bar", "bar.foo.example.com", "bar.media.svc.cluster.local", "uid-bar"),
+		exposure("foo", "foo.example.com", "foo.media.svc.cluster.local", "uid-foo"),
+	})
+	if err != nil {
+		t.Fatalf("Build returned error: %v", err)
+	}
+	hosts := ingressHostnames(result)
+	// (a) more labels first, (b) concrete before wildcard at equal label count:
+	// bar.foo.example.com(4,concrete), *.foo.example.com(4,wild),
+	// foo.example.com(3,concrete), *.example.com(3,wild), then catch-all.
+	wantOrder := []string{"bar.foo.example.com", "*.foo.example.com", "foo.example.com", "*.example.com", ""}
+	assertHostOrder(t, hosts, wantOrder)
+	// Key correctness invariants: each concrete host precedes any wildcard that
+	// covers it, and the more-specific wildcard precedes the broader one.
+	assertBefore(t, hosts, "foo.example.com", "*.example.com")
+	assertBefore(t, hosts, "bar.foo.example.com", "*.foo.example.com")
+	assertBefore(t, hosts, "*.foo.example.com", "*.example.com")
+	assertRoutesAligned(t, result)
+}
+
+func TestTunnelConfigBuilderWildcardExactDuplicateConflicts(t *testing.T) {
+	_, err := Build([]cfztv1alpha1.CloudflareExposure{
+		exposure("a", "*.example.com", "a.media.svc.cluster.local", "uid-a"),
+		exposure("b", "*.example.com", "b.media.svc.cluster.local", "uid-b"),
+	})
+	if _, ok := err.(*HostnameConflictError); !ok {
+		t.Fatalf("error = %T %v, want HostnameConflictError", err, err)
+	}
+}
+
+func ingressHostnames(result *Result) []string {
+	hosts := make([]string, 0, len(result.Config.Ingress))
+	for _, rule := range result.Config.Ingress {
+		hosts = append(hosts, rule.Hostname)
+	}
+	return hosts
+}
+
+func assertHostOrder(t *testing.T, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("ingress hostnames = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("ingress hostnames = %v, want %v", got, want)
+		}
+	}
+}
+
+func assertBefore(t *testing.T, hosts []string, first, second string) {
+	t.Helper()
+	fi, si := indexOf(hosts, first), indexOf(hosts, second)
+	if fi < 0 || si < 0 {
+		t.Fatalf("missing host: %q@%d %q@%d in %v", first, fi, second, si, hosts)
+	}
+	if fi >= si {
+		t.Fatalf("%q (idx %d) must precede %q (idx %d) in %v", first, fi, second, si, hosts)
+	}
+}
+
+func assertRoutesAligned(t *testing.T, result *Result) {
+	t.Helper()
+	// Routes exclude the trailing catch-all rule; they must line up 1:1 with the
+	// emitted ingress rules and carry matching hashes.
+	if len(result.Routes) != len(result.Config.Ingress)-1 {
+		t.Fatalf("routes = %d, ingress (minus catch-all) = %d", len(result.Routes), len(result.Config.Ingress)-1)
+	}
+	for i, route := range result.Routes {
+		rule := result.Config.Ingress[i]
+		if route.Hostname != rule.Hostname {
+			t.Fatalf("route[%d] hostname %q != ingress[%d] hostname %q", i, route.Hostname, i, rule.Hostname)
+		}
+		if route.Hash != HashRule(rule) {
+			t.Fatalf("route[%d] hash %q != HashRule(ingress[%d])", i, route.Hash, i)
+		}
+	}
+}
+
+func indexOf(hosts []string, host string) int {
+	for i, h := range hosts {
+		if h == host {
+			return i
+		}
+	}
+	return -1
+}
+
 func exposure(name, hostname, host, uid string) cfztv1alpha1.CloudflareExposure {
 	return cfztv1alpha1.CloudflareExposure{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "media", UID: types.UID(uid)},

@@ -204,8 +204,16 @@ type CloudflareExposureSpec struct {
 	// +kubebuilder:validation:MaxLength=120
 	DisplayName string `json:"displayName,omitempty"`
 
+	// Hostname is the public hostname published through the tunnel. It accepts a
+	// multi-label RFC 1123 hostname or a single-leading-label wildcard
+	// (e.g. "*.example.com"). Single-label values are rejected: at least two
+	// non-wildcard labels must remain, and the wildcard may only be the leftmost
+	// label (so "example.com" and "*.example.com" are valid, while "com", "*",
+	// and "*.com" are rejected). Each label is at most 63 characters.
+	//
 	// +kubebuilder:validation:Optional
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)+$`
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^(\*\.)?[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)+$`
 	Hostname string `json:"hostname,omitempty"`
 
 	// +kubebuilder:validation:Required
