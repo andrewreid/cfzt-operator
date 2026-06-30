@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"strings"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -50,6 +52,21 @@ var _ = Describe("CRD admission", func() {
 		{"rejects invalid exposure hostname", exposureWith("bad-hostname", func(e *cfztv1alpha1.CloudflareExposure) {
 			e.Spec.Hostname = "Bad_Host"
 		}), "spec.hostname", nil},
+		// Wildcard hostname accept/reject truth-table (issue #13). Access is
+		// disabled so only spec.hostname pattern/length validation is exercised.
+		{"accepts plain two-label hostname", wildcardHostnameExposure("wc-plain", "example.com"), "", assertExposureHostname("wc-plain", "example.com")},
+		{"accepts single-leading-label wildcard", wildcardHostnameExposure("wc-leading", "*.example.com"), "", assertExposureHostname("wc-leading", "*.example.com")},
+		{"accepts deep wildcard hostname", wildcardHostnameExposure("wc-deep", "*.foo.example.com"), "", assertExposureHostname("wc-deep", "*.foo.example.com")},
+		{"accepts 63-char label hostname", wildcardHostnameExposure("wc-label63", label63Hostname()), "", assertExposureHostname("wc-label63", label63Hostname())},
+		{"rejects bare wildcard", wildcardHostnameExposure("wc-bare", "*"), "spec.hostname", nil},
+		{"rejects wildcard single-label domain", wildcardHostnameExposure("wc-tld", "*.com"), "spec.hostname", nil},
+		{"rejects wildcard without dot separator", wildcardHostnameExposure("wc-nodot", "*example.com"), "spec.hostname", nil},
+		{"rejects mid-label wildcard", wildcardHostnameExposure("wc-mid", "foo.*.example.com"), "spec.hostname", nil},
+		{"rejects trailing wildcard label", wildcardHostnameExposure("wc-trailing", "foo.*"), "spec.hostname", nil},
+		{"rejects double wildcard", wildcardHostnameExposure("wc-double", "**.example.com"), "spec.hostname", nil},
+		{"rejects uppercase hostname", wildcardHostnameExposure("wc-upper", "Example.com"), "spec.hostname", nil},
+		{"rejects trailing-dot hostname", wildcardHostnameExposure("wc-dot", "example.com."), "spec.hostname", nil},
+		{"rejects 64-char label hostname", wildcardHostnameExposure("wc-label64", label64Hostname()), "spec.hostname", nil},
 		{"rejects exposure origin port out of range", exposureWith("bad-port", func(e *cfztv1alpha1.CloudflareExposure) {
 			e.Spec.Origin.Port = 70000
 		}), "spec.origin.port", nil},
@@ -312,6 +329,34 @@ func exposureWith(name string, mutate func(*cfztv1alpha1.CloudflareExposure)) *c
 	obj := validAdmissionExposure(name)
 	mutate(obj)
 	return obj
+}
+
+// wildcardHostnameExposure builds an Access-disabled Exposure with an explicit
+// hostname so the create exercises spec.hostname pattern/length validation in
+// isolation from the Access domain CEL rules.
+func wildcardHostnameExposure(name, hostname string) *cfztv1alpha1.CloudflareExposure {
+	return exposureWith(name, func(e *cfztv1alpha1.CloudflareExposure) {
+		e.Spec.Hostname = hostname
+		e.Spec.Access = cfztv1alpha1.AccessSpec{Enabled: false}
+	})
+}
+
+// assertExposureHostname returns a check that the persisted Spec.Hostname equals
+// want, proving the accepted value survived admission.
+func assertExposureHostname(name, want string) func(client.Object) {
+	return func(client.Object) {
+		created := &cfztv1alpha1.CloudflareExposure{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, created)).To(Succeed())
+		Expect(created.Spec.Hostname).To(Equal(want))
+	}
+}
+
+func label63Hostname() string {
+	return strings.Repeat("a", 63) + ".example.com"
+}
+
+func label64Hostname() string {
+	return strings.Repeat("a", 64) + ".example.com"
 }
 
 // failoverYAMLExposure builds an unstructured Exposure with an explicit

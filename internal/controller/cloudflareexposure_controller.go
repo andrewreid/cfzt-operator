@@ -124,6 +124,21 @@ func (r *CloudflareExposureReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return r.setExposureStatusAndRequeue(ctx, &exposure, exposure.Status.Cloudflare, ReasonHostnameConflict, "hostname is claimed by more than one CloudflareExposure")
 	}
 
+	// Validate-before-mutate: an Access-enabled wildcard Exposure must not overlap
+	// an Access-enabled concrete Exposure (or vice-versa) on the same tunnel.
+	// Cloudflare's subdomain match precedence between an overlapping wildcard and
+	// concrete Access app is undocumented, so the operator fails closed rather than
+	// risk routing auth to the wrong application. DNS-only / public wildcards with
+	// concrete overrides stay supported (handled by builder ordering).
+	if exposure.Spec.Access.Enabled {
+		if conflict, err := r.hasAccessWildcardOverlap(ctx, &exposure); err != nil {
+			return ctrl.Result{}, err
+		} else if conflict {
+			r.Recorder.Eventf(&exposure, corev1.EventTypeWarning, EventHostnameConflict, "Hostname %s overlaps an Access-enabled CloudflareExposure on tunnel %s", exposure.Spec.Hostname, exposure.Spec.TunnelRef.Name)
+			return r.setExposureStatusAndRequeue(ctx, &exposure, exposure.Status.Cloudflare, ReasonHostnameConflict, "wildcard hostname overlaps an Access-enabled CloudflareExposure on the same tunnel")
+		}
+	}
+
 	// D26 failover role gate: a failover-enabled Exposure only writes the
 	// shared Access app + public DNS CNAME when this site holds the lease.
 	// A Standby (or any non-Primary outcome) is fully handled here.
@@ -567,6 +582,54 @@ func (r *CloudflareExposureReconciler) hasDuplicateHostname(ctx context.Context,
 		}
 	}
 	return false, nil
+}
+
+// hasAccessWildcardOverlap reports whether this Access-enabled Exposure's
+// hostname overlaps another Access-enabled Exposure on the same tunnel under
+// Cloudflare's single-leading-label wildcard semantics ('*.example.com' covers
+// 'foo.example.com' but not 'foo.bar.example.com' or the apex 'example.com').
+// The guard is symmetric: it fires whether this Exposure is the wildcard or the
+// covered concrete host. Scope is strictly Access-enabled overlaps; DNS-only or
+// public wildcard + concrete override pairs are left to builder ordering.
+func (r *CloudflareExposureReconciler) hasAccessWildcardOverlap(ctx context.Context, exposure *cfztv1alpha1.CloudflareExposure) (bool, error) {
+	if !exposure.Spec.Access.Enabled || exposure.Spec.Hostname == "" {
+		return false, nil
+	}
+	others, err := listExposuresByTunnel(ctx, r.Client, exposure.Spec.TunnelRef.Name)
+	if err != nil {
+		return false, err
+	}
+	for _, other := range others {
+		if other.UID == exposure.UID || !other.DeletionTimestamp.IsZero() {
+			continue
+		}
+		if !other.Spec.Access.Enabled || other.Spec.Hostname == "" {
+			continue
+		}
+		if wildcardCoversHost(exposure.Spec.Hostname, other.Spec.Hostname) ||
+			wildcardCoversHost(other.Spec.Hostname, exposure.Spec.Hostname) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// wildcardCoversHost reports whether the single-leading-label wildcard hostname
+// covers the concrete host. '*.example.com' covers exactly one additional label
+// in front of 'example.com': it covers 'foo.example.com' but not the apex
+// 'example.com' nor the deeper 'foo.bar.example.com'. Returns false when wildcard
+// is not a '*.' hostname or host is itself a wildcard.
+func wildcardCoversHost(wildcard, host string) bool {
+	if !strings.HasPrefix(wildcard, "*.") || strings.HasPrefix(host, "*.") {
+		return false
+	}
+	domain := wildcard[len("*."):]
+	suffix := "." + domain
+	if !strings.HasSuffix(host, suffix) {
+		return false
+	}
+	label := host[:len(host)-len(suffix)]
+	return label != "" && !strings.Contains(label, ".")
 }
 
 // hasFailoverGroupConflict reports whether another CloudflareExposure anywhere

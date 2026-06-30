@@ -208,7 +208,7 @@ Field notes:
 
 | Field | Purpose |
 |---|---|
-| `spec.hostname` | Public hostname; required unless derived from `sourceRef.kind: HTTPRoute`. |
+| `spec.hostname` | Public hostname; required unless derived from `sourceRef.kind: HTTPRoute`. Accepts a single-leading-label wildcard such as `*.example.com` (see [Wildcard hostnames](#wildcard-hostnames)). |
 | `spec.tunnelRef.name` | Referenced `CloudflareTunnel`. Immutable. |
 | `spec.origin.protocol`, `host`, `port` | Origin target; host and port can be derived only from `sourceRef.kind: Service`. |
 | `spec.access.enabled` | Enables Cloudflare Access applications. |
@@ -220,6 +220,32 @@ Field notes:
 | `spec.failover.promotionPolicy` | `Automatic` (default) promotes after lease expiry; `Manual` requires a new `cfzt.reid.ee/force-promote` token for expiry and first election. |
 
 Status records `status.cloudflare.accessApplications[]`, `status.cloudflare.dnsRecordId`, `status.cloudflare.publicHostnameRouteHash`, `status.conditions`, and — when `spec.failover` is set — `status.failover` (role, lease owner, expiry; see below).
+
+#### Wildcard hostnames
+
+`spec.hostname` accepts a single-leading-label wildcard, e.g. `*.example.com`:
+
+```yaml
+spec:
+  hostname: "*.apps.example.com"
+  tunnelRef:
+    name: homelab
+  origin:
+    protocol: http
+    host: ingress.apps.svc.cluster.local
+    port: 80
+```
+
+Rules:
+
+- The wildcard may only be the **leftmost** label and matches exactly **one** subdomain level — `*.example.com` covers `foo.example.com` but **not** `foo.bar.example.com` or the apex `example.com`. This mirrors Cloudflare's documented wildcard DNS behaviour.
+- At least two non-wildcard labels must remain: `*.example.com` is valid; `*.com`, `*`, `*example.com`, and `foo.*.example.com` are rejected by CRD validation.
+- The operator manages one proxied wildcard DNS CNAME and one tunnel ingress rule for the wildcard, exactly as for a concrete hostname.
+- **Concrete overrides are supported** for DNS + tunnel ingress: you can run `foo.example.com` and `*.example.com` on the same tunnel. The operator emits tunnel ingress rules **most-specific-first**, so the concrete host is matched before the covering wildcard (cloudflared ingress is first-match, top-down).
+- **Wildcard Cloudflare Access is supported standalone.** A wildcard `spec.hostname` with `access.enabled: true` protects the covered subdomains with one self-hosted Access application set, the same as a concrete host.
+- **Access overlap is intentionally rejected.** If an Access-enabled wildcard Exposure and an Access-enabled concrete Exposure it covers target the **same tunnel**, the operator fails closed: `Ready=False, Reason=HostnameConflict`, with no DNS/Access mutation. Cloudflare's match precedence between an overlapping wildcard and concrete Access app is undocumented, so the operator refuses to guess until precedence is proven. DNS-only / public wildcard + concrete overrides are unaffected.
+
+Cloudflare wildcard limitations to be aware of: wildcards cover a **single** subdomain level only (not the apex and not parent domains), and wildcarded subdomains cannot receive preemptive Access cookies.
 
 #### sourceRef
 

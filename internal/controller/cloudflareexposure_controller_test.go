@@ -26,6 +26,7 @@ import (
 	"github.com/andrewreid/cfzt-operator/internal/naming"
 	"github.com/andrewreid/cfzt-operator/internal/origin"
 	"github.com/andrewreid/cfzt-operator/internal/ownership"
+	"github.com/andrewreid/cfzt-operator/internal/tunnelconfig"
 )
 
 const exposureTestNamespace = "media"
@@ -1181,6 +1182,88 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		present, err := HTTPRouteCRDPresent(ctx, k8sClient)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(present).To(BeFalse())
+	})
+
+	It("TestExposureWildcardDNSOnly", func() {
+		tunnel := readyTunnel(ctx, tunnelReconciler, "wc-dns", "wc-dns")
+		exposure := createExposure(ctx, "wildcard-dns", tunnel.Name, "*.example.com", false)
+
+		reconcileExposure(ctx, exposureReconciler, exposure)
+		reconcileTunnel(ctx, tunnelReconciler, tunnel.Name)
+		reconcileExposure(ctx, exposureReconciler, exposure)
+
+		cfTunnel := fetchTunnel(ctx, tunnel.Name)
+		records, err := fakeCF.DNSRecords().List(ctx, "zone-example", "*.example.com", "CNAME")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(records).To(HaveLen(1))
+		Expect(records[0].Name).To(Equal("*.example.com"))
+		Expect(records[0].Type).To(Equal("CNAME"))
+		Expect(records[0].Content).To(Equal(cfTunnel.Status.TunnelId + ".cfargotunnel.com"))
+		Expect(records[0].Proxied).To(BeTrue())
+
+		config, err := fakeCF.Configuration(cfTunnel.Status.TunnelId)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(config.Ingress[0].Hostname).To(Equal("*.example.com"))
+
+		current := fetchExposure(ctx, exposure.Name)
+		Expect(meta.FindStatusCondition(current.Status.Conditions, ConditionReady).Status).To(Equal(metav1.ConditionTrue))
+
+		// Idempotent re-reconcile: no further DNS writes, status stays Ready.
+		dnsBefore := fakeCF.ConfigurationUpdateCalls(cfTunnel.Status.TunnelId)
+		reconcileExposure(ctx, exposureReconciler, current)
+		recheck, err := fakeCF.DNSRecords().List(ctx, "zone-example", "*.example.com", "CNAME")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(recheck).To(HaveLen(1))
+		Expect(fakeCF.ConfigurationUpdateCalls(cfTunnel.Status.TunnelId)).To(Equal(dnsBefore))
+		Expect(meta.FindStatusCondition(fetchExposure(ctx, exposure.Name).Status.Conditions, ConditionReady).Status).To(Equal(metav1.ConditionTrue))
+	})
+
+	It("TestExposureWildcardConcreteOrderingConcreteFirst", func() {
+		tunnel := readyTunnel(ctx, tunnelReconciler, "wc-order", "wc-order")
+		wildcard := createExposure(ctx, "wildcard-route", tunnel.Name, "*.example.com", false)
+		concrete := createExposure(ctx, "concrete-route", tunnel.Name, "foo.example.com", false)
+
+		reconcileExposure(ctx, exposureReconciler, wildcard)
+		reconcileExposure(ctx, exposureReconciler, concrete)
+		reconcileTunnel(ctx, tunnelReconciler, tunnel.Name)
+
+		cfTunnel := fetchTunnel(ctx, tunnel.Name)
+		config, err := fakeCF.Configuration(cfTunnel.Status.TunnelId)
+		Expect(err).NotTo(HaveOccurred())
+		// Concrete host must precede the covering wildcard (first-match top-down),
+		// catch-all stays last.
+		Expect(config.Ingress[0].Hostname).To(Equal("foo.example.com"))
+		Expect(config.Ingress[1].Hostname).To(Equal("*.example.com"))
+		Expect(config.Ingress[2].Service).To(Equal(tunnelconfig.CatchAllService))
+	})
+
+	It("TestExposureWildcardAccessOverlapHostnameConflict", func() {
+		tunnel := readyTunnel(ctx, tunnelReconciler, "wc-access", "wc-access")
+		concrete := createExposure(ctx, "concrete-access", tunnel.Name, "foo.example.com", true)
+		reconcileExposure(ctx, exposureReconciler, concrete)
+		reconcileTunnel(ctx, tunnelReconciler, tunnel.Name)
+		reconcileExposure(ctx, exposureReconciler, concrete)
+		Expect(meta.FindStatusCondition(fetchExposure(ctx, concrete.Name).Status.Conditions, ConditionReady).Status).To(Equal(metav1.ConditionTrue))
+
+		wildcard := createExposure(ctx, "wildcard-access", tunnel.Name, "*.example.com", true)
+		cfTunnel := fetchTunnel(ctx, tunnel.Name)
+		configCallsBefore := fakeCF.ConfigurationUpdateCalls(cfTunnel.Status.TunnelId)
+
+		reconcileExposureExpectRequeueAfter30(ctx, exposureReconciler, wildcard)
+
+		current := fetchExposure(ctx, wildcard.Name)
+		ready := meta.FindStatusCondition(current.Status.Conditions, ConditionReady)
+		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+		Expect(ready.Reason).To(Equal(ReasonHostnameConflict))
+
+		// Fail-closed: zero CF mutation for the wildcard hostname.
+		records, err := fakeCF.DNSRecords().List(ctx, "zone-example", "*.example.com", "CNAME")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(records).To(BeEmpty())
+		apps, err := fakeCF.AccessApplications().List(ctx, "*.example.com")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(apps).To(BeEmpty())
+		Expect(fakeCF.ConfigurationUpdateCalls(cfTunnel.Status.TunnelId)).To(Equal(configCallsBefore))
 	})
 })
 

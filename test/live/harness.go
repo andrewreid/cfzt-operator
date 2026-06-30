@@ -51,6 +51,16 @@ const (
 	publicExposure      = "public-smoke"
 	accessExposure      = "access-smoke"
 	conflictExposure    = "conflict-smoke"
+	wildcardDNSExposure = "wildcard-dns-smoke"
+	wildcardAccExposure = "wildcard-access-smoke"
+	overlapConcreteExp  = "overlap-concrete-smoke"
+	overlapWildcardExp  = "overlap-wildcard-smoke"
+
+	// envWildcardAccessOverlap gates the wildcard+concrete Access overlap case.
+	// Cloudflare subdomain precedence between an overlapping wildcard and concrete
+	// Access app is undocumented, so the case is opt-in and asserts only the
+	// operator's fail-closed HostnameConflict guard, never Cloudflare match order.
+	envWildcardAccessOverlap = "CF_SMOKE_WILDCARD_ACCESS_OVERLAP"
 
 	operatorReadyTimeout = 2 * time.Minute
 	echoReadyTimeout     = 2 * time.Minute
@@ -75,6 +85,12 @@ type smokeConfig struct {
 	accessHostname          string
 	conflictHostname        string
 	failoverHostname        string
+	wildcardDNSHostname     string
+	wildcardDNSConcrete     string
+	wildcardAccessHostname  string
+	wildcardAccessConcrete  string
+	overlapWildcardHostname string
+	overlapConcreteHostname string
 	failoverGroup           string
 	siteID                  string
 	tunnelRouteCIDR         string
@@ -130,6 +146,12 @@ func loadSmokeConfig(t *testing.T) smokeConfig {
 		accessHostname:          "access-" + runSuffix + "." + testZone,
 		conflictHostname:        "conflict-" + runSuffix + "." + testZone,
 		failoverHostname:        "failover-" + runSuffix + "." + testZone,
+		wildcardDNSHostname:     "*.wildcard-" + runSuffix + "." + testZone,
+		wildcardDNSConcrete:     "foo.wildcard-" + runSuffix + "." + testZone,
+		wildcardAccessHostname:  "*.access-wc-" + runSuffix + "." + testZone,
+		wildcardAccessConcrete:  "foo.access-wc-" + runSuffix + "." + testZone,
+		overlapWildcardHostname: "*.overlap-wc-" + runSuffix + "." + testZone,
+		overlapConcreteHostname: "foo.overlap-wc-" + runSuffix + "." + testZone,
 		failoverGroup:           "cfzt-smoke-fo-" + runSuffix,
 		siteID:                  envDefault("SITE_ID", "cfzt-smoke-"+runSuffix),
 		tunnelRouteCIDR:         routeCIDR,
@@ -465,6 +487,47 @@ func (h *smokeHarness) accessApplications(hostname string) []cfztv1alpha1.Access
 	}
 }
 
+// createWildcardExposures creates the DEFAULT-run wildcard cases: a DNS-only
+// wildcard Exposure and a standalone wildcard self-hosted Access Exposure. Both
+// reuse the echo Service origin so a concrete subdomain routes through the
+// wildcard tunnel ingress rule.
+func (h *smokeHarness) createWildcardExposures() {
+	for _, exposure := range []*cfztv1alpha1.CloudflareExposure{h.wildcardDNSExposureObject(), h.wildcardAccessExposureObject()} {
+		if err := h.k8s.Create(h.ctx, exposure); err != nil && !apierrors.IsAlreadyExists(err) {
+			h.t.Fatalf("create wildcard CloudflareExposure %s: %v", exposure.Name, err)
+		}
+	}
+}
+
+func (h *smokeHarness) wildcardDNSExposureObject() *cfztv1alpha1.CloudflareExposure {
+	return h.exposureObject(wildcardDNSExposure, h.cfg.wildcardDNSHostname, false)
+}
+
+func (h *smokeHarness) wildcardAccessExposureObject() *cfztv1alpha1.CloudflareExposure {
+	return h.exposureObject(wildcardAccExposure, h.cfg.wildcardAccessHostname, true)
+}
+
+// createOverlapConcrete creates the Access-enabled concrete Exposure for the
+// env-gated overlap case. It is created (and reconciled to Ready) first so the
+// later wildcard provably sees an existing Access-enabled concrete to conflict
+// with on the same tunnel.
+func (h *smokeHarness) createOverlapConcrete() {
+	exposure := h.exposureObject(overlapConcreteExp, h.cfg.overlapConcreteHostname, true)
+	if err := h.k8s.Create(h.ctx, exposure); err != nil && !apierrors.IsAlreadyExists(err) {
+		h.t.Fatalf("create overlap concrete CloudflareExposure: %v", err)
+	}
+}
+
+// createOverlapWildcard creates the Access-enabled wildcard Exposure that covers
+// the concrete one on the same tunnel. The operator must fail closed with
+// HostnameConflict and perform no Cloudflare mutation for the wildcard.
+func (h *smokeHarness) createOverlapWildcard() {
+	exposure := h.exposureObject(overlapWildcardExp, h.cfg.overlapWildcardHostname, true)
+	if err := h.k8s.Create(h.ctx, exposure); err != nil && !apierrors.IsAlreadyExists(err) {
+		h.t.Fatalf("create overlap wildcard CloudflareExposure: %v", err)
+	}
+}
+
 func (h *smokeHarness) waitAccessPolicyReady(timeout time.Duration) cfztv1alpha1.CloudflareAccessPolicy {
 	var policy cfztv1alpha1.CloudflareAccessPolicy
 	h.waitFor("CloudflareAccessPolicy ready", timeout, func() (bool, error) {
@@ -578,10 +641,17 @@ func (h *smokeHarness) waitDaemonSetReady(name string, timeout time.Duration) {
 }
 
 func (h *smokeHarness) waitPublicRoute() {
+	h.waitHostRoute(h.cfg.publicHostname)
+}
+
+// waitHostRoute polls https://<hostname>/hostname until the echo origin answers
+// HTTP 200. hostname may be a concrete subdomain served by a wildcard route, so
+// this also proves a wildcard tunnel ingress rule catches concrete subdomains.
+func (h *smokeHarness) waitHostRoute(hostname string) {
 	httpClient := smokeHTTPClient()
-	h.t.Logf("waiting for public route https://%s/hostname", h.cfg.publicHostname)
+	h.t.Logf("waiting for public route https://%s/hostname", hostname)
 	h.waitFor("public hostname HTTP 200", hostnameHTTPTimeout, func() (bool, error) {
-		req, err := http.NewRequestWithContext(h.ctx, http.MethodGet, "https://"+h.cfg.publicHostname+"/hostname", nil)
+		req, err := http.NewRequestWithContext(h.ctx, http.MethodGet, "https://"+hostname+"/hostname", nil)
 		if err != nil {
 			return false, err
 		}
@@ -596,14 +666,22 @@ func (h *smokeHarness) waitPublicRoute() {
 }
 
 func (h *smokeHarness) assertAccessChallenged(path string) {
+	h.assertHostChallenged(h.cfg.accessHostname, path)
+}
+
+// assertHostChallenged polls a concrete host+path and requires Cloudflare Access
+// to challenge the request (redirect/401/403), never serving HTTP 200. It is the
+// host-parameterized core of assertAccessChallenged so a wildcard Access app can
+// be probed via a concrete subdomain it covers.
+func (h *smokeHarness) assertHostChallenged(hostname, path string) {
 	httpClient := smokeHTTPClient()
-	h.t.Logf("checking unauthenticated Access response for https://%s%s", h.cfg.accessHostname, path)
+	h.t.Logf("checking unauthenticated Access response for https://%s%s", hostname, path)
 	var lastStatus int
 	var lastLocation string
 	var lastBody string
 	var lastErr error
 	err := wait.PollUntilContextTimeout(h.ctx, 5*time.Second, accessHTTPTimeout, true, func(context.Context) (bool, error) {
-		req, err := http.NewRequestWithContext(h.ctx, http.MethodGet, "https://"+h.cfg.accessHostname+path, nil)
+		req, err := http.NewRequestWithContext(h.ctx, http.MethodGet, "https://"+hostname+path, nil)
 		if err != nil {
 			return false, err
 		}
@@ -668,6 +746,14 @@ func (h *smokeHarness) accessApplicationStatus(statuses []cfztv1alpha1.ExposureA
 }
 
 func (h *smokeHarness) assertAccessApplications(statuses []cfztv1alpha1.ExposureAccessApplicationStatus, policyID string) {
+	h.assertAccessApplicationsFor(accessExposure, h.cfg.accessHostname, statuses, policyID)
+}
+
+// assertAccessApplicationsFor verifies the root+admin Access app pair for a given
+// Exposure name and hostname. The hostname may be a wildcard ('*.example.com');
+// Cloudflare stores it verbatim as the app primary domain, so the assertions are
+// identical for concrete and wildcard hosts.
+func (h *smokeHarness) assertAccessApplicationsFor(exposureName, hostname string, statuses []cfztv1alpha1.ExposureAccessApplicationStatus, policyID string) {
 	if len(statuses) != 2 {
 		h.t.Fatalf("expected two Access application status entries, got %d: %v", len(statuses), statuses)
 	}
@@ -684,31 +770,31 @@ func (h *smokeHarness) assertAccessApplications(statuses []cfztv1alpha1.Exposure
 			h.t.Fatalf("Access application status entry %q missing policy hash: %v", status.Name, statuses)
 		}
 	}
-	apps, err := h.cf.AccessApplications().List(h.ctx, h.cfg.accessHostname)
+	apps, err := h.cf.AccessApplications().List(h.ctx, hostname)
 	if err != nil {
-		h.t.Fatalf("list Access applications for %s: %v", h.cfg.accessHostname, err)
+		h.t.Fatalf("list Access applications for %s: %v", hostname, err)
 	}
 	if len(apps) != 2 {
-		h.t.Fatalf("expected exactly two Access applications for %s, got %d: %v", h.cfg.accessHostname, len(apps), apps)
+		h.t.Fatalf("expected exactly two Access applications for %s, got %d: %v", hostname, len(apps), apps)
 	}
 	var rootApp *cloudflare.AccessApplication
 	var adminApp *cloudflare.AccessApplication
 	for i := range apps {
 		app := &apps[i]
 		switch app.Name {
-		case accessExposure + "-root-cfzt":
+		case exposureName + "-root-cfzt":
 			rootApp = app
-		case accessExposure + "-admin-cfzt":
+		case exposureName + "-admin-cfzt":
 			adminApp = app
 		}
 	}
 	if rootApp == nil || adminApp == nil {
-		h.t.Fatalf("expected root and admin Access applications for %s, got %v", h.cfg.accessHostname, apps)
+		h.t.Fatalf("expected root and admin Access applications for %s, got %v", hostname, apps)
 	}
-	assertEqual(h.t, "root Access application domain", h.cfg.accessHostname, rootApp.Domain)
-	assertEqual(h.t, "root Access application name", accessExposure+"-root-cfzt", rootApp.Name)
-	assertEqual(h.t, "admin Access application domain", h.cfg.accessHostname+"/admin", adminApp.Domain)
-	assertEqual(h.t, "admin Access application name", accessExposure+"-admin-cfzt", adminApp.Name)
+	assertEqual(h.t, "root Access application domain", hostname, rootApp.Domain)
+	assertEqual(h.t, "root Access application name", exposureName+"-root-cfzt", rootApp.Name)
+	assertEqual(h.t, "admin Access application domain", hostname+"/admin", adminApp.Domain)
+	assertEqual(h.t, "admin Access application name", exposureName+"-admin-cfzt", adminApp.Name)
 	for _, app := range []*cloudflare.AccessApplication{rootApp, adminApp} {
 		if len(app.PolicyUUIDs) != 1 || app.PolicyUUIDs[0] != policyID {
 			h.t.Fatalf("expected Access application %s policies [%s], got %v", app.Name, policyID, app.PolicyUUIDs)
@@ -857,6 +943,14 @@ func (h *smokeHarness) cleanup() {
 	h.waitObjectAbsent(cleanupCtx, &cfztv1alpha1.CloudflareExposure{}, types.NamespacedName{Name: accessExposure, Namespace: h.cfg.smokeNamespace}, cleanupWaitTimeout)
 	h.waitObjectAbsent(cleanupCtx, &cfztv1alpha1.CloudflareExposure{}, types.NamespacedName{Name: conflictExposure, Namespace: h.cfg.smokeNamespace}, cleanupWaitTimeout)
 
+	h.t.Log("cleanup: deleting wildcard CloudflareExposure resources")
+	for _, name := range []string{wildcardDNSExposure, wildcardAccExposure, overlapConcreteExp, overlapWildcardExp} {
+		h.deleteObject(cleanupCtx, &cfztv1alpha1.CloudflareExposure{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: h.cfg.smokeNamespace}})
+	}
+	for _, name := range []string{wildcardDNSExposure, wildcardAccExposure, overlapConcreteExp, overlapWildcardExp} {
+		h.waitObjectAbsent(cleanupCtx, &cfztv1alpha1.CloudflareExposure{}, types.NamespacedName{Name: name, Namespace: h.cfg.smokeNamespace}, cleanupWaitTimeout)
+	}
+
 	h.t.Log("cleanup: deleting CloudflareTunnelRoute resources")
 	h.deleteObject(cleanupCtx, &cfztv1alpha1.CloudflareTunnelRoute{ObjectMeta: metav1.ObjectMeta{Name: h.cfg.tunnelRoute}})
 	h.deleteObject(cleanupCtx, &cfztv1alpha1.CloudflareTunnelRoute{ObjectMeta: metav1.ObjectMeta{Name: h.cfg.tunnelRouteConflict}})
@@ -888,6 +982,11 @@ func (h *smokeHarness) cleanup() {
 	}
 	h.waitDNSAbsent(cleanupCtx, "public DNS record", h.cfg.publicHostname, cleanupWaitTimeout)
 	h.waitDNSAbsent(cleanupCtx, "access DNS record", h.cfg.accessHostname, cleanupWaitTimeout)
+	h.waitDNSAbsent(cleanupCtx, "wildcard DNS record", h.cfg.wildcardDNSHostname, cleanupWaitTimeout)
+	h.waitDNSAbsent(cleanupCtx, "wildcard access DNS record", h.cfg.wildcardAccessHostname, cleanupWaitTimeout)
+	h.waitAccessApplicationsAbsentFor(cleanupCtx, h.cfg.wildcardAccessHostname, cleanupWaitTimeout)
+	h.waitDNSAbsent(cleanupCtx, "overlap concrete DNS record", h.cfg.overlapConcreteHostname, cleanupWaitTimeout)
+	h.waitAccessApplicationsAbsentFor(cleanupCtx, h.cfg.overlapConcreteHostname, cleanupWaitTimeout)
 	h.waitTunnelRouteAbsent(cleanupCtx, "tunnel route", h.cfg.tunnelRouteCIDR, cleanupWaitTimeout)
 	h.waitAccessApplicationsAbsent(cleanupCtx, cleanupWaitTimeout)
 	h.waitAccessPolicyAbsent(cleanupCtx, cleanupWaitTimeout)
@@ -953,14 +1052,18 @@ func (h *smokeHarness) waitDNSCNAME(ctx context.Context, description, hostname, 
 }
 
 func (h *smokeHarness) waitAccessApplicationsAbsent(ctx context.Context, timeout time.Duration) {
-	h.waitForContext(ctx, "Access application absent", timeout, func() (bool, error) {
-		apps, err := h.cf.AccessApplications().List(ctx, h.cfg.accessHostname)
+	h.waitAccessApplicationsAbsentFor(ctx, h.cfg.accessHostname, timeout)
+}
+
+func (h *smokeHarness) waitAccessApplicationsAbsentFor(ctx context.Context, hostname string, timeout time.Duration) {
+	h.waitForContext(ctx, "Access application absent for "+hostname, timeout, func() (bool, error) {
+		apps, err := h.cf.AccessApplications().List(ctx, hostname)
 		if err != nil {
 			return false, err
 		}
 		return len(apps) == 0, nil
 	})
-	h.t.Log("Access application absent")
+	h.t.Log("Access application absent for " + hostname)
 }
 
 func (h *smokeHarness) waitAccessPolicyAbsent(ctx context.Context, timeout time.Duration) {

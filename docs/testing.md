@@ -80,7 +80,13 @@ There are three tests:
 13. Reapply no-op spec updates, restart the operator Deployment, and verify the Cloudflare object IDs, route hashes, Access application names/ordered domains/policy bindings, and Tunnel ingress document hash do not change. This includes round-tripping the root app and path app domains in Cloudflare's returned order.
 14. Create a foreign DNS CNAME for a conflict hostname, create a conflicting Exposure, and verify the operator reports `HostnameConflict` or `ForeignResource` without changing the foreign record.
 15. Create a foreign Cloudflare tunnel route, create a conflicting `CloudflareTunnelRoute`, and verify the operator reports `ForeignRoute` without changing the foreign route.
-16. Delete the Kubernetes resources, wait for finalizers, and verify managed DNS records, Access applications, Access policy, tunnel route, and tunnel are gone.
+16. Create a DNS-only wildcard Exposure `*.wildcard-<run>.<zone>`, verify the proxied wildcard CNAME and tunnel ingress, and route a concrete subdomain `foo.wildcard-<run>.<zone>` through the wildcard tunnel rule (HTTP 200 from the echo workload).
+17. Create a standalone wildcard self-hosted Access Exposure `*.access-wc-<run>.<zone>` (root + admin apps), verify the Access application IDs, domain hashes, and policy bindings, and require an Access challenge on a concrete subdomain it covers.
+18. Delete the Kubernetes resources, wait for finalizers, and verify managed DNS records, Access applications, Access policy, tunnel route, and tunnel are gone.
+
+The wildcard+concrete Access **overlap** case is gated behind `CF_SMOKE_WILDCARD_ACCESS_OVERLAP=1` (skipped by default). When enabled it creates an Access-enabled concrete Exposure, then an Access-enabled wildcard Exposure that covers it on the same tunnel, and asserts the operator fails closed with `Reason=HostnameConflict`. It deliberately asserts only the operator's guard, **never** Cloudflare's wildcard-vs-concrete Access match precedence, which is undocumented.
+
+Wildcard self-hosted Access has no Cloudflare plan or feature gate, so the standalone wildcard Access case runs by default. Cloudflare wildcards cover a single subdomain level only (not the apex or parent domains), and wildcarded subdomains cannot receive preemptive Access cookies.
 
 The harness uses a custom HTTP client that resolves through `1.1.1.1`, does not follow redirects, and disables TLS certificate verification. That keeps Access redirects visible and avoids local resolver cache surprises while Cloudflare DNS is settling.
 
@@ -130,7 +136,16 @@ public-<run-id>-<attempt>.<CF_TEST_ZONE>
 access-<run-id>-<attempt>.<CF_TEST_ZONE>
 conflict-<run-id>-<attempt>.<CF_TEST_ZONE>
 failover-<run-id>-<attempt>.<CF_TEST_ZONE>
+*.wildcard-<run-id>-<attempt>.<CF_TEST_ZONE>
+*.access-wc-<run-id>-<attempt>.<CF_TEST_ZONE>
+*.overlap-wc-<run-id>-<attempt>.<CF_TEST_ZONE>   # only when CF_SMOKE_WILDCARD_ACCESS_OVERLAP=1
 _cfzt-lease.<hash8(group)>.<CF_TEST_ZONE>
+```
+
+The wildcard cases require the test zone to permit wildcard DNS records and wildcard self-hosted Access applications (both available on all Cloudflare plans). Enable the env-gated wildcard+concrete Access overlap case with:
+
+```sh
+export CF_SMOKE_WILDCARD_ACCESS_OVERLAP="1"
 ```
 
 The default private-route smoke CIDRs are:
