@@ -1020,9 +1020,11 @@ GitHub Actions workflows live in `.github/workflows/`:
   - `make manifests generate` and `make helm-sync-crds`, then `git diff --exit-code` (fail if generated drift)
   - `make test` (unit + envtest via `setup-envtest`)
   - `helm lint charts/cfzt-operator`
+  - `make security` (Go module/source checks and dependency advisories)
+- `security.yaml` — scan both operator image architectures on PR/push and weekly; repeat source checks weekly and report upstream connector advisories separately. Connector findings remain visible without blocking the clean operator gates.
 - `live-smoke.yaml` — manually triggered live Cloudflare smoke against the current checkout and local chart.
 - `release.yaml` — manually triggered with a semver input:
-  - Run lint, generated-drift, unit/envtest, Helm lint, chart smoke, and live Cloudflare smoke before publishing.
+  - Run lint, generated-drift, unit/envtest, Helm lint, dependency/image security checks, chart smoke, and live Cloudflare smoke before publishing.
   - Build multi-arch image, push to `ghcr.io/andrewreid/cfzt-operator:<tag>` and `:latest` (latest only on non-prerelease releases).
   - Package chart, set `version` and `appVersion` from the requested version, push to `oci://ghcr.io/andrewreid/charts/cfzt-operator`.
   - Create the git tag and GitHub Release only after all gates pass.

@@ -108,8 +108,24 @@ lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
 lint-config: golangci-lint ## Verify golangci-lint linter configuration
 	"$(GOLANGCI_LINT)" config verify
 
+.PHONY: security security-go security-deps security-image security-connector
+security: security-go security-deps ## Check Go modules, source, and dependency advisories.
+
+security-go: govulncheck ## Check Go module versions and reachable vulnerable source.
+	GOVULNCHECK="$(GOVULNCHECK)" bash hack/security.sh go
+
+security-deps: ## Check dependency advisories with the pinned Trivy CLI.
+	TRIVY="$(TRIVY)" TRIVY_VERSION="$(TRIVY_VERSION)" bash hack/security.sh deps
+
+security-image: ## Check the operator image IMG for OS and library advisories.
+	TRIVY="$(TRIVY)" TRIVY_VERSION="$(TRIVY_VERSION)" bash hack/security.sh image "$(IMG)"
+
+security-connector: ## Report default cloudflared image advisories without blocking.
+	TRIVY="$(TRIVY)" TRIVY_VERSION="$(TRIVY_VERSION)" bash hack/security.sh connector
+
 .PHONY: pre-push
 pre-push: ## Run local checks before pushing a PR branch.
+	$(MAKE) security
 	$(MAKE) lint
 	$(MAKE) manifests generate
 	$(MAKE) helm-sync-crds
@@ -171,9 +187,17 @@ KIND ?= kind
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
+GOVULNCHECK ?= $(LOCALBIN)/govulncheck
+TRIVY ?= trivy
 
 ## Tool Versions
 CONTROLLER_TOOLS_VERSION ?= v0.20.1
+GOVULNCHECK_VERSION ?= v1.8.0
+TRIVY_VERSION ?= 0.75.0
+
+.PHONY: govulncheck
+govulncheck: $(LOCALBIN) ## Install the pinned Go vulnerability scanner.
+	$(call go-install-tool,$(GOVULNCHECK),golang.org/x/vuln/cmd/govulncheck,$(GOVULNCHECK_VERSION))
 
 #ENVTEST_VERSION is the version of controller-runtime release branch to fetch the envtest setup script (i.e. release-0.20)
 ENVTEST_VERSION ?= $(shell v='$(call gomodver,sigs.k8s.io/controller-runtime)'; \
