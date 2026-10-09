@@ -295,7 +295,7 @@ spec:
     manage: true                     # D2 default
   cloudflared:
     namespace: cfzt-system           # default cfzt-system
-    image: cloudflare/cloudflared:2025.1.0           # operator pins a default
+    # Omit image to use the operator's tested default; set it only to override.
     hostNetwork: false               # set true to reach LAN origins (D16)
     resources: {}
     nodeSelector: {}
