@@ -163,7 +163,7 @@ build_and_load_image() {
 
   local dockerfile
   dockerfile="$(mktemp "${TMPDIR:-/tmp}/cfzt-local-Dockerfile.XXXXXX")"
-  sed "s|^FROM --platform=\${BUILDPLATFORM} golang:1.25 AS builder$|FROM golang:1.25 AS builder|" \
+  sed 's/^FROM --platform=${BUILDPLATFORM} /FROM /' \
     "${repo_root}/Dockerfile" > "${dockerfile}"
   local build_status=0
   docker build \

@@ -344,8 +344,35 @@ Completed on 2026-06-02:
     chart already in sync; `make manifests generate` clean, `helm lint` clean,
     `go test ./...` green.
 
-Next: MVP slices 1-7 are in. Remaining work is release hardening, CI, and the
-new Slice 8 path-scoped Access application work below.
+Completed on 2026-10-09 — security maintenance:
+- Go 1.26.9 is aligned across CI and the Docker builder; both Docker bases
+  are pinned by verified multi-architecture digest. Kubernetes dependencies
+  remain on the 0.35 minor at 0.35.9 and controller-runtime remains 0.23.3.
+  Vulnerable gRPC, OpenTelemetry, CEL, and Go support libraries are updated;
+  CEL stays on the existing import path at 0.31.0. Test/metrics libraries
+  are refreshed. CRD schema and reconciliation ownership rules are unchanged.
+- Default cloudflared is 2026.10.0. It still carries upstream advisories from
+  the 8 October fixes; Linux AMD64 connector scans report them separately
+  (57 OS/library matches, including four high-severity matches). The default
+  image update uses the existing rolling DaemonSet path and preserves tokens.
+- Shared security targets gate Go modules/source, dependency advisories,
+  and operator image advisories. CI and publication use the same policy.
+  Weekly scans cover fresh advisories; Dependabot covers Go, Actions, and
+  Docker bases. Actions are pinned by commit; publication emits SBOM and
+  provenance and waits for native AMD64/ARM64 image scans before version tags.
+  Remote scans select their platform explicitly; release runs serialize
+  publication to prevent overlapping version reservations.
+- Local validation passed: unit/envtest, lint, generated drift, Helm 3.22
+  lint, source/module/dependency advisory gates, zero OS/Go findings in the
+  rebuilt ARM64 operator image, and real Cloudflare lifecycle including
+  public HTTP, path-scoped Access, idempotency/restart, conflicts, wildcards,
+  and cleanup. A vulnerable dependency baseline correctly failed the new
+  gate. GitHub execution, native AMD64 image validation, and published
+  SBOM/provenance verification remain CI checks.
+
+Next: validate the maintenance PR in CI, then prepare a patch release.
+Test a patched upstream cloudflared release when available. A Cloudflare SDK
+major migration or controller-runtime/Kubernetes minor upgrade is separate work.
 
 ## 3. Slice plan
 

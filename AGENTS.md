@@ -66,7 +66,7 @@ internal/workload/           cloudflared DaemonSet + token Secret
 cmd/                         manager entrypoint
 config/                      kubebuilder-generated kustomize
 charts/cfzt-operator/        hand-written Helm chart, OCI to GHCR (D14, D17)
-.github/workflows/           ci.yaml + live-smoke.yaml + release.yaml (D18)
+.github/workflows/           ci, security, dev artifacts, live smoke, release
 docs/plan.md                 implementation plan
 ```
 
@@ -83,6 +83,9 @@ rtk make manifests          # CRDs + RBAC from kubebuilder markers
 rtk make generate           # deepcopy etc.
 rtk make test               # unit + envtest (auto-installs setup-envtest)
 rtk make lint               # custom golangci-lint with module plugins
+rtk make security           # Go module/source + dependency advisory gates
+rtk make security-image IMG=controller:local # built operator image advisory gate
+rtk make security-connector # report upstream connector advisories
 rtk make docker-build       # operator image
 rtk make run                # run controller against current kubeconfig
 rtk make helm-package       # package OCI Helm chart (D14)
@@ -90,6 +93,8 @@ rtk helm lint charts/cfzt-operator
 ```
 
 Regenerate manifests + deepcopy after any `api/v1alpha1` change and commit the generated output — CI fails on uncommitted drift. `make test` handles envtest setup automatically; if it ever doesn't, fix the target.
+
+Security checks use pinned govulncheck and Trivy 0.75.0; install Trivy on PATH or pass `TRIVY=/path/to/trivy`. Operator dependency/image findings fail checks. Pass `SECURITY_IMAGE_PLATFORM=linux/amd64` or `linux/arm64` for remote image indexes; native CI gates select their matrix platform. Connector findings scan Linux AMD64 and are report-only because the image is built upstream; retain the full report and explain residual findings in maintenance PRs. Reports live in ignored `bin/security/`. Keep Go patch versions aligned in `go.mod` and the Docker builder; update the verified multi-arch digest when changing a Docker base pin.
 
 ---
 

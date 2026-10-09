@@ -436,6 +436,9 @@ make helm-sync-crds
 make pre-push
 make lint
 make test
+make security
+make security-image IMG=cfzt-operator:live-local
+make security-connector
 go test ./...
 go test -tags=live ./test/live -run '^TestCloudflarePreflight$' -count=1
 helm lint charts/cfzt-operator
@@ -444,7 +447,13 @@ helm template cfzt-operator charts/cfzt-operator --namespace cfzt-system
 
 Regenerate manifests, deepcopy, and Helm CRDs after any `api/v1alpha1` change, and commit generated output with the API change. CI fails on generated drift.
 
-`make pre-push` runs the local PR gate (`lint`, generation, Helm CRD sync, generated drift check, tests, and Helm lint). Live Cloudflare smoke tests, including the DR failover lifecycle, are documented in [docs/testing.md](docs/testing.md). Reconciliation design details are in [docs/architecture.md](docs/architecture.md).
+`make pre-push` runs the local PR gate (`lint`, generation, Helm CRD sync, generated drift check, tests, Helm lint, and security checks). Live Cloudflare smoke tests, including the DR failover lifecycle, are documented in [docs/testing.md](docs/testing.md). Reconciliation design details are in [docs/architecture.md](docs/architecture.md).
+
+Security checks require Trivy 0.75.0 on `PATH` (or `TRIVY=/path/to/trivy`). `make security` installs the pinned `govulncheck` and checks Go module versions, source paths, and dependency advisories. `make security-image IMG=<image>` checks the built operator image, including its OS packages. Findings fail these checks; reports are saved under `bin/security/`. CI runs source checks and scans both image architectures; release and development publication scan each image digest before publishing tags and charts. Weekly scans catch advisories published after a release. Dependabot opens weekly Go, Actions, and Docker base updates.
+
+For remote image indexes, set `SECURITY_IMAGE_PLATFORM=linux/amd64` or `linux/arm64` when running `make security-image`; native CI gates select their matrix platform explicitly.
+
+`make security-connector` reports advisories in the default upstream `cloudflared` image's Linux AMD64 variant separately. The `2026.10.0` release improves the unsupported `2025.1.0` default but predates the 8 October 2026 Go security fixes. Weekly workflow summaries and artifacts retain these upstream findings for review without blocking operator release gates. Update the connector pin after testing a patched upstream release. An operator upgrade rolls connectors using the default image; an explicit `spec.cloudflared.image` override remains in effect.
 
 ## License
 
