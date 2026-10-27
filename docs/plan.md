@@ -345,7 +345,7 @@ Completed on 2026-06-02:
     `go test ./...` green.
 
 Completed on 2026-10-09 — security maintenance:
-- Go 1.26.9 is aligned across CI and the Docker builder; both Docker bases
+- Go 1.26.10 is aligned across CI and the Docker builder; both Docker bases
   are pinned by verified multi-architecture digest. Kubernetes dependencies
   remain on the 0.35 minor at 0.35.9 and controller-runtime remains 0.23.3.
   Vulnerable gRPC, OpenTelemetry, CEL, and Go support libraries are updated;
