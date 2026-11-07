@@ -165,7 +165,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=operator-image-candidate
 
       - name: create chart smoke kind cluster
-        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        uses: helm/kind-action@ea822c7bf1874f08e5a491df991c228edffc3376 # v1.15.2
         with:
           cluster_name: ${{ env.KIND_CLUSTER }}
           wait: 120s
@@ -196,7 +196,7 @@ jobs:
         run: go test -tags=live ./test/live -run '^TestCloudflarePreflight$' -count=1 -timeout=5m -v
 
       - name: create live smoke kind cluster
-        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        uses: helm/kind-action@ea822c7bf1874f08e5a491df991c228edffc3376 # v1.15.2
         with:
           cluster_name: ${{ env.LIVE_KIND_CLUSTER }}
           wait: 120s
