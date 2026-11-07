@@ -191,5 +191,5 @@ type CloudflareAccessPolicyList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&CloudflareAccessPolicy{}, &CloudflareAccessPolicyList{})
+	register(&CloudflareAccessPolicy{}, &CloudflareAccessPolicyList{})
 }

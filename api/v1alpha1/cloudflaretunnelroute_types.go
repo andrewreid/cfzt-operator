@@ -100,5 +100,5 @@ type CloudflareTunnelRouteList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&CloudflareTunnelRoute{}, &CloudflareTunnelRouteList{})
+	register(&CloudflareTunnelRoute{}, &CloudflareTunnelRouteList{})
 }
