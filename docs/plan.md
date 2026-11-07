@@ -370,9 +370,18 @@ Completed on 2026-10-09 — security maintenance:
   gate. GitHub execution, native AMD64 image validation, and published
   SBOM/provenance verification remain CI checks.
 
-Next: validate the maintenance PR in CI, then prepare a patch release.
+Completed on 2026-11-07 — dependency refresh for 0.4.0:
+- Kubernetes libraries 0.37.2 (envtest follows: Kubernetes 1.37),
+  controller-runtime 0.25.2, ginkgo 2.34.0; Go stays at 1.26.10. `api/v1alpha1`
+  now registers types through `k8s.io/apimachinery` `runtime.SchemeBuilder`
+  because controller-runtime's `pkg/scheme` is deprecated. `docker/login-action`
+  4.7.0. Unit/envtest and govulncheck pass; CRDs and chart are unchanged.
+
+Next: validate the refresh PR in CI, then prepare the 0.4.0 release. A Go
+1.27 toolchain move needs a newer golangci-lint and lint cleanup; it is
+separate work.
 Test a patched upstream cloudflared release when available. A Cloudflare SDK
-major migration or controller-runtime/Kubernetes minor upgrade is separate work.
+major migration is separate work.
 
 ## 3. Slice plan
 

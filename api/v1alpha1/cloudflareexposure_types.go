@@ -347,5 +347,5 @@ type CloudflareExposureList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&CloudflareExposure{}, &CloudflareExposureList{})
+	register(&CloudflareExposure{}, &CloudflareExposureList{})
 }

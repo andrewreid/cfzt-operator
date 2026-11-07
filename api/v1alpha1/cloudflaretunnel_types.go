@@ -167,5 +167,5 @@ type CloudflareTunnelList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&CloudflareTunnel{}, &CloudflareTunnelList{})
+	register(&CloudflareTunnel{}, &CloudflareTunnelList{})
 }
