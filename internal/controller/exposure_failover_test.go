@@ -39,29 +39,25 @@ var _ = Describe("CloudflareExposure failover role gate", func() {
 
 	BeforeEach(func() {
 		ctx = context.Background()
-		ensureNamespace(ctx, "cfzt-system")
+		ensureNamespace(ctx, testCredsNamespace)
 		ensureNamespace(ctx, namespace)
 		fakeCF = cloudflare.NewFake()
 		fakeCF.AddZone(zoneID, zoneName)
 		exposureRecorder = record.NewFakeRecorder(1024)
 		tunnelReconciler = &CloudflareTunnelReconciler{
-			Base: Base{
-				Client:              indexedClient,
-				Scheme:              indexedClient.Scheme(),
-				NewCloudflareClient: newFakeCloudflareClient(indexedClient, fakeCF),
-				Recorder:            record.NewFakeRecorder(1024),
-			},
+			Client:              indexedClient,
+			Scheme:              indexedClient.Scheme(),
+			NewCloudflareClient: newFakeCloudflareClient(indexedClient, fakeCF),
+			Recorder:            record.NewFakeRecorder(1024),
 		}
 		testNow = time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
 		exposureRec = &CloudflareExposureReconciler{
-			Base: Base{
-				Client:              indexedClient,
-				Scheme:              indexedClient.Scheme(),
-				NewCloudflareClient: newFakeCloudflareClient(indexedClient, fakeCF),
-				Recorder:            exposureRecorder,
-			},
-			SiteID: siteSelf,
-			Now:    func() time.Time { return testNow },
+			Client:              indexedClient,
+			Scheme:              indexedClient.Scheme(),
+			NewCloudflareClient: newFakeCloudflareClient(indexedClient, fakeCF),
+			Recorder:            exposureRecorder,
+			SiteID:              siteSelf,
+			Now:                 func() time.Time { return testNow },
 		}
 	})
 
@@ -348,19 +344,19 @@ var _ = Describe("CloudflareExposure failover role gate", func() {
 		exposure.Spec.Access.Enabled = true
 		exposure.Spec.Access.Applications = []cfztv1alpha1.AccessApplicationTarget{
 			{
-				Name:    "root",
+				Name:    testRootName,
 				Domains: []cfztv1alpha1.AccessApplicationDomain{cfztv1alpha1.AccessApplicationDomain("fo-access.example.com")},
 				Policies: []cfztv1alpha1.AccessApplicationPolicyBinding{{
-					PolicyRef: cfztv1alpha1.AccessPolicyRef{UUID: "00000000-0000-4000-8000-000000000001"},
+					PolicyRef: cfztv1alpha1.AccessPolicyRef{UUID: testUUID1},
 				}},
 			},
 			{
-				Name: "admin",
+				Name: testAdminName,
 				Domains: []cfztv1alpha1.AccessApplicationDomain{
 					cfztv1alpha1.AccessApplicationDomain("fo-access.example.com/admin"),
 				},
 				Policies: []cfztv1alpha1.AccessApplicationPolicyBinding{{
-					PolicyRef: cfztv1alpha1.AccessPolicyRef{UUID: "00000000-0000-4000-8000-000000000001"},
+					PolicyRef: cfztv1alpha1.AccessPolicyRef{UUID: testUUID1},
 				}},
 			},
 		}
@@ -377,14 +373,12 @@ var _ = Describe("CloudflareExposure failover role gate", func() {
 		Expect(apps).To(HaveLen(2))
 
 		standbyRec := &CloudflareExposureReconciler{
-			Base: Base{
-				Client:              indexedClient,
-				Scheme:              indexedClient.Scheme(),
-				NewCloudflareClient: newFakeCloudflareClient(indexedClient, fakeCF),
-				Recorder:            record.NewFakeRecorder(1024),
-			},
-			SiteID: sitePeer,
-			Now:    func() time.Time { return testNow },
+			Client:              indexedClient,
+			Scheme:              indexedClient.Scheme(),
+			NewCloudflareClient: newFakeCloudflareClient(indexedClient, fakeCF),
+			Recorder:            record.NewFakeRecorder(1024),
+			SiteID:              sitePeer,
+			Now:                 func() time.Time { return testNow },
 		}
 		seedLeasePeerOverwrite("fo-access-grp", siteSelf, fetchTunnel(ctx, tunnel.Name).Status.TunnelId, testNow.Add(5*time.Minute))
 		reconcileExposure(ctx, standbyRec, fetchExposure(ctx, exposure.Name))
@@ -402,19 +396,19 @@ var _ = Describe("CloudflareExposure failover role gate", func() {
 		exposure.Spec.Access.Enabled = true
 		exposure.Spec.Access.Applications = []cfztv1alpha1.AccessApplicationTarget{
 			{
-				Name:    "root",
+				Name:    testRootName,
 				Domains: []cfztv1alpha1.AccessApplicationDomain{cfztv1alpha1.AccessApplicationDomain("fo-remove-app.example.com")},
 				Policies: []cfztv1alpha1.AccessApplicationPolicyBinding{{
-					PolicyRef: cfztv1alpha1.AccessPolicyRef{UUID: "00000000-0000-4000-8000-000000000001"},
+					PolicyRef: cfztv1alpha1.AccessPolicyRef{UUID: testUUID1},
 				}},
 			},
 			{
-				Name: "admin",
+				Name: testAdminName,
 				Domains: []cfztv1alpha1.AccessApplicationDomain{
 					cfztv1alpha1.AccessApplicationDomain("fo-remove-app.example.com/admin"),
 				},
 				Policies: []cfztv1alpha1.AccessApplicationPolicyBinding{{
-					PolicyRef: cfztv1alpha1.AccessPolicyRef{UUID: "00000000-0000-4000-8000-000000000001"},
+					PolicyRef: cfztv1alpha1.AccessPolicyRef{UUID: testUUID1},
 				}},
 			},
 		}
@@ -438,7 +432,7 @@ var _ = Describe("CloudflareExposure failover role gate", func() {
 
 		refreshed := fetchExposure(ctx, exposure.Name)
 		Expect(refreshed.Status.Cloudflare.AccessApplications).To(HaveLen(1))
-		Expect(refreshed.Status.Cloudflare.AccessApplications[0].Name).To(Equal("root"))
+		Expect(refreshed.Status.Cloudflare.AccessApplications[0].Name).To(Equal(testRootName))
 		appsAfter, err := fakeCF.AccessApplications().List(ctx, exposure.Spec.Hostname)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(appsAfter).To(HaveLen(1))
@@ -606,12 +600,12 @@ func createFailoverExposure(ctx context.Context, name, tunnelName, hostname, gro
 
 func createFailoverExposureInNamespace(ctx context.Context, namespace, name, tunnelName, hostname, group string) *cfztv1alpha1.CloudflareExposure {
 	exposure := &cfztv1alpha1.CloudflareExposure{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Name: name, Namespace: namespace,
 		Spec: cfztv1alpha1.CloudflareExposureSpec{
 			Hostname:  hostname,
 			TunnelRef: cfztv1alpha1.TunnelRef{Name: tunnelName},
 			Origin: &cfztv1alpha1.OriginSpec{
-				Protocol: "http",
+				Protocol: testProtocolHTTP,
 				Host:     name + "." + namespace + ".svc.cluster.local",
 				Port:     8096,
 			},

@@ -130,7 +130,7 @@ func (r *CloudflareAccessPolicyReconciler) Reconcile(ctx context.Context, req ct
 		if statusErr := r.setPolicyStatus(ctx, &policy, "", "", references, false, ReasonReconciled, "tracked Cloudflare Access policy no longer exists, recreating"); statusErr != nil {
 			return ctrl.Result{}, statusErr
 		}
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: immediateRequeueDelay}, nil
 	}
 	if err != nil {
 		if errors.Is(err, cloudflare.ErrUnsupportedAccessRule) {

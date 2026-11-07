@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	cfztv1alpha1 "github.com/andrewreid/cfzt-operator/api/v1alpha1"
 	"github.com/andrewreid/cfzt-operator/internal/naming"
@@ -23,12 +22,10 @@ func TokenChecksum(token string) string {
 // TokenSecret returns the operator-managed Secret storing the tunnel token.
 func TokenSecret(tunnel *cfztv1alpha1.CloudflareTunnel, token string) *corev1.Secret {
 	return &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      naming.TokenSecretName(tunnel.Name),
-			Namespace: tunnel.Spec.Cloudflared.Namespace,
-			Labels:    Labels(tunnel.Name),
-		},
-		Type: corev1.SecretTypeOpaque,
+		Name:      naming.TokenSecretName(tunnel.Name),
+		Namespace: tunnel.Spec.Cloudflared.Namespace,
+		Labels:    Labels(tunnel.Name),
+		Type:      corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
 			naming.TokenSecretKey: []byte(token),
 		},

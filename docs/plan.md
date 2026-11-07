@@ -377,9 +377,21 @@ Completed on 2026-11-07 — dependency refresh for 0.4.0:
   because controller-runtime's `pkg/scheme` is deprecated. `docker/login-action`
   4.7.0. Unit/envtest and govulncheck pass; CRDs and chart are unchanged.
 
-Next: validate the refresh PR in CI, then prepare the 0.4.0 release. A Go
-1.27 toolchain move needs a newer golangci-lint and lint cleanup; it is
-separate work.
+Completed on 2026-11-07 — Go 1.27 toolchain move:
+- Go 1.27.3 in `go.mod` and the Docker builder (verified multi-arch digest,
+  linux/amd64 + linux/arm64). golangci-lint v2.14.0 (first release able to
+  analyze Go 1.27) in the Makefile and `.custom-gcl.yml`; lint settings are
+  unchanged and no suppressions were added. Findings fixed in code: modernize
+  rewrites (embedded-field literals), goconst named test constants, and the
+  two deprecated Cloudflare Access `self_hosted_domains` request fields now
+  send `destinations` (public type, same domain/path URIs); responses are read
+  from `destinations` first with `self_hosted_domains` then the primary domain
+  as fallbacks. Live behaviour against Cloudflare is not verified locally;
+  confirm with the live smoke workflow. Deprecated
+  `ctrl.Result{Requeue: true}` became `RequeueAfter: 5ms` (forgets rate-limit
+  backoff; both sites are one-shot follow-ups).
+
+Next: validate the refresh PR in CI, then prepare the 0.4.0 release.
 Test a patched upstream cloudflared release when available. A Cloudflare SDK
 major migration is separate work.
 

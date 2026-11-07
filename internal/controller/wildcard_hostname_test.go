@@ -10,11 +10,11 @@ func TestCanonicalAccessApplicationDomainWildcard(t *testing.T) {
 		want     string
 		wantErr  bool
 	}{
-		{"wildcard bare host", "*.example.com", "*.example.com", "*.example.com", false},
-		{"wildcard path", "*.example.com", "*.example.com/admin", "*.example.com/admin", false},
-		{"wildcard star path canonicalizes to host", "*.example.com", "*.example.com/*", "*.example.com", false},
-		{"domain outside wildcard host rejected", "*.example.com", "other.example.com", "", true},
-		{"scheme rejected under wildcard host", "*.example.com", "https://*.example.com", "", true},
+		{"wildcard bare host", testWildcardHostname, testWildcardHostname, testWildcardHostname, false},
+		{"wildcard path", testWildcardHostname, "*.example.com/admin", "*.example.com/admin", false},
+		{"wildcard star path canonicalizes to host", testWildcardHostname, "*.example.com/*", testWildcardHostname, false},
+		{"domain outside wildcard host rejected", testWildcardHostname, "other.example.com", "", true},
+		{"scheme rejected under wildcard host", testWildcardHostname, "https://*.example.com", "", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -41,15 +41,15 @@ func TestWildcardCoversHost(t *testing.T) {
 		host     string
 		want     bool
 	}{
-		{"*.example.com", "foo.example.com", true},
-		{"*.example.com", "bar.example.com", true},
-		{"*.example.com", "foo.bar.example.com", false}, // single-leading-label only
-		{"*.example.com", "example.com", false},         // apex not covered
+		{testWildcardHostname, testFooHostname, true},
+		{testWildcardHostname, "bar.example.com", true},
+		{testWildcardHostname, "foo.bar.example.com", false}, // single-leading-label only
+		{testWildcardHostname, testZoneName, false},          // apex not covered
 		{"*.foo.example.com", "bar.foo.example.com", true},
-		{"*.foo.example.com", "foo.example.com", false},
-		{"*.example.com", "*.example.com", false}, // host is itself a wildcard
-		{"example.com", "foo.example.com", false}, // not a wildcard
-		{"*.example.com", "fooexample.com", false},
+		{"*.foo.example.com", testFooHostname, false},
+		{testWildcardHostname, testWildcardHostname, false}, // host is itself a wildcard
+		{testZoneName, testFooHostname, false},              // not a wildcard
+		{testWildcardHostname, "fooexample.com", false},
 	}
 	for _, tc := range cases {
 		if got := wildcardCoversHost(tc.wildcard, tc.host); got != tc.want {

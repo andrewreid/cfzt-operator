@@ -5,7 +5,6 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -22,12 +21,12 @@ var _ = Describe("Mapper helper", func() {
 		})
 
 		requests := mapFunc(context.Background(), &cfztv1alpha1.CloudflareTunnel{
-			ObjectMeta: metav1.ObjectMeta{Name: "mapped-tunnel"},
+			Name: testMappedTunnelName,
 		})
 
 		Expect(requests).To(ConsistOf(
-			reconcile.Request{NamespacedName: types.NamespacedName{Name: "mapped-tunnel"}},
-			reconcile.Request{NamespacedName: types.NamespacedName{Namespace: "shadow", Name: "mapped-tunnel-shadow"}},
+			reconcile.Request{Name: testMappedTunnelName},
+			reconcile.Request{Namespace: "shadow", Name: "mapped-tunnel-shadow"},
 		))
 	})
 })

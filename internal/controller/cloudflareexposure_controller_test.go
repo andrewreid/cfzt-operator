@@ -42,42 +42,36 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		policyReconciler    *CloudflareAccessPolicyReconciler
 		tunnelRecorder      *record.FakeRecorder
 		exposureRecorder    *record.FakeRecorder
-		defaultPolicyUUID   = "00000000-0000-4000-8000-000000000001"
-		defaultTunnelName   = "homelab"
+		defaultPolicyUUID   = testUUID1
+		defaultTunnelName   = testTunnelName
 		defaultTunnelCFName = "homelab-rke2"
 	)
 
 	BeforeEach(func() {
 		ctx = context.Background()
-		ensureNamespace(ctx, "cfzt-system")
+		ensureNamespace(ctx, testCredsNamespace)
 		ensureNamespace(ctx, namespace)
 		fakeCF = cloudflare.NewFake()
-		fakeCF.AddZone("zone-example", "example.com")
+		fakeCF.AddZone("zone-example", testZoneName)
 		tunnelRecorder = record.NewFakeRecorder(1024)
 		exposureRecorder = record.NewFakeRecorder(1024)
 		tunnelReconciler = &CloudflareTunnelReconciler{
-			Base: Base{
-				Client:              indexedClient,
-				Scheme:              indexedClient.Scheme(),
-				NewCloudflareClient: newFakeCloudflareClient(indexedClient, fakeCF),
-				Recorder:            tunnelRecorder,
-			},
+			Client:              indexedClient,
+			Scheme:              indexedClient.Scheme(),
+			NewCloudflareClient: newFakeCloudflareClient(indexedClient, fakeCF),
+			Recorder:            tunnelRecorder,
 		}
 		exposureReconciler = &CloudflareExposureReconciler{
-			Base: Base{
-				Client:              indexedClient,
-				Scheme:              indexedClient.Scheme(),
-				NewCloudflareClient: newFakeCloudflareClient(indexedClient, fakeCF),
-				Recorder:            exposureRecorder,
-			},
+			Client:              indexedClient,
+			Scheme:              indexedClient.Scheme(),
+			NewCloudflareClient: newFakeCloudflareClient(indexedClient, fakeCF),
+			Recorder:            exposureRecorder,
 		}
 		policyReconciler = &CloudflareAccessPolicyReconciler{
-			Base: Base{
-				Client:              indexedClient,
-				Scheme:              indexedClient.Scheme(),
-				NewCloudflareClient: newFakeCloudflareClient(indexedClient, fakeCF),
-				Recorder:            newTestRecorder(),
-			},
+			Client:              indexedClient,
+			Scheme:              indexedClient.Scheme(),
+			NewCloudflareClient: newFakeCloudflareClient(indexedClient, fakeCF),
+			Recorder:            newTestRecorder(),
 		}
 	})
 
@@ -125,7 +119,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		Expect(apps[0].Name).To(Equal("jellyfin-root-cfzt"))
 		Expect(apps[0].Domains).To(Equal([]string{"jellyfin.example.com"}))
 		Expect(apps[0].PolicyUUIDs).To(Equal([]string{defaultPolicyUUID}))
-		Expect(current.Status.Cloudflare.AccessApplications[0].Name).To(Equal("root"))
+		Expect(current.Status.Cloudflare.AccessApplications[0].Name).To(Equal(testRootName))
 		for _, tag := range apps[0].Tags {
 			Expect(fakeCF.AccessTags().Delete(ctx, tag)).To(Succeed())
 		}
@@ -272,14 +266,14 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		exposure := createExposure(ctx, "multi-access", tunnel.Name, "multi-access.example.com", true)
 		exposure.Spec.Access.Applications = []cfztv1alpha1.AccessApplicationTarget{
 			{
-				Name:    "root",
+				Name:    testRootName,
 				Domains: []cfztv1alpha1.AccessApplicationDomain{cfztv1alpha1.AccessApplicationDomain("multi-access.example.com")},
 				Policies: []cfztv1alpha1.AccessApplicationPolicyBinding{{
 					PolicyRef: cfztv1alpha1.AccessPolicyRef{UUID: defaultPolicyUUID},
 				}},
 			},
 			{
-				Name: "admin",
+				Name: testAdminName,
 				Domains: []cfztv1alpha1.AccessApplicationDomain{
 					cfztv1alpha1.AccessApplicationDomain("multi-access.example.com/admin"),
 				},
@@ -299,7 +293,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		Expect([]string{
 			current.Status.Cloudflare.AccessApplications[0].Name,
 			current.Status.Cloudflare.AccessApplications[1].Name,
-		}).To(Equal([]string{"admin", "root"}))
+		}).To(Equal([]string{testAdminName, testRootName}))
 		for _, statusEntry := range current.Status.Cloudflare.AccessApplications {
 			Expect(statusEntry.AppID).NotTo(BeEmpty())
 			Expect(statusEntry.CanonicalDomainHash).NotTo(BeEmpty())
@@ -322,14 +316,14 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		exposure := createExposure(ctx, "toggleauth", tunnel.Name, "toggleauth.example.com", true)
 		exposure.Spec.Access.Applications = []cfztv1alpha1.AccessApplicationTarget{
 			{
-				Name:    "root",
+				Name:    testRootName,
 				Domains: []cfztv1alpha1.AccessApplicationDomain{cfztv1alpha1.AccessApplicationDomain("toggleauth.example.com")},
 				Policies: []cfztv1alpha1.AccessApplicationPolicyBinding{{
 					PolicyRef: cfztv1alpha1.AccessPolicyRef{UUID: defaultPolicyUUID},
 				}},
 			},
 			{
-				Name: "admin",
+				Name: testAdminName,
 				Domains: []cfztv1alpha1.AccessApplicationDomain{
 					cfztv1alpha1.AccessApplicationDomain("toggleauth.example.com/admin"),
 				},
@@ -405,21 +399,19 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		exposure := createExposure(ctx, "dns-write-failure", tunnel.Name, "dns-write-failure.example.com", false)
 		writeErr := errors.New("dns create failed")
 		reconciler := &CloudflareExposureReconciler{
-			Base: Base{
-				Client: indexedClient,
-				Scheme: indexedClient.Scheme(),
-				NewCloudflareClient: func(ctx context.Context, ref CredentialsRef) (cloudflare.Client, error) {
-					client, err := newFakeCloudflareClient(indexedClient, fakeCF)(ctx, ref)
-					if err != nil {
-						return nil, err
-					}
-					return dnsCreateErrorClient{Client: client, err: writeErr}, nil
-				},
-				Recorder: newTestRecorder(),
+			Client: indexedClient,
+			Scheme: indexedClient.Scheme(),
+			NewCloudflareClient: func(ctx context.Context, ref CredentialsRef) (cloudflare.Client, error) {
+				client, err := newFakeCloudflareClient(indexedClient, fakeCF)(ctx, ref)
+				if err != nil {
+					return nil, err
+				}
+				return dnsCreateErrorClient{Client: client, err: writeErr}, nil
 			},
+			Recorder: newTestRecorder(),
 		}
 
-		result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: exposure.Namespace, Name: exposure.Name}})
+		result, err := reconciler.Reconcile(ctx, reconcile.Request{Namespace: exposure.Namespace, Name: exposure.Name})
 
 		Expect(result).To(Equal(reconcile.Result{}))
 		Expect(err).To(MatchError(ContainSubstring(ReasonDNSWriteFailed)))
@@ -430,23 +422,23 @@ var _ = Describe("CloudflareExposure Controller", func() {
 
 	It("TestExposureIndexedHostnameConflictLookup", func() {
 		first := &cfztv1alpha1.CloudflareExposure{
-			ObjectMeta: metav1.ObjectMeta{Name: "indexed-one", Namespace: namespace, UID: types.UID("indexed-one")},
+			Name: "indexed-one", Namespace: namespace, UID: types.UID("indexed-one"),
 			Spec: cfztv1alpha1.CloudflareExposureSpec{
-				Hostname:  "indexed.example.com",
+				Hostname:  testIndexedHostname,
 				TunnelRef: cfztv1alpha1.TunnelRef{Name: "indexed-tunnel"},
 			},
 		}
 		second := &cfztv1alpha1.CloudflareExposure{
-			ObjectMeta: metav1.ObjectMeta{Name: "indexed-two", Namespace: namespace, UID: types.UID("indexed-two")},
+			Name: "indexed-two", Namespace: namespace, UID: types.UID("indexed-two"),
 			Spec: cfztv1alpha1.CloudflareExposureSpec{
-				Hostname:  "indexed.example.com",
+				Hostname:  testIndexedHostname,
 				TunnelRef: cfztv1alpha1.TunnelRef{Name: "indexed-tunnel"},
 			},
 		}
 		otherTunnel := &cfztv1alpha1.CloudflareExposure{
-			ObjectMeta: metav1.ObjectMeta{Name: "indexed-other-tunnel", Namespace: namespace, UID: types.UID("indexed-other")},
+			Name: "indexed-other-tunnel", Namespace: namespace, UID: types.UID("indexed-other"),
 			Spec: cfztv1alpha1.CloudflareExposureSpec{
-				Hostname:  "indexed.example.com",
+				Hostname:  testIndexedHostname,
 				TunnelRef: cfztv1alpha1.TunnelRef{Name: "other-tunnel"},
 			},
 		}
@@ -458,7 +450,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 			}).
 			WithObjects(first, second, otherTunnel).
 			Build()
-		localReconciler := &CloudflareExposureReconciler{Base: Base{Client: localClient}}
+		localReconciler := &CloudflareExposureReconciler{Client: localClient}
 
 		conflict, err := localReconciler.hasDuplicateHostname(ctx, first)
 		Expect(err).NotTo(HaveOccurred())
@@ -522,14 +514,14 @@ var _ = Describe("CloudflareExposure Controller", func() {
 
 	It("TestExposureAccessApplicationsDuplicateCanonicalCoverageRejected", func() {
 		exposure := &cfztv1alpha1.CloudflareExposure{
-			ObjectMeta: metav1.ObjectMeta{Name: "dup-canon", Namespace: namespace, UID: types.UID("dup-canon")},
+			Name: "dup-canon", Namespace: namespace, UID: types.UID("dup-canon"),
 			Spec: cfztv1alpha1.CloudflareExposureSpec{
 				Hostname: "dup-canon.example.com",
 				Access: cfztv1alpha1.AccessSpec{
 					Enabled: true,
 					Applications: []cfztv1alpha1.AccessApplicationTarget{
 						{
-							Name:    "root",
+							Name:    testRootName,
 							Domains: []cfztv1alpha1.AccessApplicationDomain{cfztv1alpha1.AccessApplicationDomain("dup-canon.example.com")},
 							Policies: []cfztv1alpha1.AccessApplicationPolicyBinding{{
 								PolicyRef: cfztv1alpha1.AccessPolicyRef{UUID: defaultPolicyUUID},
@@ -624,14 +616,14 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		exposure := createExposure(ctx, "delete-me", tunnel.Name, "delete-me.example.com", true)
 		exposure.Spec.Access.Applications = []cfztv1alpha1.AccessApplicationTarget{
 			{
-				Name:    "root",
+				Name:    testRootName,
 				Domains: []cfztv1alpha1.AccessApplicationDomain{cfztv1alpha1.AccessApplicationDomain("delete-me.example.com")},
 				Policies: []cfztv1alpha1.AccessApplicationPolicyBinding{{
 					PolicyRef: cfztv1alpha1.AccessPolicyRef{UUID: defaultPolicyUUID},
 				}},
 			},
 			{
-				Name: "admin",
+				Name: testAdminName,
 				Domains: []cfztv1alpha1.AccessApplicationDomain{
 					cfztv1alpha1.AccessApplicationDomain("delete-me.example.com/admin"),
 				},
@@ -692,10 +684,10 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		current := fetchExposure(ctx, exposure.Name)
 		Expect(current.Status.Cloudflare.AccessApplications).To(HaveLen(1))
 		Expect(current.Status.Cloudflare.DnsRecordId).NotTo(BeEmpty())
-		Expect(k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "cloudflare-credentials", Namespace: "cfzt-system"}})).To(Succeed())
+		Expect(k8sClient.Delete(ctx, &corev1.Secret{Name: testCredsSecretName, Namespace: testCredsNamespace})).To(Succeed())
 
 		Expect(k8sClient.Delete(ctx, current)).To(Succeed())
-		result, err := exposureReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: current.Namespace, Name: current.Name}})
+		result, err := exposureReconciler.Reconcile(ctx, reconcile.Request{Namespace: current.Namespace, Name: current.Name})
 
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.RequeueAfter).NotTo(BeZero())
@@ -722,7 +714,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		Expect(current.Finalizers).To(ContainElement(naming.Finalizer))
 		Expect(current.Status.Cloudflare.AccessApplications).To(BeEmpty())
 		Expect(current.Status.Cloudflare.DnsRecordId).To(BeEmpty())
-		Expect(k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "cloudflare-credentials", Namespace: "cfzt-system"}})).To(Succeed())
+		Expect(k8sClient.Delete(ctx, &corev1.Secret{Name: testCredsSecretName, Namespace: testCredsNamespace})).To(Succeed())
 
 		Expect(k8sClient.Delete(ctx, current)).To(Succeed())
 		reconcileExposure(ctx, exposureReconciler, current)
@@ -748,7 +740,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 
 	It("TestExposureEnqueuesTunnel", func() {
 		exposure := &cfztv1alpha1.CloudflareExposure{
-			Spec: cfztv1alpha1.CloudflareExposureSpec{TunnelRef: cfztv1alpha1.TunnelRef{Name: "mapped-tunnel"}},
+			Spec: cfztv1alpha1.CloudflareExposureSpec{TunnelRef: cfztv1alpha1.TunnelRef{Name: testMappedTunnelName}},
 		}
 		requests := enqueueNamed(func(exposure *cfztv1alpha1.CloudflareExposure) []types.NamespacedName {
 			if exposure.Spec.TunnelRef.Name == "" {
@@ -757,7 +749,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 			return []types.NamespacedName{{Name: exposure.Spec.TunnelRef.Name}}
 		})(ctx, exposure)
 		Expect(requests).To(HaveLen(1))
-		Expect(requests[0].Name).To(Equal("mapped-tunnel"))
+		Expect(requests[0].Name).To(Equal(testMappedTunnelName))
 	})
 
 	It("TestTunnelStatusUpdatePropagatesToExposures", func() {
@@ -778,8 +770,8 @@ var _ = Describe("CloudflareExposure Controller", func() {
 				return requests
 			})(ctx, tunnel)
 		}).Should(ConsistOf(
-			reconcile.Request{NamespacedName: types.NamespacedName{Namespace: first.Namespace, Name: first.Name}},
-			reconcile.Request{NamespacedName: types.NamespacedName{Namespace: second.Namespace, Name: second.Name}},
+			reconcile.Request{Namespace: first.Namespace, Name: first.Name},
+			reconcile.Request{Namespace: second.Namespace, Name: second.Name},
 		))
 	})
 
@@ -791,7 +783,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		exposure := createExposure(ctx, "named-policy", tunnel.Name, "named-policy.example.com", true)
 		exposure.Spec.Access.Applications = []cfztv1alpha1.AccessApplicationTarget{
 			{
-				Name:    "root",
+				Name:    testRootName,
 				Domains: []cfztv1alpha1.AccessApplicationDomain{cfztv1alpha1.AccessApplicationDomain("named-policy.example.com")},
 				Policies: []cfztv1alpha1.AccessApplicationPolicyBinding{
 					{PolicyRef: cfztv1alpha1.AccessPolicyRef{Name: policy.Name}},
@@ -799,7 +791,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 				},
 			},
 			{
-				Name: "admin",
+				Name: testAdminName,
 				Domains: []cfztv1alpha1.AccessApplicationDomain{
 					cfztv1alpha1.AccessApplicationDomain("named-policy.example.com/admin"),
 				},
@@ -820,7 +812,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		Expect([]string{
 			current.Status.Cloudflare.AccessApplications[0].Name,
 			current.Status.Cloudflare.AccessApplications[1].Name,
-		}).To(Equal([]string{"admin", "root"}))
+		}).To(Equal([]string{testAdminName, testRootName}))
 		apps, err := fakeCF.AccessApplications().List(ctx, exposure.Spec.Hostname)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(apps).To(HaveLen(2))
@@ -837,14 +829,14 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		exposure := createExposure(ctx, "policy-drift", tunnel.Name, "policy-drift.example.com", true)
 		exposure.Spec.Access.Applications = []cfztv1alpha1.AccessApplicationTarget{
 			{
-				Name:    "root",
+				Name:    testRootName,
 				Domains: []cfztv1alpha1.AccessApplicationDomain{cfztv1alpha1.AccessApplicationDomain("policy-drift.example.com")},
 				Policies: []cfztv1alpha1.AccessApplicationPolicyBinding{
 					{PolicyRef: cfztv1alpha1.AccessPolicyRef{UUID: defaultPolicyUUID}},
 				},
 			},
 			{
-				Name: "admin",
+				Name: testAdminName,
 				Domains: []cfztv1alpha1.AccessApplicationDomain{
 					cfztv1alpha1.AccessApplicationDomain("policy-drift.example.com/admin"),
 					cfztv1alpha1.AccessApplicationDomain("policy-drift.example.com/admin/logs"),
@@ -884,7 +876,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		Expect([]string{
 			current.Status.Cloudflare.AccessApplications[0].Name,
 			current.Status.Cloudflare.AccessApplications[1].Name,
-		}).To(Equal([]string{"admin", "root"}))
+		}).To(Equal([]string{testAdminName, testRootName}))
 		apps, err = fakeCF.AccessApplications().List(ctx, exposure.Spec.Hostname)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(apps).To(HaveLen(2))
@@ -897,7 +889,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		tunnel := readyTunnel(ctx, tunnelReconciler, "owned-mixed", "owned-mixed")
 		exposure := createExposure(ctx, "owned-mixed", tunnel.Name, "owned-mixed.example.com", true)
 		_, err := fakeCF.AccessApplications().Create(ctx, cloudflare.AccessApplicationInput{
-			Name:        desiredAccessApplicationName(exposure, "root"),
+			Name:        desiredAccessApplicationName(exposure, testRootName),
 			Domains:     []string{"owned-mixed.example.com", "owned-mixed.example.com/reports", "other.example.net/reports"},
 			PolicyUUIDs: []string{defaultPolicyUUID},
 			Tags:        exposureOwner(exposure).Tags(),
@@ -908,11 +900,11 @@ var _ = Describe("CloudflareExposure Controller", func() {
 
 		current := fetchExposure(ctx, exposure.Name)
 		Expect(current.Status.Cloudflare.AccessApplications).To(HaveLen(1))
-		Expect(current.Status.Cloudflare.AccessApplications[0].Name).To(Equal("root"))
+		Expect(current.Status.Cloudflare.AccessApplications[0].Name).To(Equal(testRootName))
 		apps, err := fakeCF.AccessApplications().List(ctx, exposure.Spec.Hostname)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(apps).To(HaveLen(1))
-		Expect(apps[0].Name).To(Equal(desiredAccessApplicationName(exposure, "root")))
+		Expect(apps[0].Name).To(Equal(desiredAccessApplicationName(exposure, testRootName)))
 		Expect(apps[0].Domains).To(Equal([]string{"owned-mixed.example.com"}))
 	})
 
@@ -921,14 +913,14 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		exposure := createExposure(ctx, "removed-app", tunnel.Name, "removed-app.example.com", true)
 		exposure.Spec.Access.Applications = []cfztv1alpha1.AccessApplicationTarget{
 			{
-				Name:    "root",
+				Name:    testRootName,
 				Domains: []cfztv1alpha1.AccessApplicationDomain{cfztv1alpha1.AccessApplicationDomain("removed-app.example.com")},
 				Policies: []cfztv1alpha1.AccessApplicationPolicyBinding{{
 					PolicyRef: cfztv1alpha1.AccessPolicyRef{UUID: defaultPolicyUUID},
 				}},
 			},
 			{
-				Name: "admin",
+				Name: testAdminName,
 				Domains: []cfztv1alpha1.AccessApplicationDomain{
 					cfztv1alpha1.AccessApplicationDomain("removed-app.example.com/admin"),
 				},
@@ -961,7 +953,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 
 		updated := fetchExposure(ctx, exposure.Name)
 		Expect(updated.Status.Cloudflare.AccessApplications).To(HaveLen(1))
-		Expect(updated.Status.Cloudflare.AccessApplications[0].Name).To(Equal("root"))
+		Expect(updated.Status.Cloudflare.AccessApplications[0].Name).To(Equal(testRootName))
 		apps, err := fakeCF.AccessApplications().List(ctx, exposure.Spec.Hostname)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(apps).To(HaveLen(1))
@@ -975,7 +967,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		exposure.Spec.Access.Applications[0].Policies = []cfztv1alpha1.AccessApplicationPolicyBinding{{PolicyRef: cfztv1alpha1.AccessPolicyRef{Name: policy.Name}}}
 		Expect(k8sClient.Update(ctx, exposure)).To(Succeed())
 
-		result, err := exposureReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: exposure.Namespace, Name: exposure.Name}})
+		result, err := exposureReconciler.Reconcile(ctx, reconcile.Request{Namespace: exposure.Namespace, Name: exposure.Name})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.RequeueAfter).NotTo(BeZero())
 
@@ -998,7 +990,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		exposure.Spec.Access.Applications[0].Policies = []cfztv1alpha1.AccessApplicationPolicyBinding{{PolicyRef: cfztv1alpha1.AccessPolicyRef{Name: policy.Name}}}
 		Expect(k8sClient.Update(ctx, exposure)).To(Succeed())
 
-		result, err := exposureReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: exposure.Namespace, Name: exposure.Name}})
+		result, err := exposureReconciler.Reconcile(ctx, reconcile.Request{Namespace: exposure.Namespace, Name: exposure.Name})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.RequeueAfter).NotTo(BeZero())
 
@@ -1022,7 +1014,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		exposure.Spec.Access.Applications[0].Policies = []cfztv1alpha1.AccessApplicationPolicyBinding{{PolicyRef: cfztv1alpha1.AccessPolicyRef{Name: policy.Name}}}
 		Expect(k8sClient.Update(ctx, exposure)).To(Succeed())
 
-		result, err := exposureReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: exposure.Namespace, Name: exposure.Name}})
+		result, err := exposureReconciler.Reconcile(ctx, reconcile.Request{Namespace: exposure.Namespace, Name: exposure.Name})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.RequeueAfter).NotTo(BeZero())
 
@@ -1068,15 +1060,15 @@ var _ = Describe("CloudflareExposure Controller", func() {
 				return requests
 			})(ctx, policy)
 		}).Should(ConsistOf(
-			reconcile.Request{NamespacedName: types.NamespacedName{Namespace: first.Namespace, Name: first.Name}},
-			reconcile.Request{NamespacedName: types.NamespacedName{Namespace: second.Namespace, Name: second.Name}},
+			reconcile.Request{Namespace: first.Namespace, Name: first.Name},
+			reconcile.Request{Namespace: second.Namespace, Name: second.Name},
 		))
 	})
 
 	It("TestExposureExternalOriginHostNetwork", func() {
 		tunnel := readyTunnel(ctx, tunnelReconciler, "external-origin", "external-origin")
 		exposure := createExposure(ctx, "homeassistant", tunnel.Name, "ha.example.com", false)
-		exposure.Spec.Origin = &cfztv1alpha1.OriginSpec{Protocol: "http", Host: "192.168.1.50", Port: 8123}
+		exposure.Spec.Origin = &cfztv1alpha1.OriginSpec{Protocol: testProtocolHTTP, Host: "192.168.1.50", Port: 8123}
 		Expect(k8sClient.Update(ctx, exposure)).To(Succeed())
 
 		reconcileExposure(ctx, exposureReconciler, exposure)
@@ -1095,9 +1087,11 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		createService(ctx, namespace, "jellyfin", 8096)
 		exposure := createSourceRefExposure(ctx, "jellyfin-source", tunnel.Name, "jellyfin-source.example.com", "jellyfin", false)
 
-		reconcileExposure(ctx, exposureReconciler, exposure)
+		result, err := exposureReconciler.Reconcile(ctx, reconcile.Request{Namespace: exposure.Namespace, Name: exposure.Name})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result).To(Equal(reconcile.Result{RequeueAfter: immediateRequeueDelay}))
 		current := fetchExposure(ctx, exposure.Name)
-		Expect(current.Spec.Origin).To(Equal(&cfztv1alpha1.OriginSpec{Protocol: "http", Host: "jellyfin.media.svc.cluster.local", Port: 8096}))
+		Expect(current.Spec.Origin).To(Equal(&cfztv1alpha1.OriginSpec{Protocol: testProtocolHTTP, Host: "jellyfin.media.svc.cluster.local", Port: 8096}))
 		Expect(current.OwnerReferences).To(HaveLen(1))
 		Expect(current.OwnerReferences[0].Kind).To(Equal(origin.ServiceKind))
 
@@ -1152,7 +1146,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 
 	It("TestHTTPRouteHostnameDerivation", func() {
 		exposure := &cfztv1alpha1.CloudflareExposure{
-			ObjectMeta: metav1.ObjectMeta{Name: "route-source", Namespace: namespace, UID: types.UID("exposure-uid")},
+			Name: "route-source", Namespace: namespace, UID: types.UID("exposure-uid"),
 			Spec: cfztv1alpha1.CloudflareExposureSpec{
 				TunnelRef: cfztv1alpha1.TunnelRef{Name: defaultTunnelName},
 				SourceRef: &cfztv1alpha1.SourceRef{
@@ -1160,12 +1154,12 @@ var _ = Describe("CloudflareExposure Controller", func() {
 					Kind:       origin.HTTPRouteKind,
 					Name:       "jellyfin-route",
 				},
-				Origin: &cfztv1alpha1.OriginSpec{Protocol: "http", Host: "jellyfin.media.svc.cluster.local", Port: 8096},
+				Origin: &cfztv1alpha1.OriginSpec{Protocol: testProtocolHTTP, Host: "jellyfin.media.svc.cluster.local", Port: 8096},
 			},
 		}
 		route := httpRoute(namespace, "jellyfin-route", "route.example.com")
 		localClient := fakeclient.NewClientBuilder().WithScheme(k8sClient.Scheme()).WithObjects(exposure, route).Build()
-		localReconciler := &CloudflareExposureReconciler{Base: Base{Client: localClient, Scheme: k8sClient.Scheme()}, HTTPRouteSourceEnabled: true}
+		localReconciler := &CloudflareExposureReconciler{Client: localClient, Scheme: k8sClient.Scheme(), HTTPRouteSourceEnabled: true}
 
 		defaulted, err := localReconciler.defaultFromSourceRef(ctx, exposure)
 
@@ -1186,24 +1180,24 @@ var _ = Describe("CloudflareExposure Controller", func() {
 
 	It("TestExposureWildcardDNSOnly", func() {
 		tunnel := readyTunnel(ctx, tunnelReconciler, "wc-dns", "wc-dns")
-		exposure := createExposure(ctx, "wildcard-dns", tunnel.Name, "*.example.com", false)
+		exposure := createExposure(ctx, "wildcard-dns", tunnel.Name, testWildcardHostname, false)
 
 		reconcileExposure(ctx, exposureReconciler, exposure)
 		reconcileTunnel(ctx, tunnelReconciler, tunnel.Name)
 		reconcileExposure(ctx, exposureReconciler, exposure)
 
 		cfTunnel := fetchTunnel(ctx, tunnel.Name)
-		records, err := fakeCF.DNSRecords().List(ctx, "zone-example", "*.example.com", "CNAME")
+		records, err := fakeCF.DNSRecords().List(ctx, "zone-example", testWildcardHostname, "CNAME")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(records).To(HaveLen(1))
-		Expect(records[0].Name).To(Equal("*.example.com"))
+		Expect(records[0].Name).To(Equal(testWildcardHostname))
 		Expect(records[0].Type).To(Equal("CNAME"))
 		Expect(records[0].Content).To(Equal(cfTunnel.Status.TunnelId + ".cfargotunnel.com"))
 		Expect(records[0].Proxied).To(BeTrue())
 
 		config, err := fakeCF.Configuration(cfTunnel.Status.TunnelId)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(config.Ingress[0].Hostname).To(Equal("*.example.com"))
+		Expect(config.Ingress[0].Hostname).To(Equal(testWildcardHostname))
 
 		current := fetchExposure(ctx, exposure.Name)
 		Expect(meta.FindStatusCondition(current.Status.Conditions, ConditionReady).Status).To(Equal(metav1.ConditionTrue))
@@ -1215,7 +1209,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		dnsWritesBefore := fakeCF.DNSWriteCalls()
 		configCallsBefore := fakeCF.ConfigurationUpdateCalls(cfTunnel.Status.TunnelId)
 		reconcileExposure(ctx, exposureReconciler, current)
-		recheck, err := fakeCF.DNSRecords().List(ctx, "zone-example", "*.example.com", "CNAME")
+		recheck, err := fakeCF.DNSRecords().List(ctx, "zone-example", testWildcardHostname, "CNAME")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(recheck).To(HaveLen(1))
 		Expect(recheck[0].ID).To(Equal(recordIDBefore))
@@ -1226,8 +1220,8 @@ var _ = Describe("CloudflareExposure Controller", func() {
 
 	It("TestExposureWildcardConcreteOrderingConcreteFirst", func() {
 		tunnel := readyTunnel(ctx, tunnelReconciler, "wc-order", "wc-order")
-		wildcard := createExposure(ctx, "wildcard-route", tunnel.Name, "*.example.com", false)
-		concrete := createExposure(ctx, "concrete-route", tunnel.Name, "foo.example.com", false)
+		wildcard := createExposure(ctx, "wildcard-route", tunnel.Name, testWildcardHostname, false)
+		concrete := createExposure(ctx, "concrete-route", tunnel.Name, testFooHostname, false)
 
 		reconcileExposure(ctx, exposureReconciler, wildcard)
 		reconcileExposure(ctx, exposureReconciler, concrete)
@@ -1241,8 +1235,8 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		Expect(err).NotTo(HaveOccurred())
 		// Concrete host must precede the covering wildcard (first-match top-down),
 		// catch-all stays last.
-		Expect(config.Ingress[0].Hostname).To(Equal("foo.example.com"))
-		Expect(config.Ingress[1].Hostname).To(Equal("*.example.com"))
+		Expect(config.Ingress[0].Hostname).To(Equal(testFooHostname))
+		Expect(config.Ingress[1].Hostname).To(Equal(testWildcardHostname))
 		Expect(config.Ingress[2].Service).To(Equal(tunnelconfig.CatchAllService))
 
 		// Both Exposures must reconcile to Ready (DNS-only wildcard + concrete on
@@ -1253,7 +1247,7 @@ var _ = Describe("CloudflareExposure Controller", func() {
 
 	It("TestExposureWildcardAccessOverlapHostnameConflict", func() {
 		tunnel := readyTunnel(ctx, tunnelReconciler, "wc-access", "wc-access")
-		concrete := createExposure(ctx, "concrete-access", tunnel.Name, "foo.example.com", true)
+		concrete := createExposure(ctx, "concrete-access", tunnel.Name, testFooHostname, true)
 		reconcileExposure(ctx, exposureReconciler, concrete)
 		reconcileTunnel(ctx, tunnelReconciler, tunnel.Name)
 		reconcileExposure(ctx, exposureReconciler, concrete)
@@ -1261,14 +1255,14 @@ var _ = Describe("CloudflareExposure Controller", func() {
 
 		// Snapshot the pre-existing concrete CF resources to prove they survive the
 		// wildcard's fail-closed reconcile untouched.
-		concreteDNSBefore, err := fakeCF.DNSRecords().List(ctx, "zone-example", "foo.example.com", "CNAME")
+		concreteDNSBefore, err := fakeCF.DNSRecords().List(ctx, "zone-example", testFooHostname, "CNAME")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(concreteDNSBefore).To(HaveLen(1))
-		concreteAppsBefore, err := fakeCF.AccessApplications().List(ctx, "foo.example.com")
+		concreteAppsBefore, err := fakeCF.AccessApplications().List(ctx, testFooHostname)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(concreteAppsBefore).To(HaveLen(1))
 
-		wildcard := createExposure(ctx, "wildcard-access", tunnel.Name, "*.example.com", true)
+		wildcard := createExposure(ctx, "wildcard-access", tunnel.Name, testWildcardHostname, true)
 		cfTunnel := fetchTunnel(ctx, tunnel.Name)
 		configCallsBefore := fakeCF.ConfigurationUpdateCalls(cfTunnel.Status.TunnelId)
 
@@ -1280,20 +1274,20 @@ var _ = Describe("CloudflareExposure Controller", func() {
 		Expect(ready.Reason).To(Equal(ReasonHostnameConflict))
 
 		// Fail-closed: zero CF mutation for the wildcard hostname.
-		records, err := fakeCF.DNSRecords().List(ctx, "zone-example", "*.example.com", "CNAME")
+		records, err := fakeCF.DNSRecords().List(ctx, "zone-example", testWildcardHostname, "CNAME")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(records).To(BeEmpty())
-		apps, err := fakeCF.AccessApplications().List(ctx, "*.example.com")
+		apps, err := fakeCF.AccessApplications().List(ctx, testWildcardHostname)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(apps).To(BeEmpty())
 		Expect(fakeCF.ConfigurationUpdateCalls(cfTunnel.Status.TunnelId)).To(Equal(configCallsBefore))
 
 		// The pre-existing concrete Exposure and its CF resources stay intact.
 		Expect(meta.FindStatusCondition(fetchExposure(ctx, concrete.Name).Status.Conditions, ConditionReady).Status).To(Equal(metav1.ConditionTrue))
-		concreteDNSAfter, err := fakeCF.DNSRecords().List(ctx, "zone-example", "foo.example.com", "CNAME")
+		concreteDNSAfter, err := fakeCF.DNSRecords().List(ctx, "zone-example", testFooHostname, "CNAME")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(concreteDNSAfter).To(Equal(concreteDNSBefore))
-		concreteAppsAfter, err := fakeCF.AccessApplications().List(ctx, "foo.example.com")
+		concreteAppsAfter, err := fakeCF.AccessApplications().List(ctx, testFooHostname)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(concreteAppsAfter).To(Equal(concreteAppsBefore))
 	})
@@ -1310,12 +1304,12 @@ func readyTunnel(ctx context.Context, reconciler *CloudflareTunnelReconciler, na
 
 func createExposure(ctx context.Context, name, tunnelName, hostname string, accessEnabled bool) *cfztv1alpha1.CloudflareExposure {
 	exposure := &cfztv1alpha1.CloudflareExposure{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: exposureTestNamespace},
+		Name: name, Namespace: exposureTestNamespace,
 		Spec: cfztv1alpha1.CloudflareExposureSpec{
 			Hostname:  hostname,
 			TunnelRef: cfztv1alpha1.TunnelRef{Name: tunnelName},
 			Origin: &cfztv1alpha1.OriginSpec{
-				Protocol: "http",
+				Protocol: testProtocolHTTP,
 				Host:     name + "." + exposureTestNamespace + ".svc.cluster.local",
 				Port:     8096,
 			},
@@ -1334,7 +1328,7 @@ func createExposure(ctx context.Context, name, tunnelName, hostname string, acce
 
 func createSourceRefExposure(ctx context.Context, name, tunnelName, hostname, sourceName string, accessEnabled bool) *cfztv1alpha1.CloudflareExposure {
 	exposure := &cfztv1alpha1.CloudflareExposure{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: exposureTestNamespace},
+		Name: name, Namespace: exposureTestNamespace,
 		Spec: cfztv1alpha1.CloudflareExposureSpec{
 			Hostname:  hostname,
 			TunnelRef: cfztv1alpha1.TunnelRef{Name: tunnelName},
@@ -1358,10 +1352,10 @@ func createSourceRefExposure(ctx context.Context, name, tunnelName, hostname, so
 
 func defaultAccessApplications(hostname string) []cfztv1alpha1.AccessApplicationTarget {
 	return []cfztv1alpha1.AccessApplicationTarget{{
-		Name:    "root",
+		Name:    testRootName,
 		Domains: []cfztv1alpha1.AccessApplicationDomain{cfztv1alpha1.AccessApplicationDomain(hostname)},
 		Policies: []cfztv1alpha1.AccessApplicationPolicyBinding{{
-			PolicyRef: cfztv1alpha1.AccessPolicyRef{UUID: "00000000-0000-4000-8000-000000000001"},
+			PolicyRef: cfztv1alpha1.AccessPolicyRef{UUID: testUUID1},
 		}},
 	}}
 }
@@ -1372,7 +1366,7 @@ func createService(ctx context.Context, namespace, name string, ports ...int32) 
 		servicePorts = append(servicePorts, corev1.ServicePort{Name: "port-" + string(rune('a'+i)), Port: port})
 	}
 	svc := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Name: name, Namespace: namespace,
 		Spec: corev1.ServiceSpec{
 			Ports: servicePorts,
 		},
@@ -1387,7 +1381,7 @@ func httpRoute(namespace, name, hostname string) *unstructured.Unstructured {
 	route.SetName(name)
 	route.SetNamespace(namespace)
 	route.SetUID(types.UID(name + "-uid"))
-	route.Object["spec"] = map[string]any{"hostnames": []any{hostname}}
+	route.Object[testKeySpec] = map[string]any{"hostnames": []any{hostname}}
 	return route
 }
 
@@ -1398,12 +1392,12 @@ func fetchExposure(ctx context.Context, name string) *cfztv1alpha1.CloudflareExp
 }
 
 func reconcileExposure(ctx context.Context, reconciler *CloudflareExposureReconciler, exposure *cfztv1alpha1.CloudflareExposure) {
-	_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: exposure.Namespace, Name: exposure.Name}})
+	_, err := reconciler.Reconcile(ctx, reconcile.Request{Namespace: exposure.Namespace, Name: exposure.Name})
 	Expect(err).NotTo(HaveOccurred())
 }
 
 func reconcileExposureExpectRequeueAfter30(ctx context.Context, reconciler *CloudflareExposureReconciler, exposure *cfztv1alpha1.CloudflareExposure) {
-	result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: exposure.Namespace, Name: exposure.Name}})
+	result, err := reconciler.Reconcile(ctx, reconcile.Request{Namespace: exposure.Namespace, Name: exposure.Name})
 	Expect(result).To(Equal(reconcile.Result{RequeueAfter: 30 * time.Second}))
 	Expect(err).NotTo(HaveOccurred())
 }

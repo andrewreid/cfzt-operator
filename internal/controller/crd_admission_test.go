@@ -5,7 +5,6 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -15,7 +14,7 @@ import (
 
 var _ = Describe("CRD admission", func() {
 	BeforeEach(func() {
-		ensureNamespace(ctx, "default")
+		ensureNamespace(ctx, testDefaultNamespace)
 	})
 
 	for _, tc := range []struct {
@@ -35,7 +34,7 @@ var _ = Describe("CRD admission", func() {
 			t.Spec.Cloudflared = cfztv1alpha1.CloudflaredSpec{}
 		}), "", func(obj client.Object) {
 			t := obj.(*cfztv1alpha1.CloudflareTunnel)
-			Expect(t.Spec.Cloudflared.Namespace).To(Equal("cfzt-system"))
+			Expect(t.Spec.Cloudflared.Namespace).To(Equal(testCredsNamespace))
 			Expect(t.Spec.Dns.Manage).To(BeTrue())
 			Expect(t.Spec.CredentialsSecretRef.Keys.AccountId).To(Equal("accountId"))
 			Expect(t.Spec.CredentialsSecretRef.Keys.ApiToken).To(Equal("apiToken"))
@@ -43,7 +42,7 @@ var _ = Describe("CRD admission", func() {
 		{"defaults YAML-shaped CloudflareTunnel nested settings", yamlDefaultedTunnel("yaml-defaulted-tunnel"), "", func(client.Object) {
 			created := &cfztv1alpha1.CloudflareTunnel{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "yaml-defaulted-tunnel"}, created)).To(Succeed())
-			Expect(created.Spec.Cloudflared.Namespace).To(Equal("cfzt-system"))
+			Expect(created.Spec.Cloudflared.Namespace).To(Equal(testCredsNamespace))
 			Expect(created.Spec.Dns.Manage).To(BeTrue())
 			Expect(created.Spec.CredentialsSecretRef.Keys.AccountId).To(Equal("accountId"))
 			Expect(created.Spec.CredentialsSecretRef.Keys.ApiToken).To(Equal("apiToken"))
@@ -51,22 +50,22 @@ var _ = Describe("CRD admission", func() {
 		{"accepts a valid CloudflareExposure", validAdmissionExposure("valid-exposure"), "", nil},
 		{"rejects invalid exposure hostname", exposureWith("bad-hostname", func(e *cfztv1alpha1.CloudflareExposure) {
 			e.Spec.Hostname = "Bad_Host"
-		}), "spec.hostname", nil},
+		}), exposureIndexHostname, nil},
 		// Wildcard hostname accept/reject truth-table (issue #13). Access is
 		// disabled so only spec.hostname pattern/length validation is exercised.
-		{"accepts plain two-label hostname", wildcardHostnameExposure("wc-plain", "example.com"), "", assertExposureHostname("wc-plain", "example.com")},
-		{"accepts single-leading-label wildcard", wildcardHostnameExposure("wc-leading", "*.example.com"), "", assertExposureHostname("wc-leading", "*.example.com")},
+		{"accepts plain two-label hostname", wildcardHostnameExposure("wc-plain", testZoneName), "", assertExposureHostname("wc-plain", testZoneName)},
+		{"accepts single-leading-label wildcard", wildcardHostnameExposure("wc-leading", testWildcardHostname), "", assertExposureHostname("wc-leading", testWildcardHostname)},
 		{"accepts deep wildcard hostname", wildcardHostnameExposure("wc-deep", "*.foo.example.com"), "", assertExposureHostname("wc-deep", "*.foo.example.com")},
 		{"accepts 63-char label hostname", wildcardHostnameExposure("wc-label63", label63Hostname()), "", assertExposureHostname("wc-label63", label63Hostname())},
-		{"rejects bare wildcard", wildcardHostnameExposure("wc-bare", "*"), "spec.hostname", nil},
-		{"rejects wildcard single-label domain", wildcardHostnameExposure("wc-tld", "*.com"), "spec.hostname", nil},
-		{"rejects wildcard without dot separator", wildcardHostnameExposure("wc-nodot", "*example.com"), "spec.hostname", nil},
-		{"rejects mid-label wildcard", wildcardHostnameExposure("wc-mid", "foo.*.example.com"), "spec.hostname", nil},
-		{"rejects trailing wildcard label", wildcardHostnameExposure("wc-trailing", "foo.*"), "spec.hostname", nil},
-		{"rejects double wildcard", wildcardHostnameExposure("wc-double", "**.example.com"), "spec.hostname", nil},
-		{"rejects uppercase hostname", wildcardHostnameExposure("wc-upper", "Example.com"), "spec.hostname", nil},
-		{"rejects trailing-dot hostname", wildcardHostnameExposure("wc-dot", "example.com."), "spec.hostname", nil},
-		{"rejects 64-char label hostname", wildcardHostnameExposure("wc-label64", label64Hostname()), "spec.hostname", nil},
+		{"rejects bare wildcard", wildcardHostnameExposure("wc-bare", "*"), exposureIndexHostname, nil},
+		{"rejects wildcard single-label domain", wildcardHostnameExposure("wc-tld", "*.com"), exposureIndexHostname, nil},
+		{"rejects wildcard without dot separator", wildcardHostnameExposure("wc-nodot", "*example.com"), exposureIndexHostname, nil},
+		{"rejects mid-label wildcard", wildcardHostnameExposure("wc-mid", "foo.*.example.com"), exposureIndexHostname, nil},
+		{"rejects trailing wildcard label", wildcardHostnameExposure("wc-trailing", "foo.*"), exposureIndexHostname, nil},
+		{"rejects double wildcard", wildcardHostnameExposure("wc-double", "**.example.com"), exposureIndexHostname, nil},
+		{"rejects uppercase hostname", wildcardHostnameExposure("wc-upper", "Example.com"), exposureIndexHostname, nil},
+		{"rejects trailing-dot hostname", wildcardHostnameExposure("wc-dot", "example.com."), exposureIndexHostname, nil},
+		{"rejects 64-char label hostname", wildcardHostnameExposure("wc-label64", label64Hostname()), exposureIndexHostname, nil},
 		{"rejects exposure origin port out of range", exposureWith("bad-port", func(e *cfztv1alpha1.CloudflareExposure) {
 			e.Spec.Origin.Port = 70000
 		}), "spec.origin.port", nil},
@@ -74,7 +73,7 @@ var _ = Describe("CRD admission", func() {
 			e.Spec.Access.Applications = nil
 		}), "access.enabled=true requires spec.hostname and access.applications[]", nil},
 		{"rejects removed top-level access policyRef", exposureWith("policyref-removed", func(e *cfztv1alpha1.CloudflareExposure) {
-			e.Spec.Access.PolicyRef = &cfztv1alpha1.AccessPolicyRef{UUID: "00000000-0000-4000-8000-000000000002"}
+			e.Spec.Access.PolicyRef = &cfztv1alpha1.AccessPolicyRef{UUID: testUUID2}
 		}), "access.policyRef was removed in v1alpha1; use access.applications[]", nil},
 		{"accepts nested applications without removed top-level policyRef", exposureWith("policyref-absent", func(e *cfztv1alpha1.CloudflareExposure) {
 			e.Spec.Access.PolicyRef = nil
@@ -84,7 +83,7 @@ var _ = Describe("CRD admission", func() {
 			Expect(created.Spec.Access.Applications).To(HaveLen(1))
 		}},
 		{"accepts access policy UUID alone", exposureWith("policyref-uuid-alone", func(e *cfztv1alpha1.CloudflareExposure) {
-			e.Spec.Access.Applications[0].Policies[0].PolicyRef = cfztv1alpha1.AccessPolicyRef{UUID: "00000000-0000-4000-8000-000000000002"}
+			e.Spec.Access.Applications[0].Policies[0].PolicyRef = cfztv1alpha1.AccessPolicyRef{UUID: testUUID2}
 		}), "", nil},
 		{"accepts access policy name alone", exposureWith("policyref-name-alone", func(e *cfztv1alpha1.CloudflareExposure) {
 			e.Spec.Access.Applications[0].Policies[0].PolicyRef = cfztv1alpha1.AccessPolicyRef{Name: "family-only"}
@@ -106,7 +105,7 @@ var _ = Describe("CRD admission", func() {
 				Name:    "wildcard",
 				Domains: []cfztv1alpha1.AccessApplicationDomain{cfztv1alpha1.AccessApplicationDomain(e.Spec.Hostname + "/*")},
 				Policies: []cfztv1alpha1.AccessApplicationPolicyBinding{{
-					PolicyRef: cfztv1alpha1.AccessPolicyRef{UUID: "00000000-0000-4000-8000-000000000001"},
+					PolicyRef: cfztv1alpha1.AccessPolicyRef{UUID: testUUID1},
 				}},
 			})
 		}), "", nil},
@@ -115,16 +114,16 @@ var _ = Describe("CRD admission", func() {
 				Name:    "path",
 				Domains: []cfztv1alpha1.AccessApplicationDomain{cfztv1alpha1.AccessApplicationDomain(e.Spec.Hostname + "/alerts-*")},
 				Policies: []cfztv1alpha1.AccessApplicationPolicyBinding{{
-					PolicyRef: cfztv1alpha1.AccessPolicyRef{UUID: "00000000-0000-4000-8000-000000000001"},
+					PolicyRef: cfztv1alpha1.AccessPolicyRef{UUID: testUUID1},
 				}},
 			})
 		}), "", nil},
 		{"accepts Service sourceRef without origin", exposureWith("service-source", func(e *cfztv1alpha1.CloudflareExposure) {
-			e.Spec.SourceRef = &cfztv1alpha1.SourceRef{ApiVersion: "v1", Kind: "Service", Name: "jellyfin"}
+			e.Spec.SourceRef = &cfztv1alpha1.SourceRef{ApiVersion: "v1", Kind: testKindService, Name: testJellyfinName}
 			e.Spec.Origin = nil
 		}), "", nil},
 		{"accepts HTTPRoute sourceRef without hostname", exposureWith("httproute-source", func(e *cfztv1alpha1.CloudflareExposure) {
-			e.Spec.SourceRef = &cfztv1alpha1.SourceRef{ApiVersion: "gateway.networking.k8s.io/v1", Kind: "HTTPRoute", Name: "jellyfin"}
+			e.Spec.SourceRef = &cfztv1alpha1.SourceRef{ApiVersion: "gateway.networking.k8s.io/v1", Kind: testKindHTTPRoute, Name: testJellyfinName}
 			e.Spec.Hostname = ""
 			e.Spec.Access.Enabled = false
 			e.Spec.Access.Applications = nil
@@ -133,11 +132,11 @@ var _ = Describe("CRD admission", func() {
 			e.Spec.Hostname = ""
 		}), "hostname is required", nil},
 		{"rejects unsupported Service sourceRef apiVersion", exposureWith("bad-service-apiversion", func(e *cfztv1alpha1.CloudflareExposure) {
-			e.Spec.SourceRef = &cfztv1alpha1.SourceRef{ApiVersion: "apps/v1", Kind: "Service", Name: "jellyfin"}
+			e.Spec.SourceRef = &cfztv1alpha1.SourceRef{ApiVersion: "apps/v1", Kind: testKindService, Name: testJellyfinName}
 			e.Spec.Origin = nil
 		}), "sourceRef.apiVersion", nil},
 		{"rejects unsupported HTTPRoute sourceRef apiVersion", exposureWith("bad-httproute-apiversion", func(e *cfztv1alpha1.CloudflareExposure) {
-			e.Spec.SourceRef = &cfztv1alpha1.SourceRef{ApiVersion: "gateway.networking.k8s.io/v1beta1", Kind: "HTTPRoute", Name: "jellyfin"}
+			e.Spec.SourceRef = &cfztv1alpha1.SourceRef{ApiVersion: "gateway.networking.k8s.io/v1beta1", Kind: testKindHTTPRoute, Name: testJellyfinName}
 			e.Spec.Hostname = ""
 		}), "sourceRef.apiVersion", nil},
 		{"accepts a valid CloudflareAccessPolicy", validAdmissionPolicy("valid-policy"), "", nil},
@@ -145,12 +144,12 @@ var _ = Describe("CRD admission", func() {
 			p.Spec.Decision = "maybe"
 		}), "spec.decision", nil},
 		{"rejects Access rule with two fields set", policyWith("two-fields", func(p *cfztv1alpha1.CloudflareAccessPolicy) {
-			p.Spec.Rules.Include = []cfztv1alpha1.AccessRule{{Email: "alice@example.com", EmailDomain: "example.com"}}
-		}), "exactly one of", nil},
+			p.Spec.Rules.Include = []cfztv1alpha1.AccessRule{{Email: testEmail, EmailDomain: testZoneName}}
+		}), testExactlyOneOf, nil},
 		{"rejects Access rule with zero fields set", policyWith("zero-fields", func(p *cfztv1alpha1.CloudflareAccessPolicy) {
 			p.Spec.Rules.Include = []cfztv1alpha1.AccessRule{{}}
-		}), "exactly one of", nil},
-		{"rejects Access rule everyone false", everyoneFalsePolicy("everyone-false"), "exactly one of", nil},
+		}), testExactlyOneOf, nil},
+		{"rejects Access rule everyone false", everyoneFalsePolicy("everyone-false"), testExactlyOneOf, nil},
 		{"rejects empty Access policy rules", policyWith("empty-rules", func(p *cfztv1alpha1.CloudflareAccessPolicy) {
 			p.Spec.Rules = cfztv1alpha1.AccessRules{}
 		}), "at least one item", nil},
@@ -181,26 +180,26 @@ var _ = Describe("CRD admission", func() {
 			r.Spec.Comment = "12345678901234567890123456789012345"
 		}), "comment", nil},
 		{"accepts a valid CloudflareExposure failover block", exposureWith("failover-valid", func(e *cfztv1alpha1.CloudflareExposure) {
-			e.Spec.Failover = &cfztv1alpha1.FailoverSpec{Group: "jellyfin-dr", LeaseSeconds: 60}
+			e.Spec.Failover = &cfztv1alpha1.FailoverSpec{Group: testFailoverExposureName, LeaseSeconds: 60}
 		}), "", nil},
-		{"defaults failover.leaseSeconds when omitted", failoverYAMLExposure("failover-default-lease", "jellyfin-dr"), "", func(client.Object) {
+		{"defaults failover.leaseSeconds when omitted", failoverYAMLExposure("failover-default-lease", testFailoverExposureName), "", func(client.Object) {
 			created := &cfztv1alpha1.CloudflareExposure{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "failover-default-lease", Namespace: "default"}, created)).To(Succeed())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "failover-default-lease", Namespace: testDefaultNamespace}, created)).To(Succeed())
 			Expect(created.Spec.Failover).NotTo(BeNil())
 			Expect(created.Spec.Failover.LeaseSeconds).To(Equal(int32(60)))
 		}},
 		{"rejects failover.group below MinLength", exposureWith("failover-short-group", func(e *cfztv1alpha1.CloudflareExposure) {
 			e.Spec.Failover = &cfztv1alpha1.FailoverSpec{Group: "ab"}
-		}), "spec.failover.group", nil},
+		}), exposureIndexFailoverGroup, nil},
 		{"rejects failover.group with invalid characters", exposureWith("failover-bad-group", func(e *cfztv1alpha1.CloudflareExposure) {
 			e.Spec.Failover = &cfztv1alpha1.FailoverSpec{Group: "Jelly_Fin"}
-		}), "spec.failover.group", nil},
-		{"rejects failover block missing group", failoverYAMLExposure("failover-missing-group", ""), "spec.failover.group", nil},
+		}), exposureIndexFailoverGroup, nil},
+		{"rejects failover block missing group", failoverYAMLExposure("failover-missing-group", ""), exposureIndexFailoverGroup, nil},
 		{"rejects failover.leaseSeconds below minimum", exposureWith("failover-lease-low", func(e *cfztv1alpha1.CloudflareExposure) {
-			e.Spec.Failover = &cfztv1alpha1.FailoverSpec{Group: "jellyfin-dr", LeaseSeconds: 10}
+			e.Spec.Failover = &cfztv1alpha1.FailoverSpec{Group: testFailoverExposureName, LeaseSeconds: 10}
 		}), "spec.failover.leaseSeconds", nil},
 		{"rejects failover.leaseSeconds above maximum", exposureWith("failover-lease-high", func(e *cfztv1alpha1.CloudflareExposure) {
-			e.Spec.Failover = &cfztv1alpha1.FailoverSpec{Group: "jellyfin-dr", LeaseSeconds: 601}
+			e.Spec.Failover = &cfztv1alpha1.FailoverSpec{Group: testFailoverExposureName, LeaseSeconds: 601}
 		}), "spec.failover.leaseSeconds", nil},
 	} {
 		It(tc.name, func() {
@@ -228,7 +227,7 @@ var _ = Describe("CRD admission", func() {
 			obj.(*cfztv1alpha1.CloudflareTunnel).Spec.TunnelName = "renamed-tunnel"
 		}, "tunnelName is immutable"},
 		{"allows first HTTPRoute-derived hostname write", exposureWith("httproute-hostname-default", func(e *cfztv1alpha1.CloudflareExposure) {
-			e.Spec.SourceRef = &cfztv1alpha1.SourceRef{ApiVersion: "gateway.networking.k8s.io/v1", Kind: "HTTPRoute", Name: "jellyfin"}
+			e.Spec.SourceRef = &cfztv1alpha1.SourceRef{ApiVersion: "gateway.networking.k8s.io/v1", Kind: testKindHTTPRoute, Name: testJellyfinName}
 			e.Spec.Hostname = ""
 			e.Spec.Access.Enabled = false
 			e.Spec.Access.Applications = nil
@@ -236,13 +235,13 @@ var _ = Describe("CRD admission", func() {
 			obj.(*cfztv1alpha1.CloudflareExposure).Spec.Hostname = "derived.example.com"
 		}, ""},
 		{"rejects CloudflareExposure hostname update", validAdmissionExposure("immutable-hostname"), func(obj client.Object) {
-			obj.(*cfztv1alpha1.CloudflareExposure).Spec.Hostname = "changed.example.com"
+			obj.(*cfztv1alpha1.CloudflareExposure).Spec.Hostname = testChangedHostname
 		}, "hostname is immutable"},
 		{"rejects CloudflareExposure tunnelRef update", validAdmissionExposure("immutable-tunnelref"), func(obj client.Object) {
 			obj.(*cfztv1alpha1.CloudflareExposure).Spec.TunnelRef.Name = "other-tunnel"
 		}, "tunnelRef.name is immutable"},
 		{"rejects CloudflareExposure sourceRef update", exposureWith("immutable-sourceref", func(e *cfztv1alpha1.CloudflareExposure) {
-			e.Spec.SourceRef = &cfztv1alpha1.SourceRef{ApiVersion: "v1", Kind: "Service", Name: "jellyfin"}
+			e.Spec.SourceRef = &cfztv1alpha1.SourceRef{ApiVersion: "v1", Kind: testKindService, Name: testJellyfinName}
 			e.Spec.Origin = nil
 		}), func(obj client.Object) {
 			obj.(*cfztv1alpha1.CloudflareExposure).Spec.SourceRef.Name = "other-service"
@@ -276,12 +275,12 @@ var _ = Describe("CRD admission", func() {
 
 func validAdmissionTunnel(name string) *cfztv1alpha1.CloudflareTunnel {
 	return &cfztv1alpha1.CloudflareTunnel{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Name: name,
 		Spec: cfztv1alpha1.CloudflareTunnelSpec{
-			CredentialsSecretRef: cfztv1alpha1.CredentialsSecretRef{Name: "cloudflare-credentials"},
+			CredentialsSecretRef: cfztv1alpha1.CredentialsSecretRef{Name: testCredsSecretName},
 			TunnelName:           "homelab-rke2",
 			Dns:                  cfztv1alpha1.DnsSpec{Manage: true},
-			Cloudflared:          cfztv1alpha1.CloudflaredSpec{Namespace: "cfzt-system", Image: "cloudflare/cloudflared:2025.1.0"},
+			Cloudflared:          cfztv1alpha1.CloudflaredSpec{Namespace: testCredsNamespace, Image: "cloudflare/cloudflared:2025.1.0"},
 		},
 	}
 }
@@ -294,11 +293,11 @@ func tunnelWith(name string, mutate func(*cfztv1alpha1.CloudflareTunnel)) *cfztv
 
 func yamlDefaultedTunnel(name string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "cfzt.reid.ee/v1alpha1",
-		"kind":       "CloudflareTunnel",
-		"metadata":   map[string]any{"name": name},
-		"spec": map[string]any{
-			"credentialsSecretRef": map[string]any{"name": "cloudflare-credentials"},
+		testKeyAPIVersion: testCfztAPIVersion,
+		testKeyKind:       "CloudflareTunnel",
+		testKeyMetadata:   map[string]any{testKeyName: name},
+		testKeySpec: map[string]any{
+			"credentialsSecretRef": map[string]any{testKeyName: testCredsSecretName},
 			"tunnelName":           "homelab-rke2",
 		},
 	}}
@@ -306,18 +305,18 @@ func yamlDefaultedTunnel(name string) *unstructured.Unstructured {
 
 func validAdmissionExposure(name string) *cfztv1alpha1.CloudflareExposure {
 	return &cfztv1alpha1.CloudflareExposure{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		Name: name, Namespace: testDefaultNamespace,
 		Spec: cfztv1alpha1.CloudflareExposureSpec{
 			Hostname:  name + ".example.com",
-			TunnelRef: cfztv1alpha1.TunnelRef{Name: "homelab"},
-			Origin:    &cfztv1alpha1.OriginSpec{Protocol: "http", Host: "jellyfin.default.svc.cluster.local", Port: 8096},
+			TunnelRef: cfztv1alpha1.TunnelRef{Name: testTunnelName},
+			Origin:    &cfztv1alpha1.OriginSpec{Protocol: testProtocolHTTP, Host: "jellyfin.default.svc.cluster.local", Port: 8096},
 			Access: cfztv1alpha1.AccessSpec{
 				Enabled: true,
 				Applications: []cfztv1alpha1.AccessApplicationTarget{{
-					Name:    "root",
+					Name:    testRootName,
 					Domains: []cfztv1alpha1.AccessApplicationDomain{cfztv1alpha1.AccessApplicationDomain(name + ".example.com")},
 					Policies: []cfztv1alpha1.AccessApplicationPolicyBinding{{
-						PolicyRef: cfztv1alpha1.AccessPolicyRef{UUID: "00000000-0000-4000-8000-000000000001"},
+						PolicyRef: cfztv1alpha1.AccessPolicyRef{UUID: testUUID1},
 					}},
 				}},
 			},
@@ -346,7 +345,7 @@ func wildcardHostnameExposure(name, hostname string) *cfztv1alpha1.CloudflareExp
 func assertExposureHostname(name, want string) func(client.Object) {
 	return func(client.Object) {
 		created := &cfztv1alpha1.CloudflareExposure{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, created)).To(Succeed())
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: testDefaultNamespace}, created)).To(Succeed())
 		Expect(created.Spec.Hostname).To(Equal(want))
 	}
 }
@@ -369,22 +368,22 @@ func failoverYAMLExposure(name, group string) *unstructured.Unstructured {
 		failover["group"] = group
 	}
 	return &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "cfzt.reid.ee/v1alpha1",
-		"kind":       "CloudflareExposure",
-		"metadata":   map[string]any{"name": name, "namespace": "default"},
-		"spec": map[string]any{
+		testKeyAPIVersion: testCfztAPIVersion,
+		testKeyKind:       "CloudflareExposure",
+		testKeyMetadata:   map[string]any{testKeyName: name, "namespace": testDefaultNamespace},
+		testKeySpec: map[string]any{
 			"hostname":  name + ".example.com",
-			"tunnelRef": map[string]any{"name": "homelab"},
-			"origin":    map[string]any{"protocol": "http", "host": "jellyfin.default.svc.cluster.local", "port": int64(8096)},
+			"tunnelRef": map[string]any{testKeyName: testTunnelName},
+			"origin":    map[string]any{"protocol": testProtocolHTTP, "host": "jellyfin.default.svc.cluster.local", "port": int64(8096)},
 			"access": map[string]any{
 				"enabled": true,
 				"applications": []any{
 					map[string]any{
-						"name":    "root",
-						"domains": []any{name + ".example.com"},
+						testKeyName: testRootName,
+						"domains":   []any{name + ".example.com"},
 						"policies": []any{
 							map[string]any{
-								"policyRef": map[string]any{"uuid": "00000000-0000-4000-8000-000000000001"},
+								"policyRef": map[string]any{"uuid": testUUID1},
 							},
 						},
 					},
@@ -397,11 +396,11 @@ func failoverYAMLExposure(name, group string) *unstructured.Unstructured {
 
 func validAdmissionPolicy(name string) *cfztv1alpha1.CloudflareAccessPolicy {
 	return &cfztv1alpha1.CloudflareAccessPolicy{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Name: name,
 		Spec: cfztv1alpha1.CloudflareAccessPolicySpec{
-			CredentialsSecretRef: cfztv1alpha1.AccessPolicyCredentialsSecretRef{Name: "cloudflare-credentials", Namespace: "cfzt-system"},
-			Decision:             "allow",
-			Rules:                cfztv1alpha1.AccessRules{Include: []cfztv1alpha1.AccessRule{{EmailDomain: "example.com"}}},
+			CredentialsSecretRef: cfztv1alpha1.AccessPolicyCredentialsSecretRef{Name: testCredsSecretName, Namespace: testCredsNamespace},
+			Decision:             testDecisionAllow,
+			Rules:                cfztv1alpha1.AccessRules{Include: []cfztv1alpha1.AccessRule{{EmailDomain: testZoneName}}},
 		},
 	}
 }
@@ -414,12 +413,12 @@ func policyWith(name string, mutate func(*cfztv1alpha1.CloudflareAccessPolicy)) 
 
 func everyoneFalsePolicy(name string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "cfzt.reid.ee/v1alpha1",
-		"kind":       "CloudflareAccessPolicy",
-		"metadata":   map[string]any{"name": name},
-		"spec": map[string]any{
-			"credentialsSecretRef": map[string]any{"name": "cloudflare-credentials", "namespace": "cfzt-system"},
-			"decision":             "allow",
+		testKeyAPIVersion: testCfztAPIVersion,
+		testKeyKind:       "CloudflareAccessPolicy",
+		testKeyMetadata:   map[string]any{testKeyName: name},
+		testKeySpec: map[string]any{
+			"credentialsSecretRef": map[string]any{testKeyName: testCredsSecretName, "namespace": testCredsNamespace},
+			"decision":             testDecisionAllow,
 			"rules":                map[string]any{"include": []any{map[string]any{"everyone": false}}},
 		},
 	}}
@@ -427,11 +426,11 @@ func everyoneFalsePolicy(name string) *unstructured.Unstructured {
 
 func validAdmissionRoute(name string) *cfztv1alpha1.CloudflareTunnelRoute {
 	return &cfztv1alpha1.CloudflareTunnelRoute{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Name: name,
 		Spec: cfztv1alpha1.CloudflareTunnelRouteSpec{
-			TunnelRef:        cfztv1alpha1.TunnelRouteTunnelRef{Name: "homelab"},
+			TunnelRef:        cfztv1alpha1.TunnelRouteTunnelRef{Name: testTunnelName},
 			Network:          "172.16.0.0/24",
-			VirtualNetworkId: "00000000-0000-4000-8000-000000000001",
+			VirtualNetworkId: testUUID1,
 			Comment:          "homelab LAN",
 		},
 	}

@@ -39,10 +39,10 @@ var _ = Describe("Controller Base", func() {
 	})
 
 	It("TestCredentialsLoaderTunnelNamespace", func() {
-		ensureCredentialsSecret(ctx, "custom-tunnel-creds", "cloudflare-credentials")
+		ensureCredentialsSecret(ctx, "custom-tunnel-creds", testCredsSecretName)
 		tunnel := &cfztv1alpha1.CloudflareTunnel{
 			Spec: cfztv1alpha1.CloudflareTunnelSpec{
-				CredentialsSecretRef: cfztv1alpha1.CredentialsSecretRef{Name: "cloudflare-credentials"},
+				CredentialsSecretRef: cfztv1alpha1.CredentialsSecretRef{Name: testCredsSecretName},
 				Cloudflared:          cfztv1alpha1.CloudflaredSpec{Namespace: "custom-tunnel-creds"},
 			},
 		}
@@ -76,7 +76,7 @@ var _ = Describe("Controller Base", func() {
 func ensureCredentialsSecret(ctx context.Context, namespace, name string) {
 	ensureNamespace(ctx, namespace)
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Name: name, Namespace: namespace,
 		Data: map[string][]byte{
 			"accountId": []byte("account-1"),
 			"apiToken":  []byte("token-1"),

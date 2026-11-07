@@ -27,17 +27,15 @@ var _ = Describe("CloudflareTunnelRoute Controller", func() {
 
 	BeforeEach(func() {
 		ctx = context.Background()
-		ensureNamespace(ctx, "cfzt-system")
+		ensureNamespace(ctx, testCredsNamespace)
 		createCredentials(ctx)
 		fakeCF = cloudflare.NewFake()
 		recorder = record.NewFakeRecorder(1024)
 		reconciler = &CloudflareTunnelRouteReconciler{
-			Base: Base{
-				Client:              indexedClient,
-				Scheme:              indexedClient.Scheme(),
-				NewCloudflareClient: newFakeCloudflareClient(indexedClient, fakeCF),
-				Recorder:            recorder,
-			},
+			Client:              indexedClient,
+			Scheme:              indexedClient.Scheme(),
+			NewCloudflareClient: newFakeCloudflareClient(indexedClient, fakeCF),
+			Recorder:            recorder,
 		}
 	})
 
@@ -130,18 +128,18 @@ var _ = Describe("CloudflareTunnelRoute Controller", func() {
 	It("TestRouteVNetDriftCorrection", func() {
 		tunnel := createReadyTunnel(ctx, "route-vnet-tunnel", "cf-tunnel-vnet")
 		route := createTunnelRoute(ctx, "route-vnet", tunnel.Name, "172.16.6.0/24")
-		route.Spec.VirtualNetworkId = "00000000-0000-4000-8000-000000000001"
+		route.Spec.VirtualNetworkId = testUUID1
 		Expect(k8sClient.Update(ctx, route)).To(Succeed())
 		reconcileRoute(ctx, reconciler, route.Name)
 		ready := fetchTunnelRoute(ctx, route.Name)
 
-		ready.Spec.VirtualNetworkId = "00000000-0000-4000-8000-000000000002"
+		ready.Spec.VirtualNetworkId = testUUID2
 		Expect(k8sClient.Update(ctx, ready)).To(Succeed())
 		reconcileRoute(ctx, reconciler, route.Name)
 
 		cfRoute, err := fakeCF.TunnelRoutes().Get(ctx, ready.Status.RouteId)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(cfRoute.VirtualNetworkID).To(Equal("00000000-0000-4000-8000-000000000002"))
+		Expect(cfRoute.VirtualNetworkID).To(Equal(testUUID2))
 	})
 
 	It("TestRouteEditPreflightForeignRefuses", func() {
@@ -250,7 +248,7 @@ var _ = Describe("CloudflareTunnelRoute Controller", func() {
 				}
 				return requests
 			})(ctx, tunnel)
-		}).Should(ContainElement(reconcile.Request{NamespacedName: types.NamespacedName{Name: route.Name}}))
+		}).Should(ContainElement(reconcile.Request{Name: route.Name}))
 	})
 })
 
@@ -263,7 +261,7 @@ func createReadyTunnel(ctx context.Context, name, tunnelID string) *cfztv1alpha1
 
 func createTunnelRoute(ctx context.Context, name, tunnelName, network string) *cfztv1alpha1.CloudflareTunnelRoute {
 	route := &cfztv1alpha1.CloudflareTunnelRoute{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Name: name,
 		Spec: cfztv1alpha1.CloudflareTunnelRouteSpec{
 			TunnelRef: cfztv1alpha1.TunnelRouteTunnelRef{Name: tunnelName},
 			Network:   network,
@@ -280,6 +278,6 @@ func fetchTunnelRoute(ctx context.Context, name string) *cfztv1alpha1.Cloudflare
 }
 
 func reconcileRoute(ctx context.Context, reconciler *CloudflareTunnelRouteReconciler, name string) {
-	_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name}})
+	_, err := reconciler.Reconcile(ctx, reconcile.Request{Name: name})
 	Expect(err).NotTo(HaveOccurred())
 }

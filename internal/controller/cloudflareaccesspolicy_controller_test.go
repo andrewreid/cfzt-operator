@@ -51,12 +51,10 @@ var _ = Describe("CloudflareAccessPolicy Controller", func() {
 		fakeCF = cloudflare.NewFake()
 		recorder = record.NewFakeRecorder(1024)
 		reconciler = &CloudflareAccessPolicyReconciler{
-			Base: Base{
-				Client:              indexedClient,
-				Scheme:              indexedClient.Scheme(),
-				NewCloudflareClient: newFakeCloudflareClient(indexedClient, fakeCF),
-				Recorder:            recorder,
-			},
+			Client:              indexedClient,
+			Scheme:              indexedClient.Scheme(),
+			NewCloudflareClient: newFakeCloudflareClient(indexedClient, fakeCF),
+			Recorder:            recorder,
 		}
 		createCredentials(ctx)
 	})
@@ -76,9 +74,9 @@ var _ = Describe("CloudflareAccessPolicy Controller", func() {
 		cfPolicy, err := fakeCF.AccessPolicies().Get(ctx, got.Status.PolicyId)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(cfPolicy.Name).To(Equal("create-policy-cfzt"))
-		Expect(cfPolicy.Decision).To(Equal("allow"))
+		Expect(cfPolicy.Decision).To(Equal(testDecisionAllow))
 		Expect(cfPolicy.Include).To(HaveLen(1))
-		Expect(cfPolicy.Include[0].EmailDomain).To(Equal("example.com"))
+		Expect(cfPolicy.Include[0].EmailDomain).To(Equal(testZoneName))
 		Expect(got.Status.ObservedRulesHash).To(HavePrefix("sha256:"))
 	})
 
@@ -97,7 +95,7 @@ var _ = Describe("CloudflareAccessPolicy Controller", func() {
 	It("TestAccessPolicyForeignRefuses", func() {
 		_, err := fakeCF.AccessPolicies().Create(ctx, cloudflare.AccessPolicyInput{
 			Name:     "foreign-policy-cfzt",
-			Decision: "allow",
+			Decision: testDecisionAllow,
 			Include:  []cloudflare.AccessRule{{Everyone: true}},
 		})
 		Expect(err).NotTo(HaveOccurred())
@@ -123,8 +121,8 @@ var _ = Describe("CloudflareAccessPolicy Controller", func() {
 	It("TestAccessPolicyExactMatchOrphanRecovery", func() {
 		cfPolicy, err := fakeCF.AccessPolicies().Create(ctx, cloudflare.AccessPolicyInput{
 			Name:     "recover-policy-cfzt",
-			Decision: "allow",
-			Include:  []cloudflare.AccessRule{{EmailDomain: "example.com"}},
+			Decision: testDecisionAllow,
+			Include:  []cloudflare.AccessRule{{EmailDomain: testZoneName}},
 		})
 		Expect(err).NotTo(HaveOccurred())
 		policy := createAccessPolicy(ctx, "recover-policy", "")
@@ -141,7 +139,7 @@ var _ = Describe("CloudflareAccessPolicy Controller", func() {
 	It("TestAccessPolicyFinalizerAddedBeforeCloudflareCreate", func() {
 		policy := createAccessPolicy(ctx, "finalizer-first-policy", "")
 
-		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: policy.Name}})
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{Name: policy.Name})
 		Expect(err).NotTo(HaveOccurred())
 
 		current := fetchAccessPolicy(ctx, policy.Name)
@@ -156,7 +154,7 @@ var _ = Describe("CloudflareAccessPolicy Controller", func() {
 		reconcileAccessPolicy(ctx, reconciler, policy.Name)
 		current := fetchAccessPolicy(ctx, policy.Name)
 		oldHash := current.Status.ObservedRulesHash
-		current.Spec.Rules.Include = []cfztv1alpha1.AccessRule{{EmailDomain: "changed.example.com"}}
+		current.Spec.Rules.Include = []cfztv1alpha1.AccessRule{{EmailDomain: testChangedHostname}}
 		Expect(k8sClient.Update(ctx, current)).To(Succeed())
 
 		reconcileAccessPolicy(ctx, reconciler, current.Name)
@@ -165,7 +163,7 @@ var _ = Describe("CloudflareAccessPolicy Controller", func() {
 		Expect(updated.Status.ObservedRulesHash).NotTo(Equal(oldHash))
 		cfPolicy, err := fakeCF.AccessPolicies().Get(ctx, updated.Status.PolicyId)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(cfPolicy.Include).To(Equal([]cloudflare.AccessRule{{EmailDomain: "changed.example.com"}}))
+		Expect(cfPolicy.Include).To(Equal([]cloudflare.AccessRule{{EmailDomain: testChangedHostname}}))
 	})
 
 	It("TestAccessPolicyUnsupportedDrift", func() {
@@ -219,7 +217,12 @@ var _ = Describe("CloudflareAccessPolicy Controller", func() {
 		policy.Status.PolicyId = "missing-policy"
 		Expect(k8sClient.Status().Update(ctx, policy)).To(Succeed())
 
-		reconcileAccessPolicy(ctx, reconciler, policy.Name)
+		// First pass only adds the finalizer; the second hits the stale ID.
+		_, err := reconciler.Reconcile(ctx, reconcile.Request{Name: policy.Name})
+		Expect(err).NotTo(HaveOccurred())
+		result, err := reconciler.Reconcile(ctx, reconcile.Request{Name: policy.Name})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result).To(Equal(reconcile.Result{RequeueAfter: immediateRequeueDelay}))
 		reconcileAccessPolicy(ctx, reconciler, policy.Name)
 
 		got := fetchAccessPolicy(ctx, policy.Name)
@@ -233,7 +236,7 @@ var _ = Describe("CloudflareAccessPolicy Controller", func() {
 	It("TestAccessPolicyForeignStatusIDRefuses", func() {
 		cfPolicy, err := fakeCF.AccessPolicies().Create(ctx, cloudflare.AccessPolicyInput{
 			Name:     "actual-foreign-policy",
-			Decision: "allow",
+			Decision: testDecisionAllow,
 			Include:  []cloudflare.AccessRule{{Everyone: true}},
 		})
 		Expect(err).NotTo(HaveOccurred())
@@ -254,7 +257,7 @@ var _ = Describe("CloudflareAccessPolicy Controller", func() {
 	It("TestAccessPolicyFinalizerBlocksForeignStatusID", func() {
 		cfPolicy, err := fakeCF.AccessPolicies().Create(ctx, cloudflare.AccessPolicyInput{
 			Name:     "actual-foreign-delete",
-			Decision: "allow",
+			Decision: testDecisionAllow,
 			Include:  []cloudflare.AccessRule{{Everyone: true}},
 		})
 		Expect(err).NotTo(HaveOccurred())
@@ -316,10 +319,10 @@ var _ = Describe("CloudflareAccessPolicy Controller", func() {
 		current := fetchAccessPolicy(ctx, policy.Name)
 		policyID := current.Status.PolicyId
 		Expect(policyID).NotTo(BeEmpty())
-		Expect(k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "cloudflare-credentials", Namespace: credsNamespace}})).To(Succeed())
+		Expect(k8sClient.Delete(ctx, &corev1.Secret{Name: testCredsSecretName, Namespace: credsNamespace})).To(Succeed())
 
 		Expect(k8sClient.Delete(ctx, current)).To(Succeed())
-		result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: policy.Name}})
+		result, err := reconciler.Reconcile(ctx, reconcile.Request{Name: policy.Name})
 
 		Expect(err).NotTo(HaveOccurred())
 		Expect(result.RequeueAfter).NotTo(BeZero())
@@ -357,7 +360,7 @@ var _ = Describe("CloudflareAccessPolicy Controller", func() {
 	})
 
 	It("TestAccessPolicyConditionsTransition", func() {
-		_ = k8sClient.Delete(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "cloudflare-credentials", Namespace: credsNamespace}})
+		_ = k8sClient.Delete(ctx, &corev1.Secret{Name: testCredsSecretName, Namespace: credsNamespace})
 		policy := createAccessPolicy(ctx, "condition-policy", "")
 		_ = createPolicyRefExposure(ctx, "condition-ref", policy.Name)
 
@@ -376,16 +379,16 @@ var _ = Describe("CloudflareAccessPolicy Controller", func() {
 
 func createAccessPolicy(ctx context.Context, name, policyName string) *cfztv1alpha1.CloudflareAccessPolicy {
 	policy := &cfztv1alpha1.CloudflareAccessPolicy{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Name: name,
 		Spec: cfztv1alpha1.CloudflareAccessPolicySpec{
 			CredentialsSecretRef: cfztv1alpha1.AccessPolicyCredentialsSecretRef{
-				Name:      "cloudflare-credentials",
-				Namespace: "cfzt-system",
+				Name:      testCredsSecretName,
+				Namespace: testCredsNamespace,
 			},
 			PolicyName: policyName,
-			Decision:   "allow",
+			Decision:   testDecisionAllow,
 			Rules: cfztv1alpha1.AccessRules{
-				Include: []cfztv1alpha1.AccessRule{{EmailDomain: "example.com"}},
+				Include: []cfztv1alpha1.AccessRule{{EmailDomain: testZoneName}},
 			},
 		},
 	}
@@ -400,33 +403,33 @@ func fetchAccessPolicy(ctx context.Context, name string) *cfztv1alpha1.Cloudflar
 }
 
 func reconcileAccessPolicy(ctx context.Context, reconciler *CloudflareAccessPolicyReconciler, name string) {
-	_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name}})
+	_, err := reconciler.Reconcile(ctx, reconcile.Request{Name: name})
 	Expect(err).NotTo(HaveOccurred())
 	current := &cfztv1alpha1.CloudflareAccessPolicy{}
 	if err := k8sClient.Get(ctx, types.NamespacedName{Name: name}, current); err != nil {
 		return
 	}
 	if current.DeletionTimestamp.IsZero() && len(current.Status.Conditions) == 0 {
-		_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: name}})
+		_, err = reconciler.Reconcile(ctx, reconcile.Request{Name: name})
 		Expect(err).NotTo(HaveOccurred())
 	}
 }
 
 func createPolicyRefExposure(ctx context.Context, name, policyName string) *cfztv1alpha1.CloudflareExposure {
 	exposure := &cfztv1alpha1.CloudflareExposure{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: exposureTestNamespace},
+		Name: name, Namespace: exposureTestNamespace,
 		Spec: cfztv1alpha1.CloudflareExposureSpec{
 			Hostname:  name + ".example.com",
 			TunnelRef: cfztv1alpha1.TunnelRef{Name: "policy-ref-" + policyName},
 			Origin: &cfztv1alpha1.OriginSpec{
-				Protocol: "http",
+				Protocol: testProtocolHTTP,
 				Host:     name + "." + exposureTestNamespace + ".svc.cluster.local",
 				Port:     8096,
 			},
 			Access: cfztv1alpha1.AccessSpec{
 				Enabled: true,
 				Applications: []cfztv1alpha1.AccessApplicationTarget{{
-					Name:    "root",
+					Name:    testRootName,
 					Domains: []cfztv1alpha1.AccessApplicationDomain{cfztv1alpha1.AccessApplicationDomain(name + ".example.com")},
 					Policies: []cfztv1alpha1.AccessApplicationPolicyBinding{{
 						PolicyRef: cfztv1alpha1.AccessPolicyRef{Name: policyName},

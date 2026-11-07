@@ -16,7 +16,7 @@ func TestFakeAccessPolicyCreateGetDelete(t *testing.T) {
 
 	created, err := pols.Create(ctx, cloudflare.AccessPolicyInput{
 		Name:     "allow-staff",
-		Decision: "allow",
+		Decision: testDecisionAllow,
 		Include:  []cloudflare.AccessRule{{EmailDomain: "example.com"}},
 	})
 	if err != nil {
@@ -50,7 +50,7 @@ func TestFakeAccessPolicyListByName(t *testing.T) {
 
 	a, err := pols.Create(ctx, cloudflare.AccessPolicyInput{
 		Name:     "alpha",
-		Decision: "allow",
+		Decision: testDecisionAllow,
 		Include:  []cloudflare.AccessRule{{Everyone: true}},
 	})
 	if err != nil {
@@ -116,8 +116,8 @@ func TestFakeAccessPolicyUpdateRulesIdempotent(t *testing.T) {
 	pols := fc.AccessPolicies()
 
 	in := cloudflare.AccessPolicyInput{
-		Name:     "homelab",
-		Decision: "allow",
+		Name:     testTunnelName,
+		Decision: testDecisionAllow,
 		Include:  []cloudflare.AccessRule{{Email: "andrew@reid.ee"}},
 	}
 	created, err := pols.Create(ctx, in)

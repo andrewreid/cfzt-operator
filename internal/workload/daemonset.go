@@ -28,11 +28,9 @@ func Labels(tunnelName string) map[string]string {
 // DaemonSet returns the desired cloudflared DaemonSet for a tunnel.
 func DaemonSet(tunnel *cfztv1alpha1.CloudflareTunnel, token string) *appsv1.DaemonSet {
 	ds := &appsv1.DaemonSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      naming.DaemonSetName(tunnel.Name),
-			Namespace: tunnel.Spec.Cloudflared.Namespace,
-			Labels:    Labels(tunnel.Name),
-		},
+		Name:      naming.DaemonSetName(tunnel.Name),
+		Namespace: tunnel.Spec.Cloudflared.Namespace,
+		Labels:    Labels(tunnel.Name),
 	}
 	ApplyDaemonSet(ds, tunnel, token)
 	return ds
@@ -62,11 +60,9 @@ func ApplyDaemonSet(ds *appsv1.DaemonSet, tunnel *cfztv1alpha1.CloudflareTunnel,
 		},
 	}
 	ds.Spec.Template = corev1.PodTemplateSpec{
-		ObjectMeta: metav1.ObjectMeta{
-			Labels: labels,
-			Annotations: map[string]string{
-				TokenChecksumAnnotation: TokenChecksum(token),
-			},
+		Labels: labels,
+		Annotations: map[string]string{
+			TokenChecksumAnnotation: TokenChecksum(token),
 		},
 		Spec: corev1.PodSpec{
 			HostNetwork:                  tunnel.Spec.Cloudflared.HostNetwork,
@@ -92,10 +88,8 @@ func ApplyDaemonSet(ds *appsv1.DaemonSet, tunnel *cfztv1alpha1.CloudflareTunnel,
 							Name: "TUNNEL_TOKEN",
 							ValueFrom: &corev1.EnvVarSource{
 								SecretKeyRef: &corev1.SecretKeySelector{
-									LocalObjectReference: corev1.LocalObjectReference{
-										Name: naming.TokenSecretName(tunnel.Name),
-									},
-									Key: naming.TokenSecretKey,
+									Name: naming.TokenSecretName(tunnel.Name),
+									Key:  naming.TokenSecretKey,
 								},
 							},
 						},
@@ -131,11 +125,9 @@ func dnsPolicy(hostNetwork bool) corev1.DNSPolicy {
 
 func httpProbe(path string, periodSeconds int32) *corev1.Probe {
 	return &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			HTTPGet: &corev1.HTTPGetAction{
-				Path: path,
-				Port: intstr.FromInt32(2000),
-			},
+		HTTPGet: &corev1.HTTPGetAction{
+			Path: path,
+			Port: intstr.FromInt32(2000),
 		},
 		PeriodSeconds:    periodSeconds,
 		TimeoutSeconds:   1,

@@ -1,6 +1,6 @@
 module github.com/andrewreid/cfzt-operator
 
-go 1.26.10
+go 1.27.3
 
 require (
 	github.com/cloudflare/cloudflare-go/v4 v4.6.0

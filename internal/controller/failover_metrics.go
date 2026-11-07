@@ -5,6 +5,14 @@ import (
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
+// Metric label names for failover series.
+const (
+	failoverLabelNamespace = "namespace"
+	failoverLabelName      = "name"
+	failoverLabelSiteID    = "site_id"
+	failoverLabelGroup     = "group"
+)
+
 // D26 failover observability. Metrics are labelled by the Exposure's
 // namespace/name and its failover group so an operator can chart which site
 // holds the lease over time and how often promotions / renewals happen.
@@ -19,17 +27,17 @@ var (
 	failoverRoleGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "cfzt_failover_role",
 		Help: "Current DR failover role for a CloudflareExposure (0=Unknown, 1=Standby, 2=Primary).",
-	}, []string{"namespace", "name", "group", "site_id"})
+	}, []string{failoverLabelNamespace, failoverLabelName, failoverLabelGroup, failoverLabelSiteID})
 
 	failoverLeaseRenewTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "cfzt_failover_lease_renew_total",
 		Help: "Total successful DR failover lease renewals by this site.",
-	}, []string{"namespace", "name", "group", "site_id"})
+	}, []string{failoverLabelNamespace, failoverLabelName, failoverLabelGroup, failoverLabelSiteID})
 
 	failoverPromotionTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "cfzt_failover_promotion_total",
 		Help: "Total DR failover promotions to Primary by this site.",
-	}, []string{"namespace", "name", "group", "site_id"})
+	}, []string{failoverLabelNamespace, failoverLabelName, failoverLabelGroup, failoverLabelSiteID})
 
 	// failoverPromotionPending is 1 while a Manual-policy Standby is declining
 	// to auto-promote (expired peer lease, or absent day-1 lease) and a
@@ -38,7 +46,7 @@ var (
 	failoverPromotionPending = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "cfzt_failover_promotion_pending",
 		Help: "1 when a Manual-policy Standby is awaiting a deliberate force-promote, 0 otherwise.",
-	}, []string{"namespace", "name", "group", "site_id"})
+	}, []string{failoverLabelNamespace, failoverLabelName, failoverLabelGroup, failoverLabelSiteID})
 )
 
 func init() {
