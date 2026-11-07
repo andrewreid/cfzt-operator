@@ -108,7 +108,7 @@ func (r *CloudflareExposureReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, r.setExposureStatus(ctx, &exposure, exposure.Status.Cloudflare, false, ReasonOriginInvalid, err.Error())
 	}
 	if defaulted {
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: immediateRequeueDelay}, nil
 	}
 
 	if exposure.Spec.Origin == nil {

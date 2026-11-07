@@ -14,7 +14,7 @@ func TestFakeTunnelsCreateGetDelete(t *testing.T) {
 	fc := cloudflare.NewFake()
 	tuns := fc.Tunnels()
 
-	tun, err := tuns.Create(ctx, cloudflare.CreateTunnelInput{Name: "test-tunnel", ConfigSrc: "cloudflare"})
+	tun, err := tuns.Create(ctx, cloudflare.CreateTunnelInput{Name: "test-tunnel", ConfigSrc: testConfigSrcCloudflare})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -48,20 +48,20 @@ func TestTunnelsListString(t *testing.T) {
 	fc := cloudflare.NewFake()
 	tuns := fc.Tunnels()
 
-	_, err := tuns.Create(ctx, cloudflare.CreateTunnelInput{Name: "homelab", ConfigSrc: "cloudflare"})
+	_, err := tuns.Create(ctx, cloudflare.CreateTunnelInput{Name: testTunnelName, ConfigSrc: testConfigSrcCloudflare})
 	if err != nil {
 		t.Fatalf("Create homelab: %v", err)
 	}
-	_, err = tuns.Create(ctx, cloudflare.CreateTunnelInput{Name: "other", ConfigSrc: "cloudflare"})
+	_, err = tuns.Create(ctx, cloudflare.CreateTunnelInput{Name: "other", ConfigSrc: testConfigSrcCloudflare})
 	if err != nil {
 		t.Fatalf("Create other: %v", err)
 	}
 
-	got, err := tuns.List(ctx, "homelab")
+	got, err := tuns.List(ctx, testTunnelName)
 	if err != nil {
 		t.Fatalf("List by name: %v", err)
 	}
-	if len(got) != 1 || got[0].Name != "homelab" {
+	if len(got) != 1 || got[0].Name != testTunnelName {
 		t.Fatalf("List by name = %#v, want only homelab", got)
 	}
 
@@ -79,8 +79,8 @@ func TestFakeTokenIdempotent(t *testing.T) {
 	fc := cloudflare.NewFake()
 	tuns := fc.Tunnels()
 
-	a, _ := tuns.Create(ctx, cloudflare.CreateTunnelInput{Name: "a", ConfigSrc: "cloudflare"})
-	b, _ := tuns.Create(ctx, cloudflare.CreateTunnelInput{Name: "b", ConfigSrc: "cloudflare"})
+	a, _ := tuns.Create(ctx, cloudflare.CreateTunnelInput{Name: "a", ConfigSrc: testConfigSrcCloudflare})
+	b, _ := tuns.Create(ctx, cloudflare.CreateTunnelInput{Name: "b", ConfigSrc: testConfigSrcCloudflare})
 
 	tok1, err := tuns.Token(ctx, a.ID)
 	if err != nil {
@@ -106,12 +106,12 @@ func TestFakeTokenIdempotent(t *testing.T) {
 func TestZoneLongestSuffix(t *testing.T) {
 	zone, ok := cloudflare.LongestMatchingZone([]cloudflare.Zone{
 		{ID: "root", Name: "example.com"},
-		{ID: "apps", Name: "apps.example.com"},
+		{ID: testAppsZoneID, Name: "apps.example.com"},
 	}, "jellyfin.apps.example.com")
 	if !ok {
 		t.Fatal("expected zone match")
 	}
-	if zone.ID != "apps" {
+	if zone.ID != testAppsZoneID {
 		t.Fatalf("zone ID = %q, want apps", zone.ID)
 	}
 }
@@ -120,35 +120,35 @@ func TestFakeAccessAppRoundTripMultipleDomainsAndPolicies(t *testing.T) {
 	ctx := context.Background()
 	fake := cloudflare.NewFake()
 	app, err := fake.AccessApplications().Create(ctx, cloudflare.AccessApplicationInput{
-		Name:        "jellyfin-cfzt",
-		Domains:     []string{"jellyfin.example.com", "jellyfin.example.com/admin"},
-		PolicyUUIDs: []string{"00000000-0000-4000-8000-000000000002", "00000000-0000-4000-8000-000000000001"},
-		Tags:        []string{"managed-by=cfzt-operator", "source-uid=uid-1"},
+		Name:        testAppName,
+		Domains:     []string{testHostname, testAdminDomain},
+		PolicyUUIDs: []string{testUUID2, testUUID1},
+		Tags:        []string{testManagedTag, "source-uid=uid-1"},
 	})
 	if err != nil {
 		t.Fatalf("Create returned error: %v", err)
 	}
-	if app.Domain != "jellyfin.example.com" {
+	if app.Domain != testHostname {
 		t.Fatalf("Domain = %q, want canonical first domain", app.Domain)
 	}
-	if got, want := app.Domains, []string{"jellyfin.example.com", "jellyfin.example.com/admin"}; !reflect.DeepEqual(got, want) {
+	if got, want := app.Domains, []string{testHostname, testAdminDomain}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("Domains = %#v, want %#v", got, want)
 	}
-	if got, want := app.PolicyUUIDs, []string{"00000000-0000-4000-8000-000000000002", "00000000-0000-4000-8000-000000000001"}; !reflect.DeepEqual(got, want) {
+	if got, want := app.PolicyUUIDs, []string{testUUID2, testUUID1}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("PolicyUUIDs = %#v, want %#v", got, want)
 	}
 
-	apps, err := fake.AccessApplications().List(ctx, "jellyfin.example.com")
+	apps, err := fake.AccessApplications().List(ctx, testHostname)
 	if err != nil {
 		t.Fatalf("List returned error: %v", err)
 	}
 	if len(apps) != 1 || apps[0].ID != app.ID {
 		t.Fatalf("apps = %#v, want created app", apps)
 	}
-	if got, want := apps[0].Domains, []string{"jellyfin.example.com", "jellyfin.example.com/admin"}; !reflect.DeepEqual(got, want) {
+	if got, want := apps[0].Domains, []string{testHostname, testAdminDomain}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("Listed Domains = %#v, want %#v", got, want)
 	}
-	if got, want := apps[0].PolicyUUIDs, []string{"00000000-0000-4000-8000-000000000002", "00000000-0000-4000-8000-000000000001"}; !reflect.DeepEqual(got, want) {
+	if got, want := apps[0].PolicyUUIDs, []string{testUUID2, testUUID1}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("Listed PolicyUUIDs = %#v, want %#v", got, want)
 	}
 }
@@ -157,15 +157,15 @@ func TestFakeAccessApplicationsEnsuresTagsImplicitly(t *testing.T) {
 	ctx := context.Background()
 	fake := cloudflare.NewFake()
 	app, err := fake.AccessApplications().Create(ctx, cloudflare.AccessApplicationInput{
-		Name:        "jellyfin-cfzt",
-		Domains:     []string{"jellyfin.example.com"},
-		PolicyUUIDs: []string{"00000000-0000-4000-8000-000000000001"},
-		Tags:        []string{"managed-by=cfzt-operator", "source-uid-0=uid-1"},
+		Name:        testAppName,
+		Domains:     []string{testHostname},
+		PolicyUUIDs: []string{testUUID1},
+		Tags:        []string{testManagedTag, "source-uid-0=uid-1"},
 	})
 	if err != nil {
 		t.Fatalf("Create returned error: %v", err)
 	}
-	if err := fake.AccessTags().Delete(ctx, "managed-by=cfzt-operator"); err != nil {
+	if err := fake.AccessTags().Delete(ctx, testManagedTag); err != nil {
 		t.Fatalf("Create did not implicitly ensure managed-by tag: %v", err)
 	}
 	if err := fake.AccessTags().Delete(ctx, "source-uid-0=uid-1"); err != nil {
@@ -173,15 +173,15 @@ func TestFakeAccessApplicationsEnsuresTagsImplicitly(t *testing.T) {
 	}
 
 	_, err = fake.AccessApplications().Update(ctx, app.ID, cloudflare.AccessApplicationInput{
-		Name:        "jellyfin-cfzt",
-		Domains:     []string{"jellyfin.example.com"},
-		PolicyUUIDs: []string{"00000000-0000-4000-8000-000000000001"},
-		Tags:        []string{"managed-by=cfzt-operator", "source-uid-0=uid-2"},
+		Name:        testAppName,
+		Domains:     []string{testHostname},
+		PolicyUUIDs: []string{testUUID1},
+		Tags:        []string{testManagedTag, "source-uid-0=uid-2"},
 	})
 	if err != nil {
 		t.Fatalf("Update returned error: %v", err)
 	}
-	if err := fake.AccessTags().Delete(ctx, "managed-by=cfzt-operator"); err != nil {
+	if err := fake.AccessTags().Delete(ctx, testManagedTag); err != nil {
 		t.Fatalf("Update did not implicitly ensure managed-by tag: %v", err)
 	}
 	if err := fake.AccessTags().Delete(ctx, "source-uid-0=uid-2"); err != nil {
@@ -195,16 +195,16 @@ func TestFakeAccessApplicationsBroadDiscoveryIncludesPathApps(t *testing.T) {
 
 	_, err := fake.AccessApplications().Create(ctx, cloudflare.AccessApplicationInput{
 		Name:        "jellyfin-root",
-		Domains:     []string{"jellyfin.example.com"},
-		PolicyUUIDs: []string{"00000000-0000-4000-8000-000000000001"},
+		Domains:     []string{testHostname},
+		PolicyUUIDs: []string{testUUID1},
 	})
 	if err != nil {
 		t.Fatalf("Create root: %v", err)
 	}
 	_, err = fake.AccessApplications().Create(ctx, cloudflare.AccessApplicationInput{
 		Name:        "jellyfin-admin",
-		Domains:     []string{"jellyfin.example.com/admin"},
-		PolicyUUIDs: []string{"00000000-0000-4000-8000-000000000002"},
+		Domains:     []string{testAdminDomain},
+		PolicyUUIDs: []string{testUUID2},
 	})
 	if err != nil {
 		t.Fatalf("Create path app: %v", err)
@@ -218,7 +218,7 @@ func TestFakeAccessApplicationsBroadDiscoveryIncludesPathApps(t *testing.T) {
 		t.Fatalf("Create other: %v", err)
 	}
 
-	apps, err := fake.AccessApplications().List(ctx, "jellyfin.example.com")
+	apps, err := fake.AccessApplications().List(ctx, testHostname)
 	if err != nil {
 		t.Fatalf("List returned error: %v", err)
 	}
@@ -238,9 +238,9 @@ func TestFakeDNSRecordIdempotent(t *testing.T) {
 	ctx := context.Background()
 	fake := cloudflare.NewFake()
 	record, err := fake.DNSRecords().Create(ctx, cloudflare.DNSRecordInput{
-		ZoneID:  "zone-1",
-		Name:    "jellyfin.example.com",
-		Type:    "CNAME",
+		ZoneID:  testZoneID,
+		Name:    testHostname,
+		Type:    testRecordTypeCNAME,
 		Content: "tunnel.cfargotunnel.com",
 		Proxied: true,
 		Comment: "managed-by=cfzt-operator source-uid=uid-1",
@@ -249,9 +249,9 @@ func TestFakeDNSRecordIdempotent(t *testing.T) {
 		t.Fatalf("Create returned error: %v", err)
 	}
 	updated, err := fake.DNSRecords().Update(ctx, record.ID, cloudflare.DNSRecordInput{
-		ZoneID:  "zone-1",
-		Name:    "jellyfin.example.com",
-		Type:    "CNAME",
+		ZoneID:  testZoneID,
+		Name:    testHostname,
+		Type:    testRecordTypeCNAME,
 		Content: "new.cfargotunnel.com",
 		Proxied: true,
 		Comment: record.Comment,
@@ -268,18 +268,18 @@ func TestFakeDNSRecordIDStable(t *testing.T) {
 	ctx := context.Background()
 	fake := cloudflare.NewFake()
 	created, err := fake.DNSRecords().Create(ctx, cloudflare.DNSRecordInput{
-		ZoneID:  "zone-1",
-		Name:    "_cfzt-lease.deadbeef.example.com",
-		Type:    "TXT",
+		ZoneID:  testZoneID,
+		Name:    testLeaseRecordName,
+		Type:    testRecordTypeTXT,
 		Content: "v=1 site=primary tunnel=t-1 exp=200 renewed=100",
 	})
 	if err != nil {
 		t.Fatalf("Create returned error: %v", err)
 	}
 	updated, err := fake.DNSRecords().Update(ctx, created.ID, cloudflare.DNSRecordInput{
-		ZoneID:  "zone-1",
-		Name:    "_cfzt-lease.deadbeef.example.com",
-		Type:    "TXT",
+		ZoneID:  testZoneID,
+		Name:    testLeaseRecordName,
+		Type:    testRecordTypeTXT,
 		Content: "v=1 site=primary tunnel=t-1 exp=260 renewed=130",
 	})
 	if err != nil {
@@ -288,7 +288,7 @@ func TestFakeDNSRecordIDStable(t *testing.T) {
 	if updated.ID != created.ID {
 		t.Fatalf("Update rotated record id: got %q, want stable %q", updated.ID, created.ID)
 	}
-	listed, err := fake.DNSRecords().List(ctx, "zone-1", "_cfzt-lease.deadbeef.example.com", "TXT")
+	listed, err := fake.DNSRecords().List(ctx, testZoneID, testLeaseRecordName, testRecordTypeTXT)
 	if err != nil {
 		t.Fatalf("List returned error: %v", err)
 	}
@@ -306,9 +306,9 @@ func TestFakeDNSCreateAllowsDuplicateTXT(t *testing.T) {
 	ctx := context.Background()
 	fake := cloudflare.NewFake()
 	in := cloudflare.DNSRecordInput{
-		ZoneID:  "zone-1",
-		Name:    "_cfzt-lease.deadbeef.example.com",
-		Type:    "TXT",
+		ZoneID:  testZoneID,
+		Name:    testLeaseRecordName,
+		Type:    testRecordTypeTXT,
 		Content: "v=1 site=primary tunnel=t-1 exp=200 renewed=100",
 	}
 	first, err := fake.DNSRecords().Create(ctx, in)
@@ -323,7 +323,7 @@ func TestFakeDNSCreateAllowsDuplicateTXT(t *testing.T) {
 	if first.ID == second.ID {
 		t.Fatalf("expected distinct record IDs, got %q twice", first.ID)
 	}
-	listed, _ := fake.DNSRecords().List(ctx, "zone-1", "_cfzt-lease.deadbeef.example.com", "TXT")
+	listed, _ := fake.DNSRecords().List(ctx, testZoneID, testLeaseRecordName, testRecordTypeTXT)
 	if len(listed) != 2 {
 		t.Fatalf("List len = %d, want 2 (duplicate TXT allowed, mirrors real Cloudflare)", len(listed))
 	}
@@ -333,9 +333,9 @@ func TestFakeDNSRecordDeleteRequiresZoneID(t *testing.T) {
 	ctx := context.Background()
 	fake := cloudflare.NewFake()
 	record, err := fake.DNSRecords().Create(ctx, cloudflare.DNSRecordInput{
-		ZoneID:  "zone-1",
-		Name:    "jellyfin.example.com",
-		Type:    "CNAME",
+		ZoneID:  testZoneID,
+		Name:    testHostname,
+		Type:    testRecordTypeCNAME,
 		Content: "tunnel.cfargotunnel.com",
 		Proxied: true,
 	})
@@ -345,7 +345,7 @@ func TestFakeDNSRecordDeleteRequiresZoneID(t *testing.T) {
 	if err := fake.DNSRecords().Delete(ctx, "zone-2", record.ID); !errors.Is(err, cloudflare.ErrNotFound) {
 		t.Fatalf("Delete wrong zone = %v, want ErrNotFound", err)
 	}
-	if err := fake.DNSRecords().Delete(ctx, "zone-1", record.ID); err != nil {
+	if err := fake.DNSRecords().Delete(ctx, testZoneID, record.ID); err != nil {
 		t.Fatalf("Delete correct zone returned error: %v", err)
 	}
 }
@@ -373,12 +373,12 @@ func TestFakeZonesResolveCachesAndRefreshesOnMiss(t *testing.T) {
 		t.Fatalf("cached resolve List calls = %d, want 1", calls)
 	}
 
-	fake.AddZone("apps", "apps.internal")
+	fake.AddZone(testAppsZoneID, "apps.internal")
 	zone, err = fake.Zones().Resolve(ctx, "jellyfin.apps.internal")
 	if err != nil {
 		t.Fatalf("Resolve cache miss returned error: %v", err)
 	}
-	if zone.ID != "apps" {
+	if zone.ID != testAppsZoneID {
 		t.Fatalf("zone ID after miss = %q, want apps", zone.ID)
 	}
 	if calls := fake.ZoneListCalls(); calls != 2 {
@@ -389,7 +389,7 @@ func TestFakeZonesResolveCachesAndRefreshesOnMiss(t *testing.T) {
 func TestFakeConfigurationsPutOverwrites(t *testing.T) {
 	ctx := context.Background()
 	fake := cloudflare.NewFake()
-	tunnel, err := fake.Tunnels().Create(ctx, cloudflare.CreateTunnelInput{Name: "homelab", ConfigSrc: "cloudflare"})
+	tunnel, err := fake.Tunnels().Create(ctx, cloudflare.CreateTunnelInput{Name: testTunnelName, ConfigSrc: testConfigSrcCloudflare})
 	if err != nil {
 		t.Fatalf("Create tunnel returned error: %v", err)
 	}

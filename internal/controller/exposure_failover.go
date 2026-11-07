@@ -42,6 +42,12 @@ const failoverAcquireJitter = 5 * time.Second
 // duplicate lease records, so the next reconcile acts on the converged set.
 const failoverResolveRequeue = 2 * time.Second
 
+// immediateRequeueDelay replaces the deprecated ctrl.Result{Requeue: true}
+// (rate-limited requeue, first retry ~5ms) for follow-up reconciles after a
+// local write that needs one more pass. RequeueAfter forgets the item's
+// rate-limit backoff; that is deliberate because these are one-shot follow-ups.
+const immediateRequeueDelay = 5 * time.Millisecond
+
 // exposureOwner returns the ownership identity to stamp on the shared
 // Cloudflare resources for an Exposure. Failover Exposures use the
 // cross-cluster group ID (D26) so either site's writes pass the mutation

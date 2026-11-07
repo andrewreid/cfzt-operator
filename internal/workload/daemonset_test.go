@@ -6,7 +6,6 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	cfztv1alpha1 "github.com/andrewreid/cfzt-operator/api/v1alpha1"
 	"github.com/andrewreid/cfzt-operator/internal/naming"
@@ -92,7 +91,7 @@ func TestHostNetworkPropagates(t *testing.T) {
 
 func testTunnel() *cfztv1alpha1.CloudflareTunnel {
 	return &cfztv1alpha1.CloudflareTunnel{
-		ObjectMeta: metav1.ObjectMeta{Name: "homelab"},
+		Name: "homelab",
 		Spec: cfztv1alpha1.CloudflareTunnelSpec{
 			TunnelName: "homelab-rke2",
 			Cloudflared: cfztv1alpha1.CloudflaredSpec{

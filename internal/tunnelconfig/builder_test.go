@@ -4,7 +4,6 @@ import (
 	"strings"
 	"testing"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	cfztv1alpha1 "github.com/andrewreid/cfzt-operator/api/v1alpha1"
@@ -194,7 +193,7 @@ func indexOf(hosts []string, host string) int {
 
 func exposure(name, hostname, host, uid string) cfztv1alpha1.CloudflareExposure {
 	return cfztv1alpha1.CloudflareExposure{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "media", UID: types.UID(uid)},
+		Name: name, Namespace: "media", UID: types.UID(uid),
 		Spec: cfztv1alpha1.CloudflareExposureSpec{
 			Hostname:  hostname,
 			TunnelRef: cfztv1alpha1.TunnelRef{Name: "homelab"},

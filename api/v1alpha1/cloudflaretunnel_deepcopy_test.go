@@ -29,13 +29,9 @@ import (
 
 func TestCloudflareTunnelDeepCopy(t *testing.T) {
 	original := &cfztv1alpha1.CloudflareTunnel{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "cfzt.reid.ee/v1alpha1",
-			Kind:       "CloudflareTunnel",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "homelab",
-		},
+		APIVersion: "cfzt.reid.ee/v1alpha1",
+		Kind:       "CloudflareTunnel",
+		Name:       "homelab",
 		Spec: cfztv1alpha1.CloudflareTunnelSpec{
 			CredentialsSecretRef: cfztv1alpha1.CredentialsSecretRef{
 				Name: "cloudflare-credentials",
@@ -132,11 +128,9 @@ func TestCloudflareTunnelDeepCopy(t *testing.T) {
 
 func TestCloudflareTunnelRouteDeepCopy(t *testing.T) {
 	original := &cfztv1alpha1.CloudflareTunnelRoute{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "cfzt.reid.ee/v1alpha1",
-			Kind:       "CloudflareTunnelRoute",
-		},
-		ObjectMeta: metav1.ObjectMeta{Name: "lan"},
+		APIVersion: "cfzt.reid.ee/v1alpha1",
+		Kind:       "CloudflareTunnelRoute",
+		Name:       "lan",
 		Spec: cfztv1alpha1.CloudflareTunnelRouteSpec{
 			TunnelRef:        cfztv1alpha1.TunnelRouteTunnelRef{Name: "homelab"},
 			Network:          "172.16.0.0/24",

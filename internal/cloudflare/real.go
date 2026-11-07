@@ -760,12 +760,12 @@ func accessNewBody(in AccessApplicationInput) zero_trust.AccessApplicationNewPar
 		})
 	}
 	return zero_trust.AccessApplicationNewParamsBodySelfHostedApplication{
-		Domain:            cf.F(accessApplicationPrimaryDomain(domains)),
-		Type:              cf.F(zero_trust.ApplicationTypeSelfHosted),
-		Name:              cf.F(in.Name),
-		Policies:          cf.F(policies),
-		SelfHostedDomains: cf.F(accessApplicationSelfHostedDomains(domains)),
-		Tags:              cf.F(in.Tags),
+		Domain:       cf.F(accessApplicationPrimaryDomain(domains)),
+		Type:         cf.F(zero_trust.ApplicationTypeSelfHosted),
+		Name:         cf.F(in.Name),
+		Policies:     cf.F(policies),
+		Destinations: cf.F(accessNewDestinations(domains)),
+		Tags:         cf.F(in.Tags),
 	}
 }
 
@@ -780,17 +780,17 @@ func accessUpdateBody(in AccessApplicationInput) zero_trust.AccessApplicationUpd
 		})
 	}
 	return zero_trust.AccessApplicationUpdateParamsBodySelfHostedApplication{
-		Domain:            cf.F(accessApplicationPrimaryDomain(domains)),
-		Type:              cf.F(zero_trust.ApplicationTypeSelfHosted),
-		Name:              cf.F(in.Name),
-		Policies:          cf.F(policies),
-		SelfHostedDomains: cf.F(accessApplicationSelfHostedDomains(domains)),
-		Tags:              cf.F(in.Tags),
+		Domain:       cf.F(accessApplicationPrimaryDomain(domains)),
+		Type:         cf.F(zero_trust.ApplicationTypeSelfHosted),
+		Name:         cf.F(in.Name),
+		Policies:     cf.F(policies),
+		Destinations: cf.F(accessUpdateDestinations(domains)),
+		Tags:         cf.F(in.Tags),
 	}
 }
 
 func accessAppFromListResponse(item zero_trust.AccessApplicationListResponse) AccessApplication {
-	domains := accessApplicationDomainsFromAny(item.SelfHostedDomains)
+	domains := accessApplicationResponseDomains(item.Destinations, item.SelfHostedDomains)
 	policyUUIDs := accessApplicationPolicyIDs(item.Policies)
 	tags := stringSlice(item.Tags)
 	if selfHosted, ok := item.AsUnion().(zero_trust.AccessApplicationListResponseSelfHostedApplication); ok {
@@ -815,7 +815,7 @@ func accessAppFromListResponse(item zero_trust.AccessApplicationListResponse) Ac
 }
 
 func accessAppFromNewResponse(resp *zero_trust.AccessApplicationNewResponse) *AccessApplication {
-	domains := accessApplicationDomainsFromAny(resp.SelfHostedDomains)
+	domains := accessApplicationResponseDomains(resp.Destinations, resp.SelfHostedDomains)
 	policyUUIDs := accessApplicationPolicyIDs(resp.Policies)
 	tags := stringSlice(resp.Tags)
 	if selfHosted, ok := resp.AsUnion().(zero_trust.AccessApplicationNewResponseSelfHostedApplication); ok {
@@ -840,7 +840,7 @@ func accessAppFromNewResponse(resp *zero_trust.AccessApplicationNewResponse) *Ac
 }
 
 func accessAppFromUpdateResponse(resp *zero_trust.AccessApplicationUpdateResponse) *AccessApplication {
-	domains := accessApplicationDomainsFromAny(resp.SelfHostedDomains)
+	domains := accessApplicationResponseDomains(resp.Destinations, resp.SelfHostedDomains)
 	policyUUIDs := accessApplicationPolicyIDs(resp.Policies)
 	tags := stringSlice(resp.Tags)
 	if selfHosted, ok := resp.AsUnion().(zero_trust.AccessApplicationUpdateResponseSelfHostedApplication); ok {
@@ -879,21 +879,83 @@ func accessApplicationPolicyIDs(value any) []string {
 	}
 }
 
+// accessApplicationResponseDomains reads the domain/path list from an Access
+// application response. Public `destinations` win; the deprecated
+// `self_hosted_domains` is the fallback. Absent, malformed or non-public
+// entries are ignored.
+func accessApplicationResponseDomains(destinations, selfHosted any) []string {
+	if out := accessApplicationPublicDestinationURIs(destinations); len(out) > 0 {
+		return out
+	}
+	return accessApplicationDomainsFromAny(selfHosted)
+}
+
+func accessApplicationPublicDestinationURIs(value any) []string {
+	entries, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+	var out []string
+	for _, entry := range entries {
+		m, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		if typ, _ := m["type"].(string); typ != "public" {
+			continue
+		}
+		if uri, _ := m["uri"].(string); uri != "" {
+			out = append(out, uri)
+		}
+	}
+	return out
+}
+
 func accessApplicationDomainsFromAny(value any) []string {
 	switch domains := value.(type) {
 	case []string:
 		return append([]string(nil), domains...)
+	case []any:
+		var out []string
+		for _, d := range domains {
+			if str, ok := d.(string); ok && str != "" {
+				out = append(out, str)
+			}
+		}
+		return out
 	default:
 		return nil
 	}
 }
 
-func accessApplicationSelfHostedDomains(domains []string) []zero_trust.SelfHostedDomainsParam {
+// accessNewDestinations maps domain/path strings to public Access destinations,
+// the supported replacement for the deprecated self_hosted_domains field.
+func accessNewDestinations(domains []string) []zero_trust.AccessApplicationNewParamsBodySelfHostedApplicationDestinationUnion {
 	if len(domains) == 0 {
 		return nil
 	}
-	out := make([]zero_trust.SelfHostedDomainsParam, 0, len(domains))
-	out = append(out, domains...)
+	out := make([]zero_trust.AccessApplicationNewParamsBodySelfHostedApplicationDestinationUnion, 0, len(domains))
+	for _, d := range domains {
+		out = append(out, zero_trust.AccessApplicationNewParamsBodySelfHostedApplicationDestinationsPublicDestination{
+			Type: cf.F(zero_trust.AccessApplicationNewParamsBodySelfHostedApplicationDestinationsPublicDestinationTypePublic),
+			URI:  cf.F(d),
+		})
+	}
+	return out
+}
+
+// accessUpdateDestinations is the update-body counterpart of accessNewDestinations.
+func accessUpdateDestinations(domains []string) []zero_trust.AccessApplicationUpdateParamsBodySelfHostedApplicationDestinationUnion {
+	if len(domains) == 0 {
+		return nil
+	}
+	out := make([]zero_trust.AccessApplicationUpdateParamsBodySelfHostedApplicationDestinationUnion, 0, len(domains))
+	for _, d := range domains {
+		out = append(out, zero_trust.AccessApplicationUpdateParamsBodySelfHostedApplicationDestinationsPublicDestination{
+			Type: cf.F(zero_trust.AccessApplicationUpdateParamsBodySelfHostedApplicationDestinationsPublicDestinationTypePublic),
+			URI:  cf.F(d),
+		})
+	}
 	return out
 }
 

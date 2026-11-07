@@ -54,16 +54,16 @@ func TestRealClientZoneCacheServesAcrossInstances(t *testing.T) {
 	key := newCacheKey("account-1", "token-1")
 	cache := zoneCacheForCred(key)
 	cache.mu.Lock()
-	cache.zones = []Zone{{ID: "zone-1", Name: "example.com"}}
+	cache.zones = []Zone{{ID: testZoneID, Name: "example.com"}}
 	cache.ready = true
 	cache.mu.Unlock()
 
 	first := &RealClient{cacheKey: key}
 	second := &RealClient{cacheKey: key}
-	if zone, err := first.Zones().Resolve(context.Background(), "app.example.com"); err != nil || zone.ID != "zone-1" {
+	if zone, err := first.Zones().Resolve(context.Background(), "app.example.com"); err != nil || zone.ID != testZoneID {
 		t.Fatalf("first Resolve = (%+v, %v), want zone-1", zone, err)
 	}
-	if zone, err := second.Zones().Resolve(context.Background(), "other.example.com"); err != nil || zone.ID != "zone-1" {
+	if zone, err := second.Zones().Resolve(context.Background(), "other.example.com"); err != nil || zone.ID != testZoneID {
 		t.Fatalf("second Resolve = (%+v, %v), want cached zone-1", zone, err)
 	}
 }
@@ -82,11 +82,11 @@ func TestMapAPIErrorNotFound(t *testing.T) {
 }
 
 func TestAccessApplicationListParamsUsesBroadDomainFilter(t *testing.T) {
-	params := accessApplicationListParams("account-1", "jellyfin.example.com")
+	params := accessApplicationListParams("account-1", testHostname)
 	if params.AccountID.Value != "account-1" {
 		t.Fatalf("AccountID = %q, want account-1", params.AccountID.Value)
 	}
-	if params.Domain.Value != "jellyfin.example.com" {
+	if params.Domain.Value != testHostname {
 		t.Fatalf("Domain = %q, want broad hostname filter", params.Domain.Value)
 	}
 	if params.Exact.Value {
@@ -96,66 +96,66 @@ func TestAccessApplicationListParamsUsesBroadDomainFilter(t *testing.T) {
 
 func TestAccessAppFromListResponseCapturesDomainsAndPolicyIDs(t *testing.T) {
 	app := accessAppFromListResponse(zero_trust.AccessApplicationListResponse{
-		ID:     "app-1",
-		Name:   "jellyfin-cfzt",
-		Domain: "jellyfin.example.com",
+		ID:     testAppID,
+		Name:   testAppName,
+		Domain: testHostname,
 		SelfHostedDomains: []string{
-			"jellyfin.example.com",
-			"jellyfin.example.com/admin",
+			testHostname,
+			testAdminDomain,
 		},
 		Policies: []zero_trust.AccessApplicationListResponseSelfHostedApplicationPolicy{
-			{ID: "policy-2", Precedence: 20},
-			{ID: "policy-1", Precedence: 10},
+			{ID: testPolicy2ID, Precedence: 20},
+			{ID: testPolicy1ID, Precedence: 10},
 		},
 	})
 
-	if !reflect.DeepEqual(app.Domains, []string{"jellyfin.example.com", "jellyfin.example.com/admin"}) {
+	if !reflect.DeepEqual(app.Domains, []string{testHostname, testAdminDomain}) {
 		t.Fatalf("Domains = %#v", app.Domains)
 	}
-	if !reflect.DeepEqual(app.PolicyUUIDs, []string{"policy-1", "policy-2"}) {
+	if !reflect.DeepEqual(app.PolicyUUIDs, []string{testPolicy1ID, testPolicy2ID}) {
 		t.Fatalf("PolicyUUIDs = %#v", app.PolicyUUIDs)
 	}
 }
 
 func TestAccessAppFromNewAndUpdateResponseRoundTrip(t *testing.T) {
 	newResp := &zero_trust.AccessApplicationNewResponse{
-		ID:     "app-1",
-		Name:   "jellyfin-cfzt",
-		Domain: "jellyfin.example.com",
+		ID:     testAppID,
+		Name:   testAppName,
+		Domain: testHostname,
 		SelfHostedDomains: []string{
-			"jellyfin.example.com",
-			"jellyfin.example.com/admin",
+			testHostname,
+			testAdminDomain,
 		},
 		Policies: []zero_trust.AccessApplicationNewResponseSelfHostedApplicationPolicy{
-			{ID: "policy-2", Precedence: 20},
-			{ID: "policy-1", Precedence: 10},
+			{ID: testPolicy2ID, Precedence: 20},
+			{ID: testPolicy1ID, Precedence: 10},
 		},
-		Tags: []string{"managed-by=cfzt-operator"},
+		Tags: []string{testManagedTag},
 	}
 	newApp := accessAppFromNewResponse(newResp)
-	if newApp.Domain != "jellyfin.example.com" {
+	if newApp.Domain != testHostname {
 		t.Fatalf("new Domain = %q", newApp.Domain)
 	}
-	if !reflect.DeepEqual(newApp.Domains, []string{"jellyfin.example.com", "jellyfin.example.com/admin"}) {
+	if !reflect.DeepEqual(newApp.Domains, []string{testHostname, testAdminDomain}) {
 		t.Fatalf("new Domains = %#v", newApp.Domains)
 	}
-	if !reflect.DeepEqual(newApp.PolicyUUIDs, []string{"policy-1", "policy-2"}) {
+	if !reflect.DeepEqual(newApp.PolicyUUIDs, []string{testPolicy1ID, testPolicy2ID}) {
 		t.Fatalf("new PolicyUUIDs = %#v", newApp.PolicyUUIDs)
 	}
 
 	updateResp := &zero_trust.AccessApplicationUpdateResponse{
-		ID:     "app-1",
-		Name:   "jellyfin-cfzt",
-		Domain: "jellyfin.example.com",
+		ID:     testAppID,
+		Name:   testAppName,
+		Domain: testHostname,
 		SelfHostedDomains: []string{
-			"jellyfin.example.com",
-			"jellyfin.example.com/admin",
+			testHostname,
+			testAdminDomain,
 		},
 		Policies: []zero_trust.AccessApplicationUpdateResponseSelfHostedApplicationPolicy{
-			{ID: "policy-2", Precedence: 20},
-			{ID: "policy-1", Precedence: 10},
+			{ID: testPolicy2ID, Precedence: 20},
+			{ID: testPolicy1ID, Precedence: 10},
 		},
-		Tags: []string{"managed-by=cfzt-operator"},
+		Tags: []string{testManagedTag},
 	}
 	updateApp := accessAppFromUpdateResponse(updateResp)
 	if !reflect.DeepEqual(updateApp.Domains, newApp.Domains) {
@@ -169,12 +169,12 @@ func TestAccessAppFromNewAndUpdateResponseRoundTrip(t *testing.T) {
 func TestSelfHostedPolicyIDsSortByPrecedence(t *testing.T) {
 	t.Run("list", func(t *testing.T) {
 		policies := []zero_trust.AccessApplicationListResponseSelfHostedApplicationPolicy{
-			{ID: "policy-2", Precedence: 20},
-			{ID: "policy-1", Precedence: 10},
+			{ID: testPolicy2ID, Precedence: 20},
+			{ID: testPolicy1ID, Precedence: 10},
 		}
 		original := append([]zero_trust.AccessApplicationListResponseSelfHostedApplicationPolicy(nil), policies...)
 
-		if got := selfHostedListPolicyIDs(policies); !reflect.DeepEqual(got, []string{"policy-1", "policy-2"}) {
+		if got := selfHostedListPolicyIDs(policies); !reflect.DeepEqual(got, []string{testPolicy1ID, testPolicy2ID}) {
 			t.Fatalf("selfHostedListPolicyIDs = %#v", got)
 		}
 		if !reflect.DeepEqual(policies, original) {
@@ -184,12 +184,12 @@ func TestSelfHostedPolicyIDsSortByPrecedence(t *testing.T) {
 
 	t.Run("new", func(t *testing.T) {
 		policies := []zero_trust.AccessApplicationNewResponseSelfHostedApplicationPolicy{
-			{ID: "policy-2", Precedence: 20},
-			{ID: "policy-1", Precedence: 10},
+			{ID: testPolicy2ID, Precedence: 20},
+			{ID: testPolicy1ID, Precedence: 10},
 		}
 		original := append([]zero_trust.AccessApplicationNewResponseSelfHostedApplicationPolicy(nil), policies...)
 
-		if got := selfHostedNewPolicyIDs(policies); !reflect.DeepEqual(got, []string{"policy-1", "policy-2"}) {
+		if got := selfHostedNewPolicyIDs(policies); !reflect.DeepEqual(got, []string{testPolicy1ID, testPolicy2ID}) {
 			t.Fatalf("selfHostedNewPolicyIDs = %#v", got)
 		}
 		if !reflect.DeepEqual(policies, original) {
@@ -199,12 +199,12 @@ func TestSelfHostedPolicyIDsSortByPrecedence(t *testing.T) {
 
 	t.Run("update", func(t *testing.T) {
 		policies := []zero_trust.AccessApplicationUpdateResponseSelfHostedApplicationPolicy{
-			{ID: "policy-2", Precedence: 20},
-			{ID: "policy-1", Precedence: 10},
+			{ID: testPolicy2ID, Precedence: 20},
+			{ID: testPolicy1ID, Precedence: 10},
 		}
 		original := append([]zero_trust.AccessApplicationUpdateResponseSelfHostedApplicationPolicy(nil), policies...)
 
-		if got := selfHostedUpdatePolicyIDs(policies); !reflect.DeepEqual(got, []string{"policy-1", "policy-2"}) {
+		if got := selfHostedUpdatePolicyIDs(policies); !reflect.DeepEqual(got, []string{testPolicy1ID, testPolicy2ID}) {
 			t.Fatalf("selfHostedUpdatePolicyIDs = %#v", got)
 		}
 		if !reflect.DeepEqual(policies, original) {
@@ -214,12 +214,12 @@ func TestSelfHostedPolicyIDsSortByPrecedence(t *testing.T) {
 
 	t.Run("get", func(t *testing.T) {
 		policies := []zero_trust.AccessApplicationGetResponseSelfHostedApplicationPolicy{
-			{ID: "policy-2", Precedence: 20},
-			{ID: "policy-1", Precedence: 10},
+			{ID: testPolicy2ID, Precedence: 20},
+			{ID: testPolicy1ID, Precedence: 10},
 		}
 		original := append([]zero_trust.AccessApplicationGetResponseSelfHostedApplicationPolicy(nil), policies...)
 
-		if got := selfHostedGetPolicyIDs(policies); !reflect.DeepEqual(got, []string{"policy-1", "policy-2"}) {
+		if got := selfHostedGetPolicyIDs(policies); !reflect.DeepEqual(got, []string{testPolicy1ID, testPolicy2ID}) {
 			t.Fatalf("selfHostedGetPolicyIDs = %#v", got)
 		}
 		if !reflect.DeepEqual(policies, original) {
@@ -237,5 +237,125 @@ func TestFromAccessRulesRejectsUnsupportedVariants(t *testing.T) {
 	_, err := fromAccessRules([]zero_trust.AccessRule{rule})
 	if !errors.Is(err, ErrUnsupportedAccessRule) {
 		t.Fatalf("fromAccessRules error = %v, want ErrUnsupportedAccessRule", err)
+	}
+}
+
+func TestAccessBodiesSendPublicDestinations(t *testing.T) {
+	in := AccessApplicationInput{
+		Name:        testAppName,
+		Domains:     []string{testHostname, testAdminDomain},
+		PolicyUUIDs: []string{testPolicy1ID},
+	}
+	bodies := map[string]any{
+		"new":    accessNewBody(in),
+		"update": accessUpdateBody(in),
+	}
+	for name, body := range bodies {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got struct {
+				Domain       string              `json:"domain"`
+				Destinations []map[string]string `json:"destinations"`
+				Legacy       []string            `json:"self_hosted_domains"`
+			}
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Fatal(err)
+			}
+			want := []map[string]string{
+				{testKeyType: testDestinationPublic, testKeyURI: testHostname},
+				{testKeyType: testDestinationPublic, testKeyURI: testAdminDomain},
+			}
+			if !reflect.DeepEqual(got.Destinations, want) {
+				t.Fatalf("destinations = %#v, want %#v", got.Destinations, want)
+			}
+			if got.Legacy != nil {
+				t.Fatalf("self_hosted_domains = %#v, want omitted", got.Legacy)
+			}
+			if got.Domain != testHostname {
+				t.Fatalf("domain = %q, want %q", got.Domain, testHostname)
+			}
+		})
+	}
+}
+
+func publicDestinations(uris ...string) []any {
+	out := make([]any, 0, len(uris))
+	for _, uri := range uris {
+		out = append(out, map[string]any{testKeyType: testDestinationPublic, testKeyURI: uri})
+	}
+	return out
+}
+
+func TestAccessResponseDomainsRoundTrip(t *testing.T) {
+	multi := []string{testHostname, testAdminDomain, "*.example.com/app"}
+	legacyOnly := []string{testHostname, testAdminDomain}
+	cases := []struct {
+		name         string
+		destinations any
+		selfHosted   any
+		domain       string
+		want         []string
+	}{
+		{"destinations only", publicDestinations(multi...), nil, testHostname, multi},
+		{"legacy only", nil, legacyOnly, testHostname, legacyOnly},
+		{"legacy only decoded as []any", nil, []any{testHostname, testAdminDomain}, testHostname, legacyOnly},
+		{"both prefers destinations", publicDestinations(multi...), legacyOnly, testHostname, multi},
+		{"neither falls back to domain", nil, nil, testHostname, []string{testHostname}},
+		{"unknown and non-public entries ignored",
+			[]any{
+				"junk",
+				map[string]any{testKeyType: "private", "cidr": "10.0.0.0/8"},
+				map[string]any{testKeyType: testDestinationPublic},
+				map[string]any{testKeyType: testDestinationPublic, testKeyURI: testAdminDomain},
+			}, legacyOnly, testHostname, []string{testAdminDomain}},
+		{"only non-public entries falls back to legacy",
+			[]any{map[string]any{testKeyType: "private", testKeyURI: "x"}}, legacyOnly, testHostname, legacyOnly},
+		{"malformed destinations value", "nope", nil, testHostname, []string{testHostname}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			list := accessAppFromListResponse(zero_trust.AccessApplicationListResponse{
+				ID: testAppID, Name: testAppName, Domain: tc.domain,
+				Destinations: tc.destinations, SelfHostedDomains: tc.selfHosted,
+			})
+			created := accessAppFromNewResponse(&zero_trust.AccessApplicationNewResponse{
+				ID: testAppID, Name: testAppName, Domain: tc.domain,
+				Destinations: tc.destinations, SelfHostedDomains: tc.selfHosted,
+			})
+			updated := accessAppFromUpdateResponse(&zero_trust.AccessApplicationUpdateResponse{
+				ID: testAppID, Name: testAppName, Domain: tc.domain,
+				Destinations: tc.destinations, SelfHostedDomains: tc.selfHosted,
+			})
+			for label, got := range map[string][]string{"list": list.Domains, "new": created.Domains, "update": updated.Domains} {
+				if !reflect.DeepEqual(got, tc.want) {
+					t.Fatalf("%s Domains = %#v, want %#v", label, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// A request built from desired domains must read back identically from a
+// destinations-only response, otherwise multi-path apps would drift forever.
+func TestAccessDestinationsRequestResponseNoDrift(t *testing.T) {
+	desired := []string{testHostname, testAdminDomain, "*.example.com"}
+	raw, err := json.Marshal(accessNewBody(AccessApplicationInput{Name: testAppName, Domains: desired}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var echoed struct {
+		Destinations any `json:"destinations"`
+	}
+	if err := json.Unmarshal(raw, &echoed); err != nil {
+		t.Fatal(err)
+	}
+	app := accessAppFromNewResponse(&zero_trust.AccessApplicationNewResponse{
+		ID: testAppID, Name: testAppName, Domain: testHostname, Destinations: echoed.Destinations,
+	})
+	if !reflect.DeepEqual(app.Domains, desired) {
+		t.Fatalf("Domains = %#v, want %#v", app.Domains, desired)
 	}
 }
